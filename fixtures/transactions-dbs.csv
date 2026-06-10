@@ -1,0 +1,13 @@
+Transaction Date,Amount,Description,Category,Reference
+01/06/2026,-23.50,NTUC FairPrice,groceries,FIX-0001
+02/06/2026,-4.80,Kopitiam,food,FIX-0002
+02/06/2026,-18.20,Grab,transport,FIX-0003
+03/06/2026,-129.00,"Decathlon, Kallang",fitness,FIX-0004
+04/06/2026,6200.00,LUMENWORKS PTE LTD SALARY,income,FIX-0005
+05/06/2026,-17.90,Netflix,subscriptions,FIX-0006
+05/06/2026,-32.00,Boulder Movement,fitness,FIX-0007
+06/06/2026,-8.50,"Maxwell Hawker ""Tian Tian""",food,FIX-0008
+07/06/2026,-260.45,SP Services,utilities,FIX-0009
+not-a-date,-10.00,Malformed row must be skipped,misc,FIX-0010
+08/06/2026,abc,Malformed amount must be skipped,misc,FIX-0011
+08/06/2026,-55.00,Guardian Pharmacy,health,

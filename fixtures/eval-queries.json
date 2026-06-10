@@ -1,0 +1,102 @@
+{
+  "_comment": "M3 retrieval eval: expected parent must be in top-5 for ≥80% of queries. Expected parents are resolved at test time by type + title fragment (IDs are generated at seed).",
+  "queries": [
+    {
+      "query": "how do I feed my sourdough starter",
+      "type": "page",
+      "title_contains": "Sourdough"
+    },
+    { "query": "what was the plan for the tokyo trip", "type": "page", "title_contains": "Tokyo" },
+    { "query": "bouldering grade goal fingerboard", "type": "page", "title_contains": "Climbing" },
+    { "query": "marathon long run weekly mileage", "type": "page", "title_contains": "Marathon" },
+    {
+      "query": "what is my investing policy during a market drawdown",
+      "type": "page",
+      "title_contains": "investing policy"
+    },
+    { "query": "best hawker stalls for chicken rice", "type": "page", "title_contains": "hawker" },
+    {
+      "query": "home server backup and remote access setup",
+      "type": "page",
+      "title_contains": "Home server"
+    },
+    {
+      "query": "meditation streak broken by late night screens",
+      "type": "page",
+      "title_contains": "Meditation"
+    },
+    {
+      "query": "spanish conversation subjunctive practice",
+      "type": "page",
+      "title_contains": "Spanish"
+    },
+    {
+      "query": "should I buy the portrait lens for the fuji",
+      "type": "page",
+      "title_contains": "Photography"
+    },
+    {
+      "query": "kitchen renovation quartz counter quote",
+      "type": "page",
+      "title_contains": "renovation"
+    },
+    {
+      "query": "payments reconciliation rounding refunds",
+      "type": "page",
+      "title_contains": "reconciliation"
+    },
+    { "query": "cherry shrimp betta water change", "type": "page", "title_contains": "Aquarium" },
+    {
+      "query": "rempah curry paste belacan candlenuts",
+      "type": "page",
+      "title_contains": "curry paste"
+    },
+    {
+      "query": "sleep hygiene no caffeine after two pm",
+      "type": "page",
+      "title_contains": "Sleep hygiene"
+    },
+    {
+      "query": "on-call severity one gateway error rate",
+      "type": "page",
+      "title_contains": "On-call"
+    },
+    {
+      "query": "birthday gift ideas for Kai microscope",
+      "type": "page",
+      "title_contains": "Mei's kids"
+    },
+    { "query": "caro-kann opening against e4", "type": "page", "title_contains": "Chess" },
+    { "query": "annual tax reliefs SRS contribution", "type": "page", "title_contains": "tax" },
+    {
+      "query": "houseplant watering monstera schedule",
+      "type": "page",
+      "title_contains": "Houseplant"
+    },
+    {
+      "query": "walnut serving board woodworking project",
+      "type": "page",
+      "title_contains": "Woodworking"
+    },
+    {
+      "query": "should I take the senior role on payments",
+      "type": "decision",
+      "title_contains": "senior role"
+    },
+    {
+      "query": "decision about adopting a cat from the shelter",
+      "type": "decision",
+      "title_contains": "cat"
+    },
+    {
+      "query": "ergonomic chair back pain decision outcome",
+      "type": "decision",
+      "title_contains": "ergonomic chair"
+    },
+    {
+      "query": "NixOS versus Debian for the home server decision",
+      "type": "decision",
+      "title_contains": "NixOS"
+    }
+  ]
+}

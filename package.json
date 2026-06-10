@@ -1,0 +1,24 @@
+{
+  "name": "minime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local-first personal life database with agent access (MCP)",
+  "type": "module",
+  "scripts": {
+    "minime": "bun run src/cli.ts",
+    "test": "bun test",
+    "lint": "biome check --write ."
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "chokidar": "^4.0.3",
+    "croner": "^9.0.0",
+    "postgres": "^3.4.5",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/bun": "^1.2.0"
+  },
+  "trustedDependencies": ["@biomejs/biome"]
+}

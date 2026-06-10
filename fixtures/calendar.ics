@@ -1,0 +1,47 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Fictional Calendar Export//EN
+BEGIN:VEVENT
+UID:evt-standup-20260608@fixture
+DTSTART:20260608T093000Z
+DTEND:20260608T094500Z
+SUMMARY:Team standup
+LOCATION:Zoom
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-1on1-20260609@fixture
+DTSTART;TZID=Asia/Singapore:20260609T140000
+DTEND;TZID=Asia/Singapore:20260609T143000
+SUMMARY:1:1 with Jordan Lee
+LOCATION:Lumenworks 12F
+ATTENDEE;CN=Jordan Lee:mailto:jordan.lee@lumenworks.example
+ATTENDEE;CN=Alex Tan:mailto:alex.tan@lumenworks.example
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-deepwork-20260610@fixture
+DTSTART:20260610T010000Z
+DTEND:20260610T030000Z
+SUMMARY:Deep work: reconciliation milestone two
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-allday-20260612@fixture
+DTSTART:20260612
+SUMMARY:Mum's birthday
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-folded-20260613@fixture
+DTSTART:20260613T110000Z
+DTEND:20260613T120000Z
+SUMMARY:Lunch with Tom Becker to hear about the robotics startup and
+  catch up on San Francisco life
+END:VEVENT
+BEGIN:VEVENT
+DTSTART:20260614T080000Z
+SUMMARY:Malformed event with no UID — must be skipped not fatal
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-badstart-20260615@fixture
+DTSTART:not-a-date
+SUMMARY:Malformed DTSTART — must be skipped not fatal
+END:VEVENT
+END:VCALENDAR

@@ -1,0 +1,14 @@
+{
+  "account_label": "dbs-main",
+  "currency": "SGD",
+  "has_header": true,
+  "columns": {
+    "date": "Transaction Date",
+    "amount": "Amount",
+    "merchant": "Description",
+    "category": "Category",
+    "external_ref": "Reference"
+  },
+  "date_format": "DD/MM/YYYY",
+  "sign_convention": "negative_is_spend"
+}

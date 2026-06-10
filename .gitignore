@@ -1,0 +1,14 @@
+# secrets — never committed (spec §12)
+.env
+.env.*
+!.env.example
+
+# owner data — files are the archive, but not in this repo (spec §5)
+data/*
+!data/**/.gitkeep
+
+# runtime
+node_modules/
+db-dump/
+*.log
+.DS_Store

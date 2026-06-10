@@ -1,0 +1,22 @@
+# Preferred runtime per spec §4 when Docker is available.
+# On boxes without Docker, `make up` falls back to Homebrew Postgres (see Makefile + DECISIONS.md).
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: minime-db
+    environment:
+      POSTGRES_USER: minime
+      POSTGRES_PASSWORD: minime
+      POSTGRES_DB: minime
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - minime-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U minime"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  minime-pgdata:
