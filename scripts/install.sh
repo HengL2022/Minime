@@ -130,19 +130,27 @@ provision_linux_native() {
       die 24 postgres "apt-get install postgresql-16 postgresql-16-pgvector failed" \
         "apt-get install postgresql-16 postgresql-16-pgvector (to see why), then re-run"
   fi
-  local found_port
-  found_port="$(linux_pg16_port)"
-  [ -n "$found_port" ] && PG_PORT="$found_port"
+  # Start exactly the 16/main cluster — never the generic 'postgresql' unit, which boots
+  # every configured cluster (GitHub runners ship a stopped PG14 that would grab 5432).
   if has_systemd; then
-    $SUDO systemctl enable --now "postgresql@16-main" >/dev/null 2>&1 || $SUDO systemctl enable --now postgresql >/dev/null 2>&1
+    $SUDO systemctl enable --now "postgresql@16-main" >/dev/null 2>&1 ||
+      $SUDO pg_ctlcluster 16 main start 2>/dev/null || true
   else
     $SUDO pg_ctlcluster 16 main start 2>/dev/null || true # exit 2 = already running
   fi
+  # All bootstrap SQL is pinned to the 16/main cluster via postgresql-common, so a foreign
+  # cluster on 5432 can never receive it; the app port comes from the server itself.
+  super_psql() { $SUDO -u postgres psql --cluster 16/main -d "$1" "${@:2}"; }
+  local found_port
+  found_port="$($SUDO -u postgres psql --cluster 16/main -d postgres -qAt -c 'show port' 2>/dev/null)"
+  [ -z "$found_port" ] && found_port="$(linux_pg16_port)"
+  [ -n "$found_port" ] && PG_PORT="$found_port"
   wait_pg_ready ||
-    die 20 postgres "Postgres did not become ready on localhost:$PG_PORT within 60s" \
+    die 20 postgres "Postgres 16/main did not become ready on localhost:$PG_PORT within 60s" \
       "pg_lsclusters; journalctl -u postgresql@16-main (or /var/log/postgresql/)"
-  super_psql() { $SUDO -u postgres psql -p "$PG_PORT" -d "$1" "${@:2}"; }
-  ensure_pg_objects
+  ensure_pg_objects ||
+    die 20 postgres "bootstrap SQL failed against cluster 16/main" \
+      "sudo -u postgres psql --cluster 16/main -d postgres (then re-run scripts/install.sh)"
 }
 
 if pg_provisioned; then
@@ -247,16 +255,21 @@ else
     degrade "could not install/start ollama" "absent (search=FTS-only, inbox=review-queue)" \
       "install from ollama.com, then: ollama pull $EMBED_MODEL && ollama pull $CLASSIFY_MODEL && make embed"
   else
-    PULLED="" MISSING=""
     for model in $PULL_MODELS; do
-      if pull_model "$model"; then PULLED="$PULLED $model"; else MISSING="$MISSING $model"; fi
+      pull_model "$model" || true # absence is judged below, not per-pull
+    done
+    # The runtime needs BOTH models; degrade if either is absent for any reason
+    # (pull failure, timeout, or a narrowed MINIME_PULL_MODELS).
+    MISSING=""
+    for model in "$EMBED_MODEL" "$CLASSIFY_MODEL"; do
+      ollama_has_model "$model" || MISSING="$MISSING $model"
     done
     if [ -n "$MISSING" ]; then
-      degrade "model pull failed for:$MISSING" "partial (have:${PULLED:- none}; missing:$MISSING)" \
+      degrade "required model(s) absent:$MISSING" "partial (missing:$MISSING)" \
         "ollama pull$MISSING && make embed"
     else
-      SUMMARY_OLLAMA="ok ($(echo "$PULL_MODELS" | tr ' ' ','))"
-      line OK ollama "server up, models present:$PULLED"
+      SUMMARY_OLLAMA="ok ($EMBED_MODEL,$CLASSIFY_MODEL)"
+      line OK ollama "server up, models present: $EMBED_MODEL $CLASSIFY_MODEL"
     fi
   fi
 fi
