@@ -130,24 +130,32 @@ provision_linux_native() {
       die 24 postgres "apt-get install postgresql-16 postgresql-16-pgvector failed" \
         "apt-get install postgresql-16 postgresql-16-pgvector (to see why), then re-run"
   fi
+  # Some images (e.g. GitHub runners with a preexisting PG14) end up without a 16/main
+  # cluster after package install — create it explicitly rather than assume postinst did.
+  if [ -z "$(linux_pg16_port)" ]; then
+    note "no 16/main cluster found — creating one"
+    $SUDO pg_createcluster 16 main >/dev/null 2>&1
+  fi
   # Start exactly the 16/main cluster — never the generic 'postgresql' unit, which boots
-  # every configured cluster (GitHub runners ship a stopped PG14 that would grab 5432).
+  # every configured cluster (a stopped PG14 would grab 5432).
   if has_systemd; then
     $SUDO systemctl enable --now "postgresql@16-main" >/dev/null 2>&1 ||
       $SUDO pg_ctlcluster 16 main start 2>/dev/null || true
   else
     $SUDO pg_ctlcluster 16 main start 2>/dev/null || true # exit 2 = already running
   fi
-  # All bootstrap SQL is pinned to the 16/main cluster via postgresql-common, so a foreign
-  # cluster on 5432 can never receive it; the app port comes from the server itself.
-  super_psql() { $SUDO -u postgres psql --cluster 16/main -d "$1" "${@:2}"; }
+  # Cluster config (not a live query) is the source of truth for the app's TCP port;
+  # all bootstrap SQL is pinned to 16/main via postgresql-common's --cluster wrapper.
   local found_port
-  found_port="$($SUDO -u postgres psql --cluster 16/main -d postgres -qAt -c 'show port' 2>/dev/null)"
-  [ -z "$found_port" ] && found_port="$(linux_pg16_port)"
+  found_port="$(linux_pg16_port)"
   [ -n "$found_port" ] && PG_PORT="$found_port"
-  wait_pg_ready ||
+  super_psql() { $SUDO -u postgres psql --cluster 16/main -d "$1" "${@:2}"; }
+  if ! wait_pg_ready; then
+    note "diagnostics: $(pg_lsclusters 2>/dev/null | tr '\n' ' | ')"
+    note "$(tail -3 /var/log/postgresql/postgresql-16-main.log 2>/dev/null | tr '\n' ' | ')"
     die 20 postgres "Postgres 16/main did not become ready on localhost:$PG_PORT within 60s" \
       "pg_lsclusters; journalctl -u postgresql@16-main (or /var/log/postgresql/)"
+  fi
   ensure_pg_objects ||
     die 20 postgres "bootstrap SQL failed against cluster 16/main" \
       "sudo -u postgres psql --cluster 16/main -d postgres (then re-run scripts/install.sh)"
