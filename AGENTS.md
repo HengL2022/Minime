@@ -7,7 +7,7 @@ agent's model provider — tiered access minimizes and audits that surface.
 ## Install (one command, non-interactive)
 
 ```
-git clone <REPO_URL> minime && cd minime && bash scripts/install.sh
+git clone https://github.com/HengL2022/Minime minime && cd minime && bash scripts/install.sh
 ```
 
 - **Safe to re-run** after any failure — every step detects before acting.

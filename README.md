@@ -9,7 +9,7 @@ Spec: [minime-build-plan.md](minime-build-plan.md) · Deviations: [DECISIONS.md]
 ## Install (one command)
 
 ```
-git clone <REPO_URL> minime && cd minime && bash scripts/install.sh
+git clone https://github.com/HengL2022/Minime minime && cd minime && bash scripts/install.sh
 ```
 
 Non-interactive, safe to re-run, installs everything missing (bun, Postgres+pgvector via
