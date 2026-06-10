@@ -6,8 +6,18 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-process.env.DATABASE_URL =
-  process.env.MINIME_TEST_DATABASE_URL ?? "postgres://minime:minime@localhost:5432/minime_test";
+// Tests always run against the minime_test database — derived from DATABASE_URL (bun
+// auto-loads .env) so non-default ports (e.g. installer-provisioned 5433) just work.
+function testDbUrl(): string {
+  if (process.env.MINIME_TEST_DATABASE_URL) return process.env.MINIME_TEST_DATABASE_URL;
+  if (process.env.DATABASE_URL) {
+    const u = new URL(process.env.DATABASE_URL);
+    u.pathname = "/minime_test";
+    return u.toString();
+  }
+  return "postgres://minime:minime@localhost:5432/minime_test";
+}
+process.env.DATABASE_URL = testDbUrl();
 process.env.MINIME_MOCK_OLLAMA = "1";
 process.env.TZ = "Asia/Singapore";
 process.env.MINIME_DATA_DIR = mkdtempSync(join(tmpdir(), "minime-test-"));
