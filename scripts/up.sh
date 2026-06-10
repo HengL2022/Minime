@@ -1,55 +1,56 @@
 #!/bin/bash
-# Start Postgres + verify Ollama. Prefers Docker (spec §4); falls back to Homebrew
-# postgresql@17 + pgvector on boxes without Docker (see DECISIONS.md).
+# Start Postgres + check Ollama for daily use. For first-time setup use scripts/install.sh,
+# which installs anything missing; this script only starts what is already installed.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=scripts/lib.sh
+. scripts/lib.sh
 
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+if docker_available; then
   echo "==> Starting Postgres via Docker Compose"
-  docker compose up -d --wait
-else
+  MINIME_PG_PORT="$PG_PORT" docker compose up -d --wait
+  super_psql() { docker compose exec -T db psql -U minime -d "$1" "${@:2}"; }
+  ensure_pg_objects
+elif is_macos; then
   echo "==> Docker not available; using Homebrew postgresql@17"
-  PGPREFIX="$(brew --prefix postgresql@17)"
+  have brew || { echo "Neither Docker nor Homebrew found. Run: bash scripts/install.sh" >&2; exit 1; }
+  PGPREFIX="$(brew --prefix postgresql@17 2>/dev/null)" || PGPREFIX=""
   PGBIN="$PGPREFIX/bin"
-  if [ ! -x "$PGBIN/pg_isready" ]; then
-    echo "postgresql@17 not installed. Run: brew install postgresql@17 pgvector" >&2
+  if [ -z "$PGPREFIX" ] || [ ! -x "$PGBIN/pg_isready" ]; then
+    echo "postgresql@17 not installed. Run: bash scripts/install.sh (or: brew install postgresql@17 pgvector)" >&2
     exit 1
   fi
-  if ! "$PGBIN/pg_isready" -h localhost -p 5432 -q; then
+  if ! "$PGBIN/pg_isready" -h localhost -p "$PG_PORT" -q; then
     brew services start postgresql@17
-    for _ in $(seq 1 30); do
-      "$PGBIN/pg_isready" -h localhost -p 5432 -q && break
-      sleep 1
-    done
+    wait_pg_ready "$PGBIN/pg_isready" || { echo "Postgres failed to start" >&2; exit 1; }
   fi
-  "$PGBIN/pg_isready" -h localhost -p 5432 -q || { echo "Postgres failed to start" >&2; exit 1; }
-  # Idempotent bootstrap: app role + databases + trusted extensions.
-  "$PGBIN/psql" -h localhost -p 5432 -d postgres -v ON_ERROR_STOP=1 -qAt <<'SQL'
-do $$ begin
-  if not exists (select 1 from pg_roles where rolname = 'minime') then
-    create role minime login password 'minime' createdb createrole;
+  super_psql() { "$PGBIN/psql" -h localhost -p "$PG_PORT" -d "$1" "${@:2}"; }
+  ensure_pg_objects
+  echo "==> Postgres ready on localhost:$PG_PORT (databases: minime, minime_test)"
+elif is_debianish; then
+  echo "==> Docker not available; using system PostgreSQL 16"
+  SUDO=""
+  [ "$(id -u)" = 0 ] || SUDO="sudo -n"
+  FOUND_PORT="$(linux_pg16_port)"
+  [ -n "$FOUND_PORT" ] && PG_PORT="$FOUND_PORT"
+  if has_systemd; then
+    $SUDO systemctl start "postgresql@16-main" 2>/dev/null || $SUDO systemctl start postgresql 2>/dev/null || true
   else
-    alter role minime createdb createrole;
-  end if;
-end $$;
-SQL
-  for db in minime minime_test; do
-    if ! "$PGBIN/psql" -h localhost -p 5432 -d postgres -qAt -c "select 1 from pg_database where datname='$db'" | grep -q 1; then
-      "$PGBIN/createdb" -h localhost -p 5432 -O minime "$db"
-    fi
-    "$PGBIN/psql" -h localhost -p 5432 -d "$db" -v ON_ERROR_STOP=1 -q \
-      -c "create extension if not exists vector; create extension if not exists pgcrypto;"
-  done
-  echo "==> Postgres ready on localhost:5432 (databases: minime, minime_test)"
+    $SUDO pg_ctlcluster 16 main start 2>/dev/null || true
+  fi
+  wait_pg_ready || { echo "Postgres not ready on :$PG_PORT. Run: bash scripts/install.sh" >&2; exit 1; }
+  super_psql() { $SUDO -u postgres psql -p "$PG_PORT" -d "$1" "${@:2}"; }
+  ensure_pg_objects
+  echo "==> Postgres ready on localhost:$PG_PORT (databases: minime, minime_test)"
+else
+  echo "Unsupported platform; run: bash scripts/install.sh" >&2
+  exit 1
 fi
 
 # --- Ollama check (advisory; CI/tests mock Ollama) ---
-OLLAMA_URL="${OLLAMA_URL:-http://localhost:11434}"
-EMBED_MODEL="${EMBED_MODEL:-nomic-embed-text}"
-CLASSIFY_MODEL="${CLASSIFY_MODEL:-llama3.1:8b}"
-if curl -fsS -m 3 "$OLLAMA_URL/api/tags" -o /tmp/minime-ollama-tags.json 2>/dev/null; then
+if ollama_reachable; then
   for model in "$EMBED_MODEL" "$CLASSIFY_MODEL"; do
-    if grep -q "\"$model" /tmp/minime-ollama-tags.json; then
+    if ollama_has_model "$model"; then
       echo "==> Ollama model present: $model"
     else
       echo "WARNING: Ollama model missing: $model  (run: ollama pull $model)" >&2

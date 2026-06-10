@@ -9,7 +9,7 @@ services:
       POSTGRES_PASSWORD: minime
       POSTGRES_DB: minime
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${MINIME_PG_PORT:-5432}:5432"
     volumes:
       - minime-pgdata:/var/lib/postgresql/data
     healthcheck:

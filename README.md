@@ -6,10 +6,23 @@ agents through one audited MCP door so they can help you decide.
 
 Spec: [minime-build-plan.md](minime-build-plan.md) · Deviations: [DECISIONS.md](DECISIONS.md)
 
-## Install on a fresh box
+## Install (one command)
+
+```
+git clone <REPO_URL> minime && cd minime && bash scripts/install.sh
+```
+
+Non-interactive, safe to re-run, installs everything missing (bun, Postgres+pgvector via
+Docker/brew/apt, Ollama + models), migrates, verifies, and prints how to register the MCP
+server. Add `--with-demo` for a fictional dataset to explore. Full contract — flags,
+degraded modes, machine-parsable output for coding agents — in [AGENTS.md](AGENTS.md).
+
+<details>
+<summary>Manual install (what the script does, step by step)</summary>
 
 1. Install [Bun](https://bun.sh) (`curl -fsSL https://bun.sh/install | bash`).
-2. Install Docker (preferred) — or, without Docker: `brew install postgresql@17 pgvector`.
+2. Install Docker (preferred) — or natively: `brew install postgresql@17 pgvector` (macOS)
+   / `apt-get install postgresql-16 postgresql-16-pgvector` from PGDG (Debian/Ubuntu).
 3. Install [Ollama](https://ollama.com) and start it.
 4. `ollama pull nomic-embed-text && ollama pull llama3.1:8b`
 5. Clone this repo; `cd minime`.
@@ -21,12 +34,13 @@ Spec: [minime-build-plan.md](minime-build-plan.md) · Deviations: [DECISIONS.md]
 11. `make verify-m0 && make test` — prove the environment end to end.
 12. Register the MCP server with your agent:
     `claude mcp add minime -- bun run /absolute/path/to/minime/src/cli.ts serve`
-13. (optional, backups) install `restic`, set `RESTIC_REPOSITORY` + `RESTIC_PASSWORD_FILE`
-    (file perms 0600) in `.env`.
-14. (optional, resident mode) run `bun run src/cli.ts serve` under launchd/systemd so the
-    inbox watcher and the 3am dream job run continuously.
-15. Paste the prompts in `agents/skills/` into your agent for the morning-brief,
-    evening-review and decision-brief workflows.
+
+</details>
+
+After install (optional): install `restic` + set `RESTIC_REPOSITORY`/`RESTIC_PASSWORD_FILE`
+for backups; run `bun run src/cli.ts serve` under launchd/systemd for resident mode; paste
+the `agents/skills/` prompts into your agent for the morning-brief, evening-review and
+decision-brief workflows.
 
 ## Daily use
 

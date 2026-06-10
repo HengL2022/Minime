@@ -1,0 +1,49 @@
+# Exercises the installer paths that can't be tested on a developer box that already has
+# everything installed: fresh Ubuntu (apt/PGDG, systemd) and fresh macOS (brew-native).
+name: install
+on:
+  push:
+    paths: ["scripts/**", ".github/workflows/install.yml", "docker-compose.yml"]
+  schedule:
+    - cron: "0 4 * * 1" # weekly: catch PGDG/brew/ollama upstream drift
+  workflow_dispatch:
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # Runners ship Docker; test BOTH paths: native (apt/PGDG) and docker.
+      # Unprivileged on purpose: exercises the lazy `sudo -n` resolution path.
+      - name: install (native PG16 via PGDG, no ollama)
+        run: |
+          bash scripts/install.sh --native --no-ollama --with-demo | tee out.log
+          grep -q '^status: degraded$' out.log
+      - name: re-run is idempotent
+        run: |
+          bash scripts/install.sh --native --no-ollama | tee rerun.log
+          grep -q '^status: degraded$' rerun.log
+
+  linux-docker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: install (docker pg16) + real embed-model pull
+        # Pull only the small model (~270MB) — same code path as the 4.7GB one.
+        run: |
+          MINIME_PULL_MODELS=nomic-embed-text bash scripts/install.sh --with-demo | tee out.log
+          grep -Eq '^status: (ok|degraded)$' out.log
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      # macOS runners have brew but no Docker daemon -> exercises the brew-native branch.
+      - name: install (brew-native PG17, no ollama)
+        run: |
+          bash scripts/install.sh --no-ollama --with-demo | tee out.log
+          grep -q '^status: degraded$' out.log

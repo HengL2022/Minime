@@ -1,9 +1,13 @@
 SHELL := /bin/bash
 BUN := bun
 
-.PHONY: up down migrate seed embed test lint verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify restore-drill
+.PHONY: install up down migrate seed embed test lint verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify restore-drill
 
-# Start Postgres (Docker if present, else Homebrew service) and check Ollama models.
+# One-command setup for fresh machines (see AGENTS.md). Safe to re-run.
+install:
+	@bash scripts/install.sh
+
+# Start Postgres (Docker if present, else native service) and check Ollama models.
 up:
 	@./scripts/up.sh
 

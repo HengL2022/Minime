@@ -73,3 +73,25 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   full reference-tracking and restic-only drills can land later without schema changes.
 - **Approved by:** agent-proposed (pending human review).
 
+## 2026-06-11 — One-command installer (scripts/install.sh) and agent contract (AGENTS.md)
+
+- **Context:** Ops tooling on top of the spec (no §13 milestone covers installation UX).
+  Touches the §4 pin indirectly: native Linux installs use PostgreSQL 16 via PGDG (matches
+  the spec pin and the Docker image); native macOS stays PostgreSQL 17 (pgvector brew bottle
+  constraint, already recorded 2026-06-10).
+- **Decision:** `bash scripts/install.sh` is the single non-interactive setup path
+  (bun → deps → postgres → .env → ollama → migrate → seed? → verify → MCP hints), idempotent
+  by detect-before-act, machine-parsable output (`status:` summary block, fixed `ERROR:`/`FIX:`
+  failure tail, per-step exit codes). Ollama problems *degrade* (status: degraded, exit 0) —
+  the runtime already supports FTS-only search and review-queue classification — everything
+  else fails loudly. AGENTS.md documents the contract for coding agents; shared bash lives in
+  `scripts/lib.sh`; `scripts/pg-probe.ts` detects a provisioned DB without a psql client.
+  A GitHub Actions matrix (ubuntu-22.04/24.04 + macos-14) covers the install paths this
+  development machine cannot test (fresh apt/PGDG, systemd, fresh brew); it activates when
+  the repo is pushed to GitHub.
+- **Why:** The 15-step README install was the main adoption blocker; the owner wants
+  "give an agent the GitHub link, get a verified install". Degraded-but-verified beats
+  all-or-nothing because the 4.7GB model pull is the most failure-prone step and the system
+  is genuinely useful without it.
+- **Approved by:** human (plan approved 2026-06-11).
+
