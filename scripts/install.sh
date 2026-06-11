@@ -328,8 +328,10 @@ else
       die 70 verify "verify-m0 failed" "bun run src/verify/m0.ts (full output)"
     SUMMARY_VERIFY="pass"
   fi
-  MINIME_INSTALLER_RUNNING=1 bun test >/dev/null 2>&1 ||
+  if ! out="$(MINIME_INSTALLER_RUNNING=1 bun test 2>&1)"; then
+    printf '%s\n' "$out" | tail -30 # surface the failing tests; agents read the tail
     die 70 verify "offline test suite failed" "bun test (full output)"
+  fi
   line OK verify "verify-m0 + offline test suite green"
 fi
 
