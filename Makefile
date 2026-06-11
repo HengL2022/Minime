@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 BUN := bun
 
-.PHONY: install up down migrate seed embed test lint verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify restore-drill
+.PHONY: install up down migrate seed embed test lint verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify restore-drill
 
 # One-command setup for fresh machines (see AGENTS.md). Safe to re-run.
 install:
@@ -50,7 +50,13 @@ verify-m5:
 verify-m6:
 	@$(BUN) test test/m6.*.test.ts
 
-verify: verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6
+verify-m7:
+	@$(BUN) test test/m7.*.test.ts
+
+verify-m8:
+	@$(BUN) test test/m8.*.test.ts
+
+verify: verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8
 
 # Restores the latest restic snapshot into a scratch DB and runs the m1 suite against it.
 restore-drill:

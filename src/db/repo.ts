@@ -3,6 +3,7 @@
 // content-read functions at all — they are reachable only via metric_agg() (I3).
 // Everything is parameterized; string-interpolated SQL is a review-blocker.
 
+import { cjkFold, isCjkStopToken } from "../util/cjk";
 import { now } from "../util/clock";
 import { config } from "../util/config";
 import { sql } from "./client";
@@ -17,6 +18,7 @@ export type ParentType =
   | "value"
   | "principle"
   | "person"
+  | "org"
   | "commitment";
 
 // parent_type -> table + which column serves as a human title. Fixed map, not user input.
@@ -30,6 +32,7 @@ const PARENTS: Record<ParentType, { table: string; titleCol: string }> = {
   value: { table: "values_items", titleCol: "statement" },
   principle: { table: "principles", titleCol: "rule" },
   person: { table: "people", titleCol: "canonical_name" },
+  org: { table: "orgs", titleCol: "canonical_name" },
   commitment: { table: "commitments", titleCol: "what" },
 };
 
@@ -141,13 +144,24 @@ export interface Candidate {
 
 export async function ftsCandidates(query: string, types: string[] | null): Promise<Candidate[]> {
   const allowed = await allowedTier();
+  // OR the query words: plainto_tsquery ANDs every term, so a natural-language question
+  // matched nothing whenever one contentful word was absent from a chunk — on a 100-question
+  // retrieval eval, 70% of queries got zero fts candidates, silencing the 0.30 fts weight in
+  // hybrid scoring. ts_rank_cd still ranks chunks matching more terms first (DECISIONS.md
+  // 2026-06-11). cjkFold mirrors the index-side cjk_fold() so Chinese queries hit the
+  // bigram lexemes (009_cjk_fts.sql).
+  const orQuery = cjkFold(query)
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .filter((t) => !isCjkStopToken(t))
+    .join(" OR ");
   return sql`
     select c.id, c.parent_type, c.parent_id, c.ord, c.text,
            0::float as cosine,
-           ts_rank_cd(c.tsv, plainto_tsquery('english', ${query}))::float as fts
+           ts_rank_cd(c.tsv, websearch_to_tsquery('english', ${orQuery}))::float as fts
     from chunks c
     where c.tier <= ${allowed}
-      and c.tsv @@ plainto_tsquery('english', ${query})
+      and c.tsv @@ websearch_to_tsquery('english', ${orQuery})
       and (${types === null} or c.parent_type = any(${types ?? []}))
     order by fts desc
     limit 50` as any;
@@ -193,25 +207,43 @@ export async function parentMeta(
   return new Map(rows.map((r: any) => [r.id as string, r as ParentMeta]));
 }
 
-// People literally named in the query, for the 1-hop graph boost (spec §9).
-export async function peopleNamedIn(query: string): Promise<string[]> {
-  const rows = await sql`
-    select distinct p.id from people p
-    left join person_aliases a on a.person_id = p.id
-    where ${query.toLowerCase()} like '%' || lower(p.canonical_name) || '%'
-       or (a.alias is not null and ${query.toLowerCase()} like '%' || lower(a.alias) || '%')`;
-  return rows.map((r: any) => r.id);
+// People/orgs literally named in the query, for the 1-hop graph boost (spec §9).
+export interface EntityRef {
+  type: "person" | "org";
+  id: string;
 }
 
-export async function oneHopNeighbors(personIds: string[]): Promise<Set<string>> {
-  if (personIds.length === 0) return new Set();
-  const rows = await sql`
-    select src_type as t, src_id as i from edges where dst_type = 'person' and dst_id = any(${personIds})
-    union
-    select dst_type as t, dst_id as i from edges where src_type = 'person' and src_id = any(${personIds})`;
+export async function entitiesNamedIn(query: string): Promise<EntityRef[]> {
+  const q = query.toLowerCase();
+  const people = await sql`
+    select distinct p.id from people p
+    left join person_aliases a on a.person_id = p.id
+    where ${q} like '%' || lower(p.canonical_name) || '%'
+       or (a.alias is not null and ${q} like '%' || lower(a.alias) || '%')`;
+  const orgs = await sql`
+    select distinct o.id from orgs o
+    left join org_aliases a on a.org_id = o.id
+    where ${q} like '%' || lower(o.canonical_name) || '%'
+       or (a.alias is not null and ${q} like '%' || lower(a.alias) || '%')`;
+  return [
+    ...people.map((r: any) => ({ type: "person" as const, id: r.id })),
+    ...orgs.map((r: any) => ({ type: "org" as const, id: r.id })),
+  ];
+}
+
+export async function oneHopNeighbors(refs: EntityRef[]): Promise<Set<string>> {
+  if (refs.length === 0) return new Set();
   const set = new Set<string>();
-  for (const r of rows as any[]) set.add(`${r.t}:${r.i}`);
-  for (const id of personIds) set.add(`person:${id}`);
+  for (const type of ["person", "org"] as const) {
+    const ids = refs.filter((r) => r.type === type).map((r) => r.id);
+    if (ids.length === 0) continue;
+    const rows = await sql`
+      select src_type as t, src_id as i from edges where dst_type = ${type} and dst_id = any(${ids})
+      union
+      select dst_type as t, dst_id as i from edges where src_type = ${type} and src_id = any(${ids})`;
+    for (const r of rows as any[]) set.add(`${r.t}:${r.i}`);
+    for (const id of ids) set.add(`${type}:${id}`);
+  }
   return set;
 }
 
@@ -231,12 +263,13 @@ export async function resolvePerson(name: string): Promise<any | null> {
 export async function ensurePerson(
   name: string,
   createdBy: string,
+  source = "capture",
 ): Promise<{ id: string; created: boolean }> {
   const existing = await resolvePerson(name);
   if (existing) return { id: existing.id, created: false };
   const [row] = await sql`
     insert into people (canonical_name, created_by, source)
-    values (${name}, ${createdBy}, 'capture') returning id`;
+    values (${name}, ${createdBy}, ${source}) returning id`;
   await sql`insert into person_aliases (person_id, alias) values (${row!.id}, ${name})
             on conflict do nothing`;
   return { id: row!.id, created: true };
@@ -250,6 +283,72 @@ export async function addAlias(personId: string, alias: string): Promise<void> {
 export async function touchLastContact(personId: string, at: Date): Promise<void> {
   await sql`update people set last_contact_at = greatest(coalesce(last_contact_at, ${at}), ${at})
             where id = ${personId}`;
+}
+
+// Owner-relation ("my physiotherapist") detected by extraction: fill only if empty —
+// a human-set relation is never overwritten by a rule.
+export async function setPersonRelationIfNull(personId: string, relation: string): Promise<void> {
+  await sql`update people set relation = ${relation} where id = ${personId} and relation is null`;
+}
+
+// Extraction may upgrade "Tomasz" to "Tomasz Wójcik" once the fuller form is seen.
+export async function setPersonCanonicalName(personId: string, name: string): Promise<void> {
+  await sql`update people set canonical_name = ${name} where id = ${personId}`;
+}
+
+export async function peopleByFirstName(first: string): Promise<{ id: string }[]> {
+  return sql`
+    select id from people
+    where lower(split_part(canonical_name, ' ', 1)) = ${first.toLowerCase()}` as any;
+}
+
+// ---------------------------------------------------------------- orgs
+
+export async function resolveOrg(name: string): Promise<any | null> {
+  const allowed = await allowedTier();
+  const rows = await sql`
+    select distinct o.* from orgs o
+    left join org_aliases a on a.org_id = o.id
+    where (lower(o.canonical_name) = lower(${name}) or lower(a.alias) = lower(${name}))
+      and o.tier <= ${allowed}
+    limit 1`;
+  return rows[0] ?? null;
+}
+
+export async function ensureOrg(
+  name: string,
+  createdBy: string,
+  source = "extract",
+): Promise<{ id: string; created: boolean }> {
+  const existing = await resolveOrg(name);
+  if (existing) return { id: existing.id, created: false };
+  const [row] = await sql`
+    insert into orgs (canonical_name, created_by, source)
+    values (${name}, ${createdBy}, ${source}) returning id`;
+  await sql`insert into org_aliases (org_id, alias) values (${row!.id}, ${name})
+            on conflict do nothing`;
+  return { id: row!.id, created: true };
+}
+
+export async function addOrgAlias(orgId: string, alias: string): Promise<void> {
+  await sql`insert into org_aliases (org_id, alias) values (${orgId}, ${alias})
+            on conflict do nothing`;
+}
+
+export async function setOrgCanonicalName(orgId: string, name: string): Promise<void> {
+  await sql`update orgs set canonical_name = ${name} where id = ${orgId}`;
+}
+
+export async function allOrgsWithAliases(): Promise<{ id: string; names: string[] }[]> {
+  const rows = await sql`
+    select o.id, array_agg(distinct x.name) as names
+    from orgs o
+    cross join lateral (
+      select o.canonical_name as name
+      union select a.alias from org_aliases a where a.org_id = o.id
+    ) x
+    group by o.id`;
+  return rows.map((r: any) => ({ id: r.id, names: r.names }));
 }
 
 // ---------------------------------------------------------------- writes (rows)
@@ -808,13 +907,21 @@ export async function journalCountSince(since: Date): Promise<number> {
 
 // ---------------------------------------------------------------- dream support
 
-export async function recentChunksWithoutEntityLinks(limit: number): Promise<any[]> {
+// Parents never touched by the extractor (no system:extract edges yet). Parents whose
+// text yields zero entities are re-scanned each night — bounded by `limit`, regex-cheap.
+export async function parentsNeedingExtraction(
+  limit: number,
+): Promise<{ parent_type: string; parent_id: string; text: string }[]> {
   return sql`
-    select c.id, c.parent_type, c.parent_id, c.text from chunks c
+    select c.parent_type, c.parent_id, string_agg(c.text, e'\n\n' order by c.ord) as text
+    from chunks c
     where not exists (
-      select 1 from edges e where e.source_table = 'chunks' and e.source_id = c.id
+      select 1 from edges e
+      where e.src_type = c.parent_type and e.src_id = c.parent_id
+        and e.extracted_by = 'system:extract'
     )
-    order by c.updated_at desc limit ${limit}`;
+    group by c.parent_type, c.parent_id
+    order by max(c.updated_at) desc limit ${limit}` as any;
 }
 
 export async function allPeopleWithAliases(): Promise<{ id: string; names: string[] }[]> {

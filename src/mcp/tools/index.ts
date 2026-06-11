@@ -5,6 +5,7 @@ import { logInteractionTool } from "./interactions";
 import { journalTool } from "./journal";
 import { queryMetricTool } from "./metric";
 import type { ToolDef } from "./registry";
+import { reviewQueueTool } from "./review-queue";
 import { searchTool } from "./search";
 import { stateTool } from "./state";
 import { upsertTaskTool } from "./tasks";
@@ -21,6 +22,7 @@ export const ALL_TOOLS: ToolDef[] = [
   reviewDecisionTool,
   upsertTaskTool,
   logInteractionTool,
+  reviewQueueTool,
   unlockTool,
 ];
 

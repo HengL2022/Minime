@@ -7,10 +7,10 @@ import {
   type Candidate,
   type ParentMeta,
   type ParentType,
+  entitiesNamedIn,
   ftsCandidates,
   oneHopNeighbors,
   parentMeta,
-  peopleNamedIn,
   vectorCandidates,
 } from "../db/repo";
 import { now } from "../util/clock";
@@ -106,7 +106,7 @@ export async function hybridSearch(opts: {
   }
 
   // graph boost: parent within 1 edge hop of an entity literally named in the query
-  const boosted = await oneHopNeighbors(await peopleNamedIn(query));
+  const boosted = await oneHopNeighbors(await entitiesNamedIn(query));
 
   const normCos = normalize(candidates.map((c) => c.cosine));
   const normFts = normalize(candidates.map((c) => c.fts));

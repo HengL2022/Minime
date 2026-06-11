@@ -7,6 +7,7 @@ import {
   openItemsFor,
   parentMeta,
   recentInteractionsFor,
+  resolveOrg,
   resolvePerson,
 } from "../../db/repo";
 import { type SourceRef, ToolError, envelope, stalenessOf } from "../envelope";
@@ -22,6 +23,7 @@ const TYPES = [
   "value",
   "principle",
   "person",
+  "org",
   "commitment",
 ] as const;
 
@@ -57,7 +59,7 @@ async function resolveEdgeTitles(edges: any[]): Promise<any[]> {
 export const getContextTool: ToolDef = {
   name: "minime_get_context",
   description:
-    "Resolve an entity (by type+id, or person_name with alias matching) and return the row, related rows via edges, open items, and provenance.",
+    "Resolve an entity (by type+id, or person_name matching a person or org by name/alias) and return the row, related rows via edges, open items, and provenance.",
   schema: {
     type: z.enum(TYPES).optional(),
     id: z.string().uuid().optional(),
@@ -72,7 +74,11 @@ export const getContextTool: ToolDef = {
     if (params.person_name) {
       type = "person";
       row = await resolvePerson(params.person_name);
-      if (!row) throw new ToolError("NOT_FOUND", "no person matching that name");
+      if (!row) {
+        type = "org";
+        row = await resolveOrg(params.person_name);
+      }
+      if (!row) throw new ToolError("NOT_FOUND", "no person or org matching that name");
     } else if (params.type && params.id) {
       type = params.type;
       row = await getRow(type, params.id);

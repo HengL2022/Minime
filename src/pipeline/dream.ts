@@ -4,15 +4,12 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  allPeopleWithAliases,
   chunkPairsSharingPerson,
   decisionsNeedingReview,
-  edgeExists,
-  insertEdge,
   insertReviewItem,
   listMetricDefs,
   logEvent,
-  recentChunksWithoutEntityLinks,
+  parentsNeedingExtraction,
   reviewItemExists,
   runMetricAgg,
   staleItems,
@@ -26,30 +23,15 @@ const ACTOR = "system:dream";
 
 // -- step 2: entity linking ------------------------------------------------
 
+// Typed-edge extraction over the backlog: parents the per-write hook hasn't covered
+// (rows written before this feature existed, or writes where extraction errored).
 export async function entityLinkPass(limit = 500): Promise<number> {
-  const people = await allPeopleWithAliases();
-  if (people.length === 0) return 0;
-  const chunks = await recentChunksWithoutEntityLinks(limit);
+  const { extractAndLink } = await import("./extract-edges");
+  const parents = await parentsNeedingExtraction(limit);
   let linked = 0;
-  for (const chunk of chunks) {
-    const lower = chunk.text.toLowerCase();
-    for (const person of people) {
-      if (!person.names.some((n: string) => n && lower.includes(n.toLowerCase()))) continue;
-      if (await edgeExists(chunk.parent_type, chunk.parent_id, "mentions", "person", person.id))
-        continue;
-      await insertEdge({
-        srcType: chunk.parent_type,
-        srcId: chunk.parent_id,
-        rel: "mentions",
-        dstType: "person",
-        dstId: person.id,
-        sourceTable: "chunks",
-        sourceId: chunk.id,
-        extractedBy: ACTOR,
-        confidence: 0.8,
-      });
-      linked++;
-    }
+  for (const p of parents) {
+    const stats = await extractAndLink(p.parent_type, p.parent_id, p.text).catch(() => null);
+    linked += stats?.edges ?? 0;
   }
   return linked;
 }
