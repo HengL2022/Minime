@@ -3,6 +3,7 @@
 // present for cloud-routed jobs (no cloud network calls during verify).
 
 import { closeDb, sql } from "../db/client";
+import { hasAwsCredentials } from "../llm/bedrock";
 import { config } from "../util/config";
 
 let failed = false;
@@ -32,8 +33,8 @@ function cloudCredsOk(provider: string): [boolean, string] {
       return [Boolean(config.openrouterApiKey), `${config.openrouterModel} (OPENROUTER_API_KEY)`];
     case "bedrock":
       return [
-        Boolean(config.bedrockModel && (process.env.AWS_ACCESS_KEY_ID || process.env.AWS_PROFILE)),
-        `${config.bedrockModel ?? "BEDROCK_MODEL unset"} (AWS credentials)`,
+        Boolean(config.bedrockModel && hasAwsCredentials()),
+        `${config.bedrockModel ?? "BEDROCK_MODEL unset"} (IAM via env or ~/.aws)`,
       ];
     default:
       return [false, `unknown provider '${provider}'`];

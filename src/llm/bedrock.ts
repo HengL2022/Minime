@@ -2,21 +2,33 @@
 // which handles SigV4 signing from standard AWS env credentials
 // (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN / AWS_REGION).
 
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import AnthropicBedrock from "@anthropic-ai/bedrock-sdk";
 import { config } from "../util/config";
 import type { FetchFn, LlmProvider } from "./types";
+
+export function hasAwsCredentials(): boolean {
+  return Boolean(
+    process.env.AWS_ACCESS_KEY_ID ||
+      process.env.AWS_PROFILE ||
+      existsSync(join(homedir(), ".aws", "credentials")), // SDK default chain reads ini files
+  );
+}
 
 export function bedrockProvider(fetchFn?: FetchFn): LlmProvider {
   if (!config.bedrockModel) {
     throw new Error(
       "CLASSIFY_PROVIDER=bedrock requires BEDROCK_MODEL in .env (a Bedrock model id or " +
-        "inference-profile, e.g. us.anthropic.claude-haiku-4-5-20251001-v1:0 — ids vary by " +
+        "inference-profile, e.g. us.anthropic.claude-opus-4-7 — ids vary by " +
         "region/account, so there is no guessable default)",
     );
   }
-  if (!process.env.AWS_ACCESS_KEY_ID && !process.env.AWS_PROFILE) {
+  if (!hasAwsCredentials()) {
     throw new Error(
-      "CLASSIFY_PROVIDER=bedrock requires AWS credentials (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY and AWS_REGION)",
+      "CLASSIFY_PROVIDER=bedrock requires AWS IAM credentials: env vars " +
+        "(AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY + AWS_REGION) or ~/.aws/credentials (aws configure)",
     );
   }
   const model = config.bedrockModel;
