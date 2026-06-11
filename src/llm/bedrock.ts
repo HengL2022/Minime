@@ -21,7 +21,7 @@ export function bedrockProvider(fetchFn?: FetchFn): LlmProvider {
   if (!config.bedrockModel) {
     throw new Error(
       "CLASSIFY_PROVIDER=bedrock requires BEDROCK_MODEL in .env (a Bedrock model id or " +
-        "inference-profile, e.g. us.anthropic.claude-opus-4-7 — ids vary by " +
+        "inference-profile, e.g. us.anthropic.claude-opus-4-8 — ids vary by " +
         "region/account, so there is no guessable default)",
     );
   }
