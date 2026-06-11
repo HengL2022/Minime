@@ -20,6 +20,10 @@ function testDbUrl(): string {
 process.env.DATABASE_URL = testDbUrl();
 process.env.MINIME_MOCK_OLLAMA = "1";
 process.env.TZ = "Asia/Singapore";
+// hermetic against the owner's .env (bun auto-loads it): tests always start from the
+// local defaults; provider-specific tests patch the config object themselves
+process.env.EMBED_PROVIDER = "ollama";
+process.env.CLASSIFY_PROVIDER = "ollama";
 process.env.MINIME_DATA_DIR = mkdtempSync(join(tmpdir(), "minime-test-"));
 
 // Close the postgres pool after the whole run, or open sockets keep bun alive forever.
