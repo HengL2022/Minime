@@ -129,3 +129,111 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   beat stale knowledge.
 - **Approved by:** human (requested).
 
+
+## 2026-06-11 — ftsCandidates: OR-rewritten websearch_to_tsquery instead of plainto_tsquery
+
+- **Context:** Hybrid search scoring (spec §9 — this tunes the fts leg of the pinned
+  0.55/0.30/0.10/0.05 fusion; weights themselves unchanged). `ftsCandidates` in
+  `src/db/repo.ts`.
+- **Decision:** Rewrite the user query as individual words joined with `OR` and parse it with
+  `websearch_to_tsquery('english', …)` instead of `plainto_tsquery`, which ANDs every term.
+  `ts_rank_cd` still ranks chunks matching more terms higher, so precise keyword queries keep
+  their edge while partial matches now contribute signal instead of vanishing.
+- **Why:** On a 100-question synthetic retrieval eval (fictional persona, 16 brain docs, real
+  qwen3-embedding-8b embeddings), AND semantics produced **zero** fts candidates for 70/100
+  natural-language questions — any one contentful query word missing from a chunk silenced the
+  whole 0.30 fts weight, leaving ranking to cosine+recency alone. After the change: 1/100
+  zero-candidate queries; hit@3 96%→99%, hit@5 98%→100%, MRR@5 0.943→0.952, answer-in-top-3
+  96%→99%; hit@1 unchanged at 92%. Full `bun test` (56 tests, incl. m6 tier-0 sentinel leak
+  test) stays green. Alternative considered: AND-first-then-OR fallback — rejected as two code
+  paths for marginal benefit, since ts_rank_cd already favors all-terms matches.
+- **Approved by:** human (requested the fix after reviewing the eval).
+
+## 2026-06-11 — Backups may target cloud object storage (encrypted restic repos)
+
+- **Context:** Amends invariant I1 (spec §1 "local-first", §12 at-rest) for the backup path
+  only. The nightly `dream` step 7 (`restic backup data/ db-dump/`) previously assumed a
+  local/external-disk `RESTIC_REPOSITORY`.
+- **Decision:** `RESTIC_REPOSITORY` may point at a well-recognized cloud object store
+  (e.g. Backblaze B2, S3, Cloudflare R2). Restic encrypts client-side (AES-256); the
+  repository password and keys never leave the box (`RESTIC_PASSWORD_FILE`, perms 0600).
+  Tier rules are unchanged — the provider stores opaque ciphertext, which is a different
+  threat profile from a live cloud DB (Supabase et al. remain ruled out). Live runtime
+  network surface is unchanged; only the backup job talks to the storage endpoint.
+- **Why:** Owner judged an external disk unrealistic to maintain; an off-site encrypted
+  copy also covers theft/fire, which a single local disk does not. 3-2-1 with ciphertext
+  beats 1 copy in plaintext.
+- **Approved by:** human (owner, 2026-06-11 conversation).
+
+## 2026-06-11 — M7 (post-v1 feature): typed knowledge-graph extraction, zero-LLM
+
+- **Context:** Extends the entity graph beyond spec v1 (§7 edges, §10 dream step 2, §15
+  deferred the consolidated-entity layer). New migration `008_orgs.sql` (orgs + org_aliases,
+  RLS/grants mirroring people), new pipeline `src/pipeline/extract-edges.ts`, extraction
+  hooked into `indexParent` (per-write) with the dream pass as backlog sweep. `minime_search`
+  graph boost and `minime_get_context` now resolve orgs as well as people. New `verify-m7`
+  gate (`test/m7.graph.test.ts`).
+- **Decision:** A deterministic rule/pattern layer (no model calls) extracts on every write:
+  `mentions` edges for known people/orgs; `works_at` edges (person → org) at confidence 0.85
+  (same sentence) / 0.7 (same paragraph + work cue) / 0.6 (page-dominant org, only when that
+  org recurs ≥2× on the page); owner-relations ("my physiotherapist X") onto
+  `people.relation`, never overwriting a human-set value; discovery of new people/orgs only
+  when anchored to high-precision cues (role words, employment verbs, org suffixes,
+  "partner is X"). Name variants merge instead of forking ("Tomasz" ↔ "Tomasz Wójcik",
+  "Fjordsonics" ↔ "Fjordsonics AS"). All rows/edges stamped `system:extract` (I5), so a bad
+  rule's output is identifiable and deletable in bulk.
+- **Why:** Vector+FTS search cannot answer relational questions ("who works at X?",
+  "where does my GP work?"). On the 16-doc fictional-persona eval corpus the rule layer
+  built 13 orgs, 10 people (all 10 with correct owner-relations), 8 works_at edges — all
+  correct, zero false edges — answering 15/15 graph-only relational questions; the
+  100-question retrieval eval is unchanged (hit@3 99%, hit@5 100%), so the boost path did
+  not regress. Zero-LLM keeps it I1-clean (no egress), deterministic, and auditable;
+  known gap: relations phrased without a role cue ("Lessons with Lars Brodin") are not
+  extracted — acceptable precision-over-recall trade for graph data.
+- **Approved by:** human (requested the build after the GBrain comparison).
+
+## 2026-06-11 — Skills layer expansion + minime_review_queue tool
+
+- **Context:** Spec §11 ships three agent skills (morning-brief, evening-review,
+  decision-brief). Reviewing GBrain showed its "synthesis layer" is in fact a folder of
+  agent playbooks plus a trigger-phrase dispatcher — the same externalized-synthesis
+  architecture as Minime, just with far more coverage. Also amends §8 (MCP tool list).
+- **Decision:** (1) Five new skills in `agents/skills/` — `query.md` (cited synthesis with
+  mandatory gap/staleness disclosure), `graph-query.md` (relational questions via the M7
+  typed-edge graph, with confidence phrasing rules), `person-brief.md`, `capture.md`,
+  `review-triage.md` — plus `RESOLVER.md`, a GBrain-style trigger→skill dispatch table.
+  (2) One new MCP tool `minime_review_queue` (list/resolve): the queue had no agent-facing
+  read path (evening-review step 4 referenced data `minime_state` never returned — fixed).
+  Stale-item labels are re-resolved through tier-filtered `parentMeta`, so a tier-2 title
+  baked into a payload at flag time is masked as "[above current tier]" at tier 1.
+  Resolving a flag never mutates the flagged rows.
+- **Why:** Synthesis quality lives in the playbooks, not the server; richer skills close
+  most of the practical gap with GBrain at zero runtime/invariant cost. The new tool is
+  the smallest change that makes review-queue triage actually executable by an agent;
+  audit + redaction come free via the shared `invokeTool` wrapper (I8).
+- **Approved by:** human (requested after the GBrain comparison).
+
+## 2026-06-11 — M8: CJK-aware FTS (bigram fold) and chunk sizing
+
+- **Context:** Bilingual eval (100 questions over an 18-doc zh/en/mixed fictional corpus)
+  showed `to_tsvector('english', …)` cannot tokenize Han text: 39/40 Chinese queries had
+  zero fts candidates (vector-only ranking), and the whitespace word-counting chunker never
+  split Chinese documents (18 docs → 18 chunks). Amends spec §9 (chunking/query path) and
+  the 004 search schema. New migration `009_cjk_fts.sql`, `src/util/cjk.ts`, `verify-m8`.
+- **Decision:** (1) `cjk_fold()` rewrites Han runs into overlapping bigrams
+  ("招商银行" → "招商 商银 银行") inside the regenerated `chunks.tsv` column (table rewrite
+  backfills); a TS twin folds the query side in `ftsCandidates`, parity-tested against the
+  SQL function. Non-CJK text is untouched — English indexing is byte-identical.
+  (2) Query-side CJK stop-token filter: tokens composed only of Han function characters
+  (我的, 什么, 时候…) are dropped — the 'english' stopword list doesn't know Chinese, and
+  without this the zh→en bucket fell 80%→7% hit@1 from function-word noise.
+  (3) Chunker sizes by tokens (each Han char = 1 token), splits oversized paragraphs at
+  sentence boundaries (incl. 。！？；) with char-window fallback, and budgets the overlap
+  tail in tokens.
+- **Why:** Eval before/after — zh→zh: hit@1 90%→95%, hit@3 97.5%→100%, fts-dead queries
+  39/40→1/40; mixed: hit@3 100%; English 100-question eval unchanged (92/99/100). Known
+  trade-off: zh→en cross-lingual hit@1 80%→47% (content-word bigrams genuinely match
+  same-language docs); the documented mitigation is dual-language querying in
+  `agents/skills/query.md`, measured at hit@1 80% / hit@5 100% with rank fusion. Full
+  suite 82 pass / 0 fail.
+- **Approved by:** human (requested "engine fix" after the bilingual eval).
