@@ -68,29 +68,24 @@ async function claimsConflict(a: string, b: string): Promise<boolean> {
     return ANTONYMS.some(([x, y]) => (x.test(a) && y.test(b)) || (y.test(a) && x.test(b)));
   }
   try {
-    const res = await fetch(`${config.ollamaUrl}/api/generate`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model: config.classifyModel,
-        prompt: `Do these two statements about the same person contradict each other? Answer ONLY {"conflict": true} or {"conflict": false}.\nA: ${a.slice(0, 500)}\nB: ${b.slice(0, 500)}`,
-        format: "json",
-        stream: false,
-        options: { temperature: 0 },
-      }),
-    });
-    if (!res.ok) return false;
-    const json = (await res.json()) as { response: string };
-    return JSON.parse(json.response).conflict === true;
+    const { classifyProvider } = await import("../llm");
+    const raw = await classifyProvider().completeJson(
+      `Do these two statements about the same person contradict each other? Answer ONLY {"conflict": true} or {"conflict": false}.\nA: ${a.slice(0, 500)}\nB: ${b.slice(0, 500)}`,
+    );
+    return JSON.parse(raw).conflict === true;
   } catch {
     return false;
   }
 }
 
 export async function contradictionScan(limit = 100): Promise<number> {
+  const { classifyIsCloud } = await import("../llm");
+  const cloud = !config.mockOllama && classifyIsCloud();
   const pairs = await chunkPairsSharingPerson(limit);
   let flagged = 0;
   for (const p of pairs) {
+    // tier gate (CLOUD_MAX_TIER): never send higher-tier chunk text to a cloud provider
+    if (cloud && Math.max(p.a_tier, p.b_tier) > config.cloudMaxTier) continue;
     if (await reviewItemExists("contradiction", "pair", `${p.a_id}:${p.b_id}`)) continue;
     if (await claimsConflict(p.a_text, p.b_text)) {
       // IDs only in the queue payload — flag, never auto-resolve

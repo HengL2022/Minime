@@ -66,20 +66,9 @@ export function heuristicClassify(text: string): Classification {
 export async function classify(text: string): Promise<Classification> {
   if (config.mockOllama) return heuristicClassify(text);
   try {
-    const res = await fetch(`${config.ollamaUrl}/api/generate`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model: config.classifyModel,
-        prompt: PROMPT + text.slice(0, 4000),
-        format: "json",
-        stream: false,
-        options: { temperature: 0 },
-      }),
-    });
-    if (!res.ok) throw new Error(`ollama generate: ${res.status}`);
-    const json = (await res.json()) as { response: string };
-    const parsed = JSON.parse(json.response);
+    const { classifyProvider } = await import("../llm");
+    const raw = await classifyProvider().completeJson(PROMPT + text.slice(0, 4000));
+    const parsed = JSON.parse(raw);
     const type = ["task", "journal", "interaction", "note", "decision_note", "unknown"].includes(
       parsed.type,
     )
@@ -89,7 +78,7 @@ export async function classify(text: string): Promise<Classification> {
       typeof parsed.confidence === "number" ? Math.max(0, Math.min(1, parsed.confidence)) : 0;
     return { type, confidence, fields: parsed.fields ?? {} };
   } catch {
-    // Ollama down or junk output: leave for the evening review rather than guess
+    // provider down, key missing, or junk output: leave for the evening review, never guess
     return { type: "unknown", confidence: 0, fields: {} };
   }
 }

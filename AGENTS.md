@@ -66,6 +66,26 @@ Everything works without Ollama except two features:
 | Classify model | Inbox captures queue for manual review instead of auto-filing | `ollama pull llama3.1:8b` |
 | Docker | Native Postgres instead: PG16 via PGDG on Linux, PG17 via Homebrew on macOS | nothing to do |
 
+## Cloud LLM providers (optional, instead of Ollama)
+
+The three internal model jobs (embeddings, inbox classification, contradiction scan) default
+to local Ollama but can route to cloud providers — set in `.env` and skip Ollama entirely
+(`--no-ollama` at install):
+
+| Provider | `CLASSIFY_PROVIDER` | `EMBED_PROVIDER` | Required env |
+|---|---|---|---|
+| Ollama (default) | ✓ | ✓ | — |
+| Anthropic | ✓ (`ANTHROPIC_MODEL`, default claude-opus-4-8) | — | `ANTHROPIC_API_KEY` |
+| OpenAI | ✓ (`OPENAI_MODEL`) | ✓ (text-embedding-3-* @ 768 dims) | `OPENAI_API_KEY` |
+| OpenRouter | ✓ (`OPENROUTER_MODEL`) | — | `OPENROUTER_API_KEY` |
+| Bedrock (IAM) | ✓ (`BEDROCK_MODEL`, required) | — | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` |
+
+Privacy contract: cloud providers receive content up to `CLOUD_MAX_TIER` (default 2; tier-0
+financial/health content **never** leaves the box on any path). Every cloud call writes an
+audited `events` row (`egress:embed` / `egress:classify` — counts, never contents), visible
+via `bun run src/cli.ts audit`. Mixed setups work (e.g. classify via Anthropic, embed via
+local Ollama). Embeddings are pinned to 768 dims by the schema, hence the embed column above.
+
 ## Register the MCP server
 
 The server is stdio: `bun run <ABS_REPO_PATH>/src/cli.ts serve` (also starts the inbox

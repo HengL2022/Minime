@@ -25,17 +25,18 @@ export async function indexParent(
 }
 
 export async function drainEmbedBacklog(batch = 256): Promise<number> {
+  // tier gate (CLOUD_MAX_TIER): with a cloud embed provider, higher-tier chunks are left
+  // un-embedded (still FTS-searchable) rather than sent off-box
+  const { embedIsCloud, embedModelName } = await import("../llm");
+  const maxTier = !config.mockOllama && embedIsCloud() ? config.cloudMaxTier : 2;
+  const modelName = config.mockOllama ? "mock" : embedModelName();
   let total = 0;
   for (;;) {
-    const missing = await chunksMissingEmbedding(batch);
+    const missing = await chunksMissingEmbedding(batch, maxTier);
     if (missing.length === 0) return total;
     const vectors = await embedTexts(missing.map((m) => m.text));
     for (let i = 0; i < missing.length; i++) {
-      await setChunkEmbedding(
-        missing[i]!.id,
-        vectors[i]!,
-        config.mockOllama ? "mock" : config.embedModel,
-      );
+      await setChunkEmbedding(missing[i]!.id, vectors[i]!, modelName);
     }
     total += missing.length;
     if (missing.length < batch) return total;

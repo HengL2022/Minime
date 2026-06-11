@@ -95,3 +95,23 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   is genuinely useful without it.
 - **Approved by:** human (plan approved 2026-06-11).
 
+## 2026-06-11 — Cloud LLM providers (amends invariant I1) + two new SDK dependencies
+
+- **Context:** Spec §1 I1 ("no cloud calls from Minime itself") and §4 pinned stack (new
+  dependencies `@anthropic-ai/sdk`, `@anthropic-ai/bedrock-sdk`). This is the largest spec
+  deviation to date and is owner-requested.
+- **Decision:** The three internal model jobs (embeddings, inbox classification,
+  contradiction scan) route through a provider layer (`src/llm/`): ollama (default,
+  unchanged), anthropic (default model claude-opus-4-8, owner's choice), openai, openrouter,
+  bedrock (IAM env credentials; `BEDROCK_MODEL` required — ids aren't guessable).
+  Guardrails shipped with it: (a) every cloud call writes an `events` row
+  (`egress:embed`/`egress:classify`, counts never contents) so `minime audit` shows cloud
+  egress; (b) `CLOUD_MAX_TIER` (default 2, owner's choice) caps which tiers a cloud provider
+  may see — tier-0 never leaves under any configuration (it is never chunked/classified);
+  (c) embeddings remain pinned to 768 dims → embed providers are ollama/openai only;
+  Bedrock Titan (1024) plus a `reembed` dimension-migration tool deferred.
+- **Why:** Owner wants provider flexibility beyond local Ollama. Defaults keep I1 intact
+  (env-less installs are byte-for-byte local-only); the amendment is opt-in per job, audited,
+  and tier-capped, which preserves the spirit of "minimize and audit the egress surface".
+- **Approved by:** human (plan approved 2026-06-11; tier/model/scope choices made by owner).
+

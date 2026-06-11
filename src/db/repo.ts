@@ -96,8 +96,10 @@ export async function replaceChunks(
 
 export async function chunksMissingEmbedding(
   limit: number,
+  maxTier = 2, // cloud embed providers pass CLOUD_MAX_TIER; local providers see everything
 ): Promise<{ id: string; text: string }[]> {
-  return sql`select id, text from chunks where embedding is null order by updated_at limit ${limit}` as any;
+  return sql`select id, text from chunks where embedding is null and tier <= ${maxTier}
+             order by updated_at limit ${limit}` as any;
 }
 
 export async function setChunkEmbedding(
@@ -835,11 +837,20 @@ export async function decisionsNeedingReview(): Promise<any[]> {
 
 // Pairs of chunks linked (by the dream entity-link pass) to the same person, for the
 // contradiction scan. Chunk text stays inside the dream job — flagged pairs store IDs only.
-export async function chunkPairsSharingPerson(
-  limit: number,
-): Promise<{ person_id: string; a_id: string; a_text: string; b_id: string; b_text: string }[]> {
+export async function chunkPairsSharingPerson(limit: number): Promise<
+  {
+    person_id: string;
+    a_id: string;
+    a_text: string;
+    a_tier: number;
+    b_id: string;
+    b_text: string;
+    b_tier: number;
+  }[]
+> {
   return sql`
-    select e1.dst_id as person_id, c1.id as a_id, c1.text as a_text, c2.id as b_id, c2.text as b_text
+    select e1.dst_id as person_id, c1.id as a_id, c1.text as a_text, c1.tier as a_tier,
+           c2.id as b_id, c2.text as b_text, c2.tier as b_tier
     from edges e1
     join edges e2 on e2.dst_type = 'person' and e2.dst_id = e1.dst_id
       and e2.source_table = 'chunks' and e1.source_id < e2.source_id
