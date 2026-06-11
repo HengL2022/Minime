@@ -21,6 +21,7 @@ const USAGE = `minime <command>
   seed                             load the fictional demo dataset (fixtures/seed.ts)
   sync                             sync data/brain/**/*.md into pages + chunks
   embed                            drain the embedding backlog
+  reembed                          wipe + re-embed all chunks (after switching embed provider/model)
   dream                            run the nightly maintenance job once
   serve                            MCP server (stdio) + inbox watcher + dream cron
   audit --since <Nd>               show what left the box (events), default 7d
@@ -59,6 +60,18 @@ async function main(): Promise<number> {
     case "embed": {
       const n = await drainEmbedBacklog();
       console.log(`embedded ${n} chunks`);
+      return 0;
+    }
+    case "reembed": {
+      // full wipe + re-embed: required when switching EMBED_PROVIDER or embed model,
+      // because vectors from different models are not comparable
+      const { clearEmbeddings, embedModelsInUse } = await import("./db/repo");
+      const { embedModelName } = await import("./llm");
+      const old = await embedModelsInUse();
+      const wiped = await clearEmbeddings();
+      console.log(`wiped ${wiped} embeddings (was: ${old.join(", ") || "none"})`);
+      const n = await drainEmbedBacklog();
+      console.log(`re-embedded ${n} chunks with ${embedModelName()}`);
       return 0;
     }
     case "dream": {

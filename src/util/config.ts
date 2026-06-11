@@ -27,6 +27,8 @@ export const config = {
   openrouterApiKey: process.env.OPENROUTER_API_KEY,
   openrouterBaseUrl: env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
   openrouterModel: env("OPENROUTER_MODEL", "openai/gpt-4o-mini"),
+  // verified live: OpenRouter /embeddings honors dimensions=768 for this model (MRL)
+  openrouterEmbedModel: env("OPENROUTER_EMBED_MODEL", "qwen/qwen3-embedding-8b"),
   bedrockModel: process.env.BEDROCK_MODEL, // required for bedrock; ids aren't guessable
   tz: env("TZ", "Asia/Singapore"),
   tier2UnlockMaxMinutes: Number(env("TIER2_UNLOCK_MAX_MINUTES", "60")),

@@ -77,8 +77,13 @@ to local Ollama but can route to cloud providers — set in `.env` and skip Olla
 | Ollama (default) | ✓ | ✓ | — |
 | Anthropic | ✓ (`ANTHROPIC_MODEL`, default claude-opus-4-8) | — | `ANTHROPIC_API_KEY` |
 | OpenAI | ✓ (`OPENAI_MODEL`) | ✓ (text-embedding-3-* @ 768 dims) | `OPENAI_API_KEY` |
-| OpenRouter | ✓ (`OPENROUTER_MODEL`) | — | `OPENROUTER_API_KEY` |
+| OpenRouter | ✓ (`OPENROUTER_MODEL`) | ✓ (`OPENROUTER_EMBED_MODEL`, default qwen/qwen3-embedding-8b @ 768 dims) | `OPENROUTER_API_KEY` |
 | Bedrock (IAM) | ✓ (`BEDROCK_MODEL`, required) | — | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` |
+
+**Switching the embedding provider/model invalidates existing vectors** (different models =
+different vector spaces). After changing `EMBED_PROVIDER`/`*_EMBED_MODEL`, run
+`bun run src/cli.ts reembed` (wipes and re-embeds every chunk; wrong-dimension responses are
+rejected loudly, never stored).
 
 Privacy contract: cloud providers receive content up to `CLOUD_MAX_TIER` (default 2; tier-0
 financial/health content **never** leaves the box on any path). Every cloud call writes an

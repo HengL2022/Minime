@@ -7,6 +7,8 @@ export const EMBED_DIMS = 768;
 export interface LlmProvider {
   name: string;
   model: string;
+  /** the embeddings model, when the provider can embed (differs from the chat model) */
+  embedModel?: string;
   /** true when calls leave the machine — gates tiers and triggers the egress audit */
   isCloud: boolean;
   embed?(texts: string[]): Promise<number[][]>;

@@ -116,6 +116,19 @@ export async function countChunksMissingEmbedding(): Promise<number> {
   return r!.n;
 }
 
+// Vectors from different models live in different spaces and must never be compared.
+// Switching EMBED_PROVIDER/model therefore wipes everything for a clean re-embed.
+export async function clearEmbeddings(): Promise<number> {
+  const rows = await sql`update chunks set embedding = null, embed_model = null
+                         where embedding is not null returning id`;
+  return rows.length;
+}
+
+export async function embedModelsInUse(): Promise<string[]> {
+  const rows = await sql`select distinct embed_model from chunks where embed_model is not null`;
+  return rows.map((r: any) => r.embed_model);
+}
+
 export interface Candidate {
   id: string;
   parent_type: ParentType;

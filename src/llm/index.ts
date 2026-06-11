@@ -10,7 +10,7 @@ import { openaiCompatProvider } from "./openai-compat";
 import type { FetchFn, LlmProvider } from "./types";
 
 const EMBED_CAPABLE =
-  "embeddings require a 768-dim model: EMBED_PROVIDER must be 'ollama' (nomic-embed-text) or 'openai' (text-embedding-3-* with dimensions=768); anthropic/openrouter have no embeddings API and Bedrock Titan cannot emit 768 dims";
+  "embeddings require a 768-dim model: EMBED_PROVIDER must be 'ollama' (nomic-embed-text), 'openai' (text-embedding-3-*), or 'openrouter' (a dimensions-capable model, e.g. qwen/qwen3-embedding-8b); anthropic has no embeddings API and Bedrock Titan cannot emit 768 dims";
 
 function build(name: ProviderName, fetchFn?: FetchFn): LlmProvider {
   switch (name) {
@@ -37,7 +37,7 @@ function withEgressAudit(p: LlmProvider): LlmProvider {
           await logEvent({
             actor: "system:llm",
             verb: "egress:embed",
-            payload: { provider: p.name, model: p.model, items: texts.length },
+            payload: { provider: p.name, model: p.embedModel ?? p.model, items: texts.length },
           });
           return p.embed!(texts);
         }
@@ -70,7 +70,14 @@ export function embedIsCloud(): boolean {
 
 /** The model name stamped on chunks.embed_model (changing it implies a re-embed). */
 export function embedModelName(): string {
-  return config.embedProvider === "openai" ? config.openaiEmbedModel : config.embedModel;
+  switch (config.embedProvider) {
+    case "openai":
+      return config.openaiEmbedModel;
+    case "openrouter":
+      return config.openrouterEmbedModel;
+    default:
+      return config.embedModel;
+  }
 }
 
 export function classifyIsCloud(): boolean {

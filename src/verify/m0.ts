@@ -40,11 +40,11 @@ function cloudCredsOk(provider: string): [boolean, string] {
   }
 }
 
-const embedOk = ["ollama", "openai"].includes(config.embedProvider);
+const embedOk = ["ollama", "openai", "openrouter"].includes(config.embedProvider);
 check(
   `embed provider: ${config.embedProvider}`,
   embedOk,
-  embedOk ? undefined : "must be ollama or openai (768-dim)",
+  embedOk ? undefined : "must be ollama, openai, or openrouter (768-dim capable)",
 );
 
 if (config.mockOllama) {
@@ -67,13 +67,21 @@ if (config.mockOllama) {
       check("ollama reachable", false, e instanceof Error ? e.message : String(e));
     }
   }
+  const embedModelFor: Record<string, string> = {
+    openai: config.openaiEmbedModel,
+    openrouter: config.openrouterEmbedModel,
+  };
   for (const [job, provider] of [
     ["embed", config.embedProvider],
     ["classify", config.classifyProvider],
   ] as const) {
     if (provider === "ollama") continue;
     const [ok, detail] = cloudCredsOk(provider);
-    check(`${job} provider: ${provider}`, ok, detail);
+    const shown =
+      job === "embed" && embedModelFor[provider]
+        ? detail.replace(/^[^ ]+/, embedModelFor[provider]!)
+        : detail;
+    check(`${job} provider: ${provider}`, ok, shown);
   }
 }
 

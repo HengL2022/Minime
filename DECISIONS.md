@@ -115,3 +115,17 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   and tier-capped, which preserves the spirit of "minimize and audit the egress surface".
 - **Approved by:** human (plan approved 2026-06-11; tier/model/scope choices made by owner).
 
+## 2026-06-11 — Correction: OpenRouter DOES serve embeddings; enabled at 768 dims
+
+- **Context:** The entry above claimed OpenRouter has no embeddings API. Verified live
+  against the owner's account: `POST /api/v1/embeddings` works and honors `dimensions: 768`
+  for `qwen/qwen3-embedding-8b` (Matryoshka model; returns unit-normalized 768-dim vectors).
+- **Decision:** `EMBED_PROVIDER=openrouter` enabled (`OPENROUTER_EMBED_MODEL`, default
+  qwen/qwen3-embedding-8b). Guardrails: responses with any dimension ≠ 768 are rejected
+  loudly and never stored; new `minime reembed` command wipes and re-embeds the corpus when
+  switching embedding provider/model (vectors from different models must never be compared —
+  this also covers the previously deferred model-switch case at constant dimension).
+- **Why:** Owner supplied an OpenRouter key specifically for Qwen3-Embedding-8B; live probe
+  beat stale knowledge.
+- **Approved by:** human (requested).
+

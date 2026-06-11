@@ -80,11 +80,39 @@ describe("factory validation", () => {
     (config as any).bedrockModel = prev;
   });
 
-  test("openrouter cannot embed (no embeddings API)", () => {
+  test("anthropic cannot embed (no embeddings API)", () => {
+    const prev = config.anthropicApiKey;
+    (config as any).anthropicApiKey = "sk-ant-test";
+    const p = anthropicProvider(fakeFetch(() => ({})).fn);
+    expect(p.embed).toBeUndefined();
+    (config as any).anthropicApiKey = prev;
+  });
+
+  test("openrouter embed requests dimensions=768 and rejects wrong-dim responses", async () => {
     const prev = config.openrouterApiKey;
     (config as any).openrouterApiKey = "or-test";
-    const p = openaiCompatProvider("openrouter", fakeFetch(() => ({})).fn);
-    expect(p.embed).toBeUndefined();
+    const { calls, fn } = fakeFetch((c) => ({
+      data: c.body.input.map((_: string, index: number) => ({
+        index,
+        embedding: new Array(EMBED_DIMS).fill(0.1),
+      })),
+    }));
+    const p = openaiCompatProvider("openrouter", fn);
+    const vecs = await p.embed!(["hello"]);
+    expect(vecs[0]!.length).toBe(EMBED_DIMS);
+    expect(calls[0]!.url).toBe("https://openrouter.ai/api/v1/embeddings");
+    expect(calls[0]!.body.model).toBe(config.openrouterEmbedModel);
+    expect(calls[0]!.body.dimensions).toBe(768);
+
+    // a model that ignores `dimensions` must fail loudly, never store wrong-dim vectors
+    const bad = fakeFetch((c) => ({
+      data: c.body.input.map((_: string, index: number) => ({
+        index,
+        embedding: new Array(4096).fill(0.1),
+      })),
+    }));
+    const pBad = openaiCompatProvider("openrouter", bad.fn);
+    await expect(pBad.embed!(["hello"])).rejects.toThrow(/4096 dims/);
     (config as any).openrouterApiKey = prev;
   });
 });
