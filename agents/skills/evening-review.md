@@ -11,9 +11,10 @@ conversation, not a form. Ask one question at a time; write as you go.
    if yes, `minime_log_decision` (capture options even for open decisions; default review_in_days 90).
 3. **"Promise anyone anything?"** — commitments become tasks via `minime_upsert_task`
    (due date if stated) and the people involved get `minime_log_interaction`.
-4. **Triage the inbox** — `minime_state` → if `review_queue_open > 0`, fetch the open
-   `inbox_unfiled` items (they appear in state) and ask, one by one: "task, journal,
-   note, or drop?" File via the matching write tool.
+4. **Triage the inbox** — `minime_state` → if `review_queue_open > 0`, list them with
+   `minime_review_queue` (kind `inbox_unfiled`) and ask, one by one: "task, journal,
+   note, or drop?" File via the matching write tool, then resolve each item
+   (see `review-triage.md` for the full queue pass — here, just the unfiled captures).
 
 ## Answer rules
 

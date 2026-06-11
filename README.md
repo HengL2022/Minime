@@ -38,9 +38,10 @@ degraded modes, machine-parsable output for coding agents — in [AGENTS.md](AGE
 </details>
 
 After install (optional): install `restic` + set `RESTIC_REPOSITORY`/`RESTIC_PASSWORD_FILE`
-for backups; run `bun run src/cli.ts serve` under launchd/systemd for resident mode; paste
-the `agents/skills/` prompts into your agent for the morning-brief, evening-review and
-decision-brief workflows.
+for backups; run `bun run src/cli.ts serve` under launchd/systemd for resident mode; load
+the `agents/skills/` prompts into your agent — `RESOLVER.md` routes requests to the right
+skill (query, graph-query, person-brief, capture, review-triage, morning-brief,
+evening-review, decision-brief).
 
 ## Daily use
 
