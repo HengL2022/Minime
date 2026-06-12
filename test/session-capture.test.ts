@@ -91,10 +91,12 @@ describe("session-capture hook", () => {
     expect(filed).toBe(true);
     const [item] = await sql`select filed_table, filed_id from inbox_items where id = ${inboxId}`;
     expect(item!.filed_table).toBe("pages");
-    const [page] = await sql`select title, source, derived_from from pages
+    const [page] = await sql`select title, source, derived_from, tier from pages
                              where id = ${item!.filed_id}`;
     expect(page!.source).toBe("capture");
     expect(page!.derived_from).toBe(inboxId);
     expect(page!.title).toContain("Agent session");
+    // verbatim cross-project prompt/outcome text stays behind the unlock gate (§12)
+    expect(page!.tier).toBe(2);
   });
 });

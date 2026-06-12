@@ -108,7 +108,11 @@ async function fileRow(
       return ["decisions", id];
     }
     case "note": {
-      // notes become brain pages so they live in the markdown archive (I4)
+      // notes become brain pages so they live in the markdown archive (I4). Agent-session
+      // captures (SessionEnd hook) carry verbatim prompt/outcome text from arbitrary
+      // projects, so they file at tier 2 like journal/interactions — searchable, but
+      // reads stay behind the unlock gate (§12; invariant-review 2026-06-12).
+      const tier = /<!-- hint: agent work session -->/.test(text) ? 2 : 1;
       const slug =
         (c.fields.title || firstLine)
           .toLowerCase()
@@ -129,8 +133,9 @@ async function fileRow(
         createdBy: ACTOR,
         source: "capture",
         derivedFrom: inboxId,
+        tier,
       });
-      await indexParent("page", id, body, c.fields.title || firstLine, 1);
+      await indexParent("page", id, body, c.fields.title || firstLine, tier);
       return ["pages", id];
     }
     default:

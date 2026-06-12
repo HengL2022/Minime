@@ -37,6 +37,19 @@ describe("accessCounts", () => {
     expect(counts.size).toBe(2); // never-drilled id is simply absent
   });
 
+  test("only the primary returned id counts — dossier fan-out rows do not", async () => {
+    const primary = crypto.randomUUID();
+    const related = crypto.randomUUID();
+    await logEvent({
+      actor: ACTOR,
+      verb: "tool:minime_get_context",
+      payload: { returned_ids: [primary, related], returned_count: 2 },
+    });
+    const counts = await accessCounts([primary, related], 90);
+    expect(counts.get(primary)).toBe(1);
+    expect(counts.has(related)).toBe(false);
+  });
+
   test("ignores other verbs — search returns must not feed back into ranking", async () => {
     const id = crypto.randomUUID();
     await logEvent({

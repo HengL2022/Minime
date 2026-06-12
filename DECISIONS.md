@@ -664,3 +664,24 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   (accessCounts window/verb filtering, tie-break boost e2e, hook e2e incl. idempotency +
   watcher filing), full suite + mock eval floors green.
 - **Approved by:** human (owner, 2026-06-12 — plan approved, "start the coding part").
+
+## 2026-06-12 — Amendment: invariant-review hardening of the agentmemory learnings
+
+- **Context:** Same-day invariant review (PASS, 5 warnings) of the entry above; the two
+  substantive warnings fixed before merge, touching §12 tier rules and the §9 access-boost
+  semantics.
+- **Decision:** (1) Session captures file at **tier 2** like journal/interactions — they
+  carry verbatim prompt/outcome text from arbitrary projects, so reads stay behind the
+  unlock gate instead of landing tier-1 agent-readable (watcher detects the
+  `agent work session` hint). (2) `accessCounts()` counts only the PRIMARY
+  `minime_get_context` returned id (`returned_ids[0]`): a person dossier's ~20 related-row
+  ride-alongs no longer count as drill-ins. (3) Partial index `011_access_index.sql` on
+  `events(at) where verb='tool:minime_get_context'` keeps the per-search scan
+  O(drill-ins) as the audit log grows. Deferred as non-blocking: hybridSearch length
+  refactor (pre-existing), archive-walk idempotency cost in the hook, quote-fragile
+  install path.
+- **Why:** Cheapest point to close a privacy laundering channel (cross-project session
+  text auto-filed tier-1) and a diluted ranking signal is before first merge; both fixes
+  shrink rather than grow the feature's surface.
+- **Approved by:** agent-proposed per invariant-reviewer findings (pending human review
+  at merge).
