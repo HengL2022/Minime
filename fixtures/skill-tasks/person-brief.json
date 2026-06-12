@@ -1,0 +1,19 @@
+[
+  {
+    "id": "p-mei",
+    "skill": "person-brief.md",
+    "prompt": "I'm meeting Mei tomorrow afternoon — brief me.",
+    "assert": {
+      "mustCall": ["minime_get_context"],
+      "answerAnyOf": ["pottery", "Punggol", "kids", "sister"]
+    }
+  },
+  {
+    "id": "p-tom",
+    "skill": "person-brief.md",
+    "prompt": "Tom Becker pinged me out of the blue — who is he again?",
+    "assert": {
+      "answerAnyOf": ["robotics", "San Francisco", "colleague"]
+    }
+  }
+]

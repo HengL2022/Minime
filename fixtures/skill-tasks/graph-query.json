@@ -1,0 +1,27 @@
+[
+  {
+    "id": "g-gp",
+    "skill": "graph-query.md",
+    "prompt": "Who is my GP and where do they practice?",
+    "assert": {
+      "answerMatch": ["Ng"],
+      "answerAnyOf": ["Tanjong"]
+    }
+  },
+  {
+    "id": "g-manager",
+    "skill": "graph-query.md",
+    "prompt": "Where does Jordan Lee work and what is his role?",
+    "assert": {
+      "answerMatch": ["Lumenworks"]
+    }
+  },
+  {
+    "id": "g-hana",
+    "skill": "graph-query.md",
+    "prompt": "How do I know Hana Suzuki?",
+    "assert": {
+      "answerAnyOf": ["college", "university"]
+    }
+  }
+]

@@ -1,0 +1,26 @@
+[
+  {
+    "id": "c-thought",
+    "skill": "capture.md",
+    "prompt": "Remember this: the aquarium pH has been drifting up — check the CO2 diffuser next weekend.",
+    "assert": {
+      "mustCall": ["minime_capture"]
+    }
+  },
+  {
+    "id": "c-task",
+    "skill": "capture.md",
+    "prompt": "Add a task: renew my passport before August 15.",
+    "assert": {
+      "mustCall": ["minime_upsert_task"]
+    }
+  },
+  {
+    "id": "c-journal",
+    "skill": "capture.md",
+    "prompt": "Journal entry: slept badly and skipped the morning run, but shipped the reconciliation fix at work.",
+    "assert": {
+      "mustCall": ["minime_journal"]
+    }
+  }
+]

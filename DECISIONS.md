@@ -477,3 +477,34 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   recall 91.2%→84.4%. The measured limit is bge-reranker-v2-m3's discrimination on
   belief-blob text, not the cut heuristic — so autocut stays unchanged; no
   benchmark-fitted parameter ships. Published per the rejected-blend precedent.
+
+## 2026-06-12 — SkillEval: behavioral eval for the skills layer (agents/skills/*.md)
+
+- **Context:** The skills layer was the least-measured surface — retrieval had three
+  benchmarks, the skill files had zero. gbrain-evals' skillopt suite is the model:
+  their target agent runs Claude Haiku 4.5 and their optimizer Claude Sonnet 4.6 (cloud
+  APIs, never local; only their retrieval suite is offline) — same split we land on.
+- **Decision:** `make eval-skills` + `scripts/eval-skills.ts`: per-skill task suites in
+  `fixtures/skill-tasks/*.json` (13 tasks: query 5, graph-query 3, person-brief 2,
+  capture 3) against the seeded fictional fixture corpus on a scratch DB
+  (`minime_eval_skills`, same hard-guard contract). The driver model is the configured
+  CLASSIFY_PROVIDER/CLASSIFY_MODEL, pinned per round in the scorecard; episodes are a
+  ReAct-style JSON loop over `completeJson` through `invokeTool` — the exact agent door
+  (I2) — so scoring is judge-free off the events audit log (I8): mustCall/mustNotCall
+  read `tool:<name>` rows, answers get regex + cited-returned-id checks. No committed
+  pass bars yet: a bar set under Opus would be generous-brittle (gbrain pins the CHEAP
+  model as target for this reason); bars follow once we pick the standing target model
+  and see repeat variance.
+- **Why:** Round live-r1 (bedrock:us.anthropic.claude-opus-4-8 driver, qwen3-embedding-8b
+  embeddings): 12/13, mean 2.8 steps. Published failure: `g-gp` answered the GP question
+  without the clinic location. The earlier identical-config smoke flipped a different
+  single task (q-gap-disclosure: 8 steps of re-searching instead of concluding absence)
+  — run-to-run variance is one task at n=13, which is exactly why bars wait.
+  Found along the way: Ollama "thinking" models (qwen3) return their output in a
+  `thinking` field with an empty `response`, so `LlmProvider.completeJson` yields "" —
+  any thinking model is currently unusable for classify/skill jobs without a provider
+  fix; recorded as a known limitation (default llama3.1:8b unaffected).
+- **Approved by:** agent-built per "keep working on eval" (2026-06-12); driver-model
+  question raised by owner mid-build ("I don't think I will use a local model for the
+  classifier") — resolved by pinning the driver per round and defaulting to the real
+  configured provider.

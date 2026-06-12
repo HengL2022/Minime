@@ -107,6 +107,17 @@ eval-pmb:
 eval-pmb-official:
 	@./scripts/eval-pmb.sh
 
+# SkillEval: behavioral contracts of agents/skills/*.md, driven by a real model
+# (CLASSIFY_PROVIDER/CLASSIFY_MODEL) through the audited tool door; judge-free scoring
+# from the events log. Needs a live embed provider + a chat model (local Ollama works).
+EVAL_SKILLS_DATABASE_URL ?= postgres://minime:minime@localhost:5432/minime_eval_skills
+eval-skills:
+	@createdb -O minime $(notdir $(EVAL_SKILLS_DATABASE_URL)) 2>/dev/null || true
+	@psql -d $(notdir $(EVAL_SKILLS_DATABASE_URL)) \
+		-c "create extension if not exists vector; create extension if not exists pgcrypto;" >/dev/null
+	@DATABASE_URL=$(EVAL_SKILLS_DATABASE_URL) EVAL_SKILLS_DATABASE_URL=$(EVAL_SKILLS_DATABASE_URL) \
+		$(BUN) run scripts/eval-skills.ts --round $(ROUND)
+
 # Release snapshot: dated, committed scorecard for the stability streak. Usage:
 #   make eval-snapshot ROUND=v0.9   → docs/benchmarks/<date>-release-v0.9-minimebench.md
 eval-snapshot:
