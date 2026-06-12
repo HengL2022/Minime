@@ -508,3 +508,22 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   question raised by owner mid-build ("I don't think I will use a local model for the
   classifier") — resolved by pinning the driver per round and defaulting to the real
   configured provider.
+
+## 2026-06-12 — Provider priority: Bedrock (IAM) LLM layer + OpenRouter embeddings
+
+- **Context:** Owner clarified the standing configuration: "local llama is only a
+  option, I prefer to use more advanced model" — AWS Bedrock with IAM credentials for
+  the LLM layer (BEDROCK_MODEL=us.anthropic.claude-opus-4-8, verified in config AND in
+  the egress audit rows of the SkillEval run) and OpenRouter qwen/qwen3-embedding-8b for
+  embeddings. Local Ollama remains a supported fallback, not the preference.
+- **Decision:** Preference documented in .env.example and the Makefile eval comments;
+  benchmark results are reported under the standing config only. Audit of committed
+  rounds: LongMemEval-s, PrecisionMemBench, and SkillEval already ran on this stack;
+  MinimeBench's live-final record predated the OpenRouter-embeddings commit, so it was
+  re-run as round live-qwen3 (3 repeats, reranker on) — now the binding live record:
+  retrieval-en 94/97/99% hit@1/3/5, retrieval-zh 98/100/100%, graph & identity & time
+  100% hit@3, all committed bars held, no regression. The offline mock MinimeBench gate
+  stays provider-free by design (CI determinism). The local-only reranker is orthogonal:
+  I1 forbids chunk text leaving the box for ranking regardless of provider preference.
+- **Approved by:** human (2026-06-12, "make sure the priority... please repeat the
+  benchmark testing"; Bedrock Opus 4.8 confirmed explicitly).

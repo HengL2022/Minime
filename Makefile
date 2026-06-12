@@ -109,7 +109,8 @@ eval-pmb-official:
 
 # SkillEval: behavioral contracts of agents/skills/*.md, driven by a real model
 # (CLASSIFY_PROVIDER/CLASSIFY_MODEL) through the audited tool door; judge-free scoring
-# from the events log. Needs a live embed provider + a chat model (local Ollama works).
+# from the events log. Runs on the standing config (Bedrock LLM + OpenRouter embed);
+# local Ollama is only the free fallback for harness smoke tests.
 EVAL_SKILLS_DATABASE_URL ?= postgres://minime:minime@localhost:5432/minime_eval_skills
 eval-skills:
 	@createdb -O minime $(notdir $(EVAL_SKILLS_DATABASE_URL)) 2>/dev/null || true
@@ -130,4 +131,4 @@ eval-snapshot:
 eval-search-live:
 	@createdb $(notdir $(EVAL_DATABASE_URL)) 2>/dev/null || true
 	@DATABASE_URL=$(EVAL_DATABASE_URL) EVAL_DATABASE_URL=$(EVAL_DATABASE_URL) \
-		$(BUN) run scripts/eval-search.ts --mode live --round live-r1 --repeats 3
+		$(BUN) run scripts/eval-search.ts --mode live --round $(or $(ROUND),live-r1) --repeats 3
