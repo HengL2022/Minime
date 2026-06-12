@@ -52,6 +52,7 @@ ollama: ok (nomic-embed-text,llama3.1:8b)
 demo: seeded | not requested
 verify: pass | pass-degraded | skipped
 mcp: .mcp.json (in-repo) — see AGENTS.md to register elsewhere
+first-run: bun run src/cli.ts onboard   (5-min interview: seed your values, goals, people)
 next: bun run src/cli.ts serve
 ================================
 ```
@@ -122,8 +123,12 @@ bun run src/cli.ts import:calendar export.ics       # and the other importers
 Agent workflow prompts (morning brief, evening review, decision brief) live in
 `agents/skills/*.md`. Project conventions for agents *working on the code* are in
 `CLAUDE.md`; the spec is `minime-build-plan.md`. After installing, point the owner at
-`docs/GUIDE.md` (the human-facing usage guide) and offer `make setup` if they want cloud
-model providers or off-site backups (interactive — run it in *their* terminal, not yours).
+`docs/GUIDE.md` (the human-facing usage guide) and offer two interactive first-run steps —
+both run in *their* terminal, not yours: `make onboard` (the seeding interview: values,
+goals, people, projects) and `make setup` (cloud model providers / off-site backups).
+Alternatively, you can conduct the onboarding interview conversationally yourself and
+write the answers through the MCP tools (`minime_capture` with clear phrasing,
+`minime_upsert_task`, `minime_log_interaction`, `minime_journal`).
 
 ## Update (in place, data and settings preserved)
 

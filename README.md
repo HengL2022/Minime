@@ -59,10 +59,14 @@ evening-review, decision-brief).
 
 ## Daily use
 
-**New here? Read the [owner's guide](docs/GUIDE.md)** — how to capture notes and ideas,
-journal, log decisions, import your data, and build the habits that make it compound.
+**New here?** Run `make onboard` — a 5-minute interview that seeds your values, goals,
+principles, key people, and current projects, so your agents have something to work with
+from day one. Then read the [owner's guide](docs/GUIDE.md) — how to capture notes and
+ideas, journal, log decisions, import your data, and build the habits that make it
+compound.
 
 ```
+make onboard                        # first-run interview (optional, skippable, re-runnable)
 make update                         # pull the latest version — never touches .env or data
 bun run src/cli.ts serve            # MCP server (stdio) + inbox watcher + dream cron
 bun run src/cli.ts sync             # data/brain/**/*.md -> pages + search index

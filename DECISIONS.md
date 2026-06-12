@@ -685,3 +685,27 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   shrink rather than grow the feature's surface.
 - **Approved by:** agent-proposed per invariant-reviewer findings (pending human review
   at merge).
+
+## 2026-06-13 — Onboarding interview: `make onboard` seeds the owner's basics
+
+- **Context:** Post-M9 owner-requested scope: a fresh install starts empty, so the first
+  agent interactions have nothing to reason against. Spec §0 spirit (the database is the
+  product); no §15 item covered first-run seeding.
+- **Decision:** `src/onboard.ts` + `bun run src/cli.ts onboard` (`make onboard`): a
+  skippable, re-runnable terminal interview seeding values_items (priority-ordered),
+  goals (life/year), principles, people (+ owner relation/context via new
+  `setPersonDetails`), tasks, an owner profile page (`me/about.md`, tier 1, indexed
+  immediately), and an opening journal entry (tier 2). All writes go through the
+  existing repo.ts functions with `source='onboard'`, `created_by='human'` —
+  'onboard' is a new source value alongside manual|capture|importer:*|dream so the
+  interview's contribution stays distinguishable (I5). One `onboard:complete` audit
+  event with per-section counts. EOF/Ctrl-D mid-interview means "skip the rest", never
+  a crash, so piped answer files work. Re-running warns and ADDS — it never overwrites.
+  Installer summary gains a `first-run:` hint line (additive; AGENTS.md sample updated);
+  agents may alternatively interview conversationally via the MCP tools (AGENTS.md).
+- **Why:** Day-one usefulness: a morning brief that already knows the owner's values,
+  people, and projects. Terminal interview rather than agent-only because install
+  completes before any MCP client is wired up; in-process stream-driven tests keep it
+  offline-verifiable.
+- **Approved by:** human (owner, 2026-06-13 — "guidance that acts like an interview…
+  when the user installs this software").

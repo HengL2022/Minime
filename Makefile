@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 BUN := bun
 
-.PHONY: install setup install-hooks update up down migrate seed embed test lint verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify restore-drill restore-pitr promote-restore eval-search eval-search-live eval-snapshot eval-pmb
+.PHONY: install setup install-hooks onboard update up down migrate seed embed test lint verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify restore-drill restore-pitr promote-restore eval-search eval-search-live eval-snapshot eval-pmb
 
 # Scratch DB for MinimeBench — a throwaway database the runner DROPs and rebuilds. Derived
 # from DATABASE_URL so non-default ports just work; override EVAL_DATABASE_URL to change it.
@@ -15,6 +15,11 @@ install:
 # local-Ollama defaults need no credentials; install.sh stays non-interactive.
 setup:
 	@bash scripts/setup-env.sh
+
+# First-run interview: seeds values, goals, principles, key people, projects, and an
+# opening journal entry. Optional, skippable per question, re-run adds (never overwrites).
+onboard:
+	@$(BUN) run src/cli.ts onboard
 
 # Pull the latest version from GitHub and migrate — never touches .env*, data/, or
 # backups (gitignored). Takes a restic db-snap first when backups are configured.

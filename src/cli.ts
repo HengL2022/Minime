@@ -23,6 +23,7 @@ const USAGE = `minime <command>
   sync                             sync data/brain/**/*.md into pages + chunks
   embed                            drain the embedding backlog
   reembed                          wipe + re-embed all chunks (after switching embed provider/model)
+  onboard                          first-run interview: seed your values, goals, people, projects
   dream                            run the nightly maintenance job once
   backup                           take a tagged db snapshot now (pg_dump -> restic db-snap)
   serve                            MCP server (stdio) + inbox watcher + dream cron
@@ -79,6 +80,12 @@ async function main(): Promise<number> {
     case "dream": {
       const summary = await dream();
       console.log(JSON.stringify(summary, null, 2));
+      return 0;
+    }
+    case "onboard": {
+      await migrate();
+      const { onboard } = await import("./onboard");
+      await onboard();
       return 0;
     }
     case "backup": {

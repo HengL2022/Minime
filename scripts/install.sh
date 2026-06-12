@@ -353,6 +353,7 @@ echo "ollama: ${SUMMARY_OLLAMA:-ok}"
 echo "demo: $SUMMARY_DEMO"
 echo "verify: $SUMMARY_VERIFY"
 echo "mcp: .mcp.json (in-repo) — see AGENTS.md to register elsewhere"
+echo "first-run: bun run src/cli.ts onboard   (5-min interview: seed your values, goals, people)"
 echo "next: bun run src/cli.ts serve"
 echo "================================"
 exit 0

@@ -7,6 +7,19 @@ the owner, day to day.)
 The mental model, in one line: **files are the archive, rows are the state, Postgres is
 the index** — and everything you drop in becomes searchable for you and your agents.
 
+## Day one: the onboarding interview
+
+```
+make onboard
+```
+
+Five minutes of questions that seed the foundation agents reason against: who you are
+(a profile page), your **values** in priority order, **goals** (life + this year),
+**principles** you live by, the **key people** around you, current **projects**, and an
+opening journal snapshot. Every question is skippable with Enter; re-running adds
+entries rather than overwriting; everything is editable later. The point is that your
+very first "give me a morning brief" already knows what matters to you.
+
 ## Putting things in
 
 ### 1. The inbox — for anything, anytime (lowest friction)

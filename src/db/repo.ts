@@ -303,6 +303,17 @@ export async function ensurePerson(
   return { id: row!.id, created: true };
 }
 
+// Owner-relation + free-text context (onboarding interview); never blanks existing values.
+export async function setPersonDetails(
+  id: string,
+  relation: string | null,
+  context: string | null,
+): Promise<void> {
+  await sql`update people set relation = coalesce(${relation}, relation),
+                              context = coalesce(${context}, context)
+            where id = ${id}`;
+}
+
 export async function addAlias(personId: string, alias: string): Promise<void> {
   await sql`insert into person_aliases (person_id, alias) values (${personId}, ${alias})
             on conflict do nothing`;
@@ -549,6 +560,12 @@ export async function insertGoal(
             ${g.createdBy ?? "human"}, ${g.source ?? "manual"})
     returning id`;
   return row as any;
+}
+
+// Onboarding re-run hint: a non-empty values table means the interview already ran once.
+export async function valuesCount(): Promise<number> {
+  const [r] = await sql`select count(*)::int as n from values_items`;
+  return r!.n;
 }
 
 export async function insertValueItem(
