@@ -24,6 +24,9 @@ process.env.TZ = "Asia/Singapore";
 // local defaults; provider-specific tests patch the config object themselves
 process.env.EMBED_PROVIDER = "ollama";
 process.env.CLASSIFY_PROVIDER = "ollama";
+// the rerank stage must never fire in tests (live HTTP + order changes); rerank tests
+// inject their own config and fetch
+delete process.env.RERANK_URL;
 process.env.MINIME_DATA_DIR = mkdtempSync(join(tmpdir(), "minime-test-"));
 
 // Close the postgres pool after the whole run, or open sockets keep bun alive forever.

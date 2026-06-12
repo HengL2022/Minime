@@ -378,3 +378,26 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
 - **Why:** First public-benchmark anchor for the engine, fully deterministic and
   reproducible (`docs/benchmarks/2026-06-12-longmemeval-s.md`).
 - **Approved by:** human (requested the full 500-question run).
+
+## 2026-06-12 — Phase 3: local cross-encoder reranker + autocut (§4 amendment)
+
+- **Context:** Plan Phase 3; the documented reranker-class misses (MinimeBench en-99/p-3;
+  LongMemEval preference/temporal types). Adds an OPTIONAL local service to the pinned
+  stack: llama.cpp's llama-server with bge-reranker-v2-m3 (GGUF, ~600MB) serving
+  /v1/rerank on localhost. Spec §4 lists Ollama as the only model server — this is the
+  same pattern (local inference daemon), opt-in via RERANK_URL, and the stack works
+  unchanged without it.
+- **Decision:** New `src/search/rerank.ts` (client) + `src/search/autocut.ts` (pure
+  score-cliff result sizing, opt-in) wired into hybridSearch: top RERANK_TOP_IN=20
+  parents' best chunks are cross-encoded and reordered; the tail keeps RRF order so
+  recall cannot drop. Hard rules: localhost-only (a non-local RERANK_URL disables the
+  stage — chunk text never leaves the box for ranking, I1); fail-open with a once-per-
+  process degradation warning; benchmark runners probe the endpoint and ABORT instead of
+  silently measuring a no-op (lesson: the first bench run silently fell back when
+  llama-server's default 512-token batch rejected ~600-token pairs — serve with -ub 4096).
+  Autocut runs only on rerank scores, never RRF gaps (GBrain's measured lesson).
+- **Why:** LongMemEval-s, 500 questions: recall@1 74.8%→88.8%, recall@5 94.0%→97.2%
+  (gbrain's published mark: 97.6%), recall@10 97.6%→99.2%, MRR@10 0.830→0.926.
+  Weak types moved as predicted: preference 70.0→83.3 @5, temporal 90.2→95.5 @5.
+  Rerank cost ~0.3-0.6s per query on Metal, local and free.
+- **Approved by:** human (requested Phase 3).

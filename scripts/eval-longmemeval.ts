@@ -63,7 +63,22 @@ async function guard(): Promise<void> {
     console.error(`ERROR: refusing to run — connected database "${db}" is not a scratch eval DB.`);
     process.exit(2);
   }
-  console.error(`LongMemEval-s: db=${db}`);
+  // benchmarks must be LOUD about stage health: a fail-open reranker silently degrading
+  // turns a Phase-3 measurement into a baseline re-run (incident: first rerank bench run)
+  const { rerankEnabled, rerankProbe } = await import("../src/search/rerank");
+  let rerankActive = false;
+  if (rerankEnabled()) {
+    rerankActive = await rerankProbe();
+    if (!rerankActive) {
+      console.error(
+        "ERROR: RERANK_URL is set but the probe call failed — fix the server or unset.",
+      );
+      process.exit(2);
+    }
+  }
+  console.error(
+    `LongMemEval-s: db=${db} rerank=${rerankActive ? `on (${process.env.RERANK_MODEL ?? "bge-reranker-v2-m3"})` : "off"}`,
+  );
 }
 
 async function ingest(questions: Question[]): Promise<void> {

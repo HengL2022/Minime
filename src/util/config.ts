@@ -36,6 +36,11 @@ export const config = {
   resticPasswordFile: process.env.RESTIC_PASSWORD_FILE,
   dreamCron: env("DREAM_CRON", "0 3 * * *"),
   dataDir: env("MINIME_DATA_DIR", `${process.cwd()}/data`),
+  // Optional LOCAL cross-encoder reranker (llama-server --rerank). Unset = stage disabled.
+  // Localhost-only by construction (I1): src/search/rerank.ts refuses non-local hosts.
+  rerankUrl: process.env.RERANK_URL, // e.g. http://localhost:8114
+  rerankModel: env("RERANK_MODEL", "bge-reranker-v2-m3"),
+  rerankTopIn: ((n) => (Number.isInteger(n) && n > 0 ? n : 20))(Number(env("RERANK_TOP_IN", "20"))),
   // CI/tests run fully offline (I1): deterministic embeddings + heuristic classifier.
   mockOllama: process.env.MINIME_MOCK_OLLAMA === "1",
 };

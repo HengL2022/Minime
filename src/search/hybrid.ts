@@ -20,8 +20,11 @@ import {
   vectorCandidates,
 } from "../db/repo";
 import { now } from "../util/clock";
+import { config } from "../util/config";
+import { autocut } from "./autocut";
 import { embedQuery } from "./embed";
 import { intentNudge } from "./intent";
+import { rerank, rerankEnabled } from "./rerank";
 import { titleBoost } from "./title-match";
 
 export interface Hit {
@@ -93,6 +96,30 @@ export function snippet(text: string, query: string): string {
   return out.length > 400 ? `${out.slice(0, 400)}…` : out;
 }
 
+// Phase-3 rerank stage: cross-encode (query, best chunk) for the top RERANK_TOP_IN
+// parents and reorder them by relevance; the un-reranked tail keeps RRF order so recall
+// never drops. Fail-open: a null score set leaves the order untouched. Autocut sizes the
+// result on the rerank-score cliff only (never RRF gaps — they carry no correctness
+// signal); without rerank scores it is a no-op.
+async function rerankStage<T extends { c: { text: string } }>(
+  query: string,
+  ranked: T[],
+  limit: number,
+  wantAutocut: boolean,
+): Promise<{ ordered: T[]; cut: number }> {
+  if (!rerankEnabled() || ranked.length < 2) return { ordered: ranked, cut: limit };
+  const head = ranked.slice(0, config.rerankTopIn);
+  const scores = await rerank(
+    query,
+    head.map((s) => s.c.text),
+  );
+  if (!scores) return { ordered: ranked, cut: limit };
+  const order = head.map((s, i) => ({ s, score: scores[i]! })).sort((a, b) => b.score - a.score);
+  const ordered = [...order.map((o) => o.s), ...ranked.slice(config.rerankTopIn)];
+  const cut = wantAutocut ? Math.min(limit, autocut(order.map((o) => o.score))) : limit;
+  return { ordered, cut };
+}
+
 export async function hybridSearch(opts: {
   query: string;
   types?: string[] | null;
@@ -100,6 +127,8 @@ export async function hybridSearch(opts: {
   includeDerived?: boolean;
   /** optional scope: restrict candidates to these parent row ids (e.g. a benchmark haystack) */
   scopeParentIds?: string[] | null;
+  /** cut the result list at the rerank-score cliff (only meaningful with the reranker on) */
+  autocut?: boolean;
 }): Promise<Hit[]> {
   const { query } = opts;
   const types = opts.types?.length ? opts.types : null;
@@ -193,17 +222,17 @@ export async function hybridSearch(opts: {
     if (!prev || s.score > prev.score) bestByParent.set(key, s);
   }
 
-  return [...bestByParent.values()]
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit)
-    .map((s) => ({
-      type: s.c.parent_type,
-      id: s.c.parent_id,
-      title: s.m.title,
-      snippet: snippet(s.c.text, query),
-      score: Number(s.score.toFixed(4)),
-      updated_at: s.m.updated_at,
-      derived: s.derived,
-      created_by: s.m.created_by,
-    }));
+  const ranked = [...bestByParent.values()].sort((a, b) => b.score - a.score);
+  const { ordered, cut } = await rerankStage(query, ranked, limit, opts.autocut ?? false);
+
+  return ordered.slice(0, cut).map((s) => ({
+    type: s.c.parent_type,
+    id: s.c.parent_id,
+    title: s.m.title,
+    snippet: snippet(s.c.text, query),
+    score: Number(s.score.toFixed(4)),
+    updated_at: s.m.updated_at,
+    derived: s.derived,
+    created_by: s.m.created_by,
+  }));
 }
