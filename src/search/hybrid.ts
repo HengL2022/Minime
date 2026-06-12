@@ -117,6 +117,23 @@ async function rerankStage<T extends { c: { text: string } }>(
   const order = head.map((s, i) => ({ s, score: scores[i]! })).sort((a, b) => b.score - a.score);
   const ordered = [...order.map((o) => o.s), ...ranked.slice(config.rerankTopIn)];
   const cut = wantAutocut ? Math.min(limit, autocut(order.map((o) => o.score))) : limit;
+  // calibration observability: raw cross-encoder scores per query, opt-in via env.
+  // Offline analysis only — never consulted by the retrieval path.
+  if (process.env.RERANK_DEBUG) {
+    const { appendFileSync } = await import("node:fs");
+    appendFileSync(
+      process.env.RERANK_DEBUG,
+      `${JSON.stringify({
+        query,
+        cut,
+        scored: order.map((o) => ({
+          id: (o.s.c as { parent_id?: string }).parent_id,
+          title: (o.s as unknown as { m?: { title?: string } }).m?.title,
+          score: o.score,
+        })),
+      })}\n`,
+    );
+  }
   return { ordered, cut };
 }
 

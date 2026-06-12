@@ -466,3 +466,14 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   relevance floor) is a separate, gated calibration cycle.
 - **Approved by:** agent-built per "keep working on eval" (2026-06-12); scorecards
   committed at docs/benchmarks/2026-06-12-live-{baseline,rerank}-precisionmembench.md.
+
+- **Addendum (same day) — autocut calibration cycle, concluded negative:** Added an
+  opt-in `RERANK_DEBUG=<path>` NDJSON dump of raw cross-encoder scores per query in
+  `hybridSearch` (observability only, never consulted by retrieval). Calibration over
+  all 81 PrecisionMemBench queries: gold median logit -4.18 / p10 -9.02 vs junk p95
+  -5.65 — the distributions overlap too much for ANY absolute relevance floor (floor -5
+  keeps only 60% of gold while passing 38 junk), and a "no-cliff → cap at top-K"
+  fallback moves strict shouldOnlyInclude passes just 33→37 at K=1 while dropping mean
+  recall 91.2%→84.4%. The measured limit is bge-reranker-v2-m3's discrimination on
+  belief-blob text, not the cut heuristic — so autocut stays unchanged; no
+  benchmark-fitted parameter ships. Published per the rejected-blend precedent.
