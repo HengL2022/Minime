@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "corpus": "persona-en",
+  "area": "graph",
+  "note": "Relational questions answered from the typed-edge graph (works_at edges, people.relation, org existence). The scorer resolves each via repo graph primitives (entitiesNamedIn/oneHopNeighbors + relation/org reads) — never the LLM. 'relevant' lists the brain page that documents the relation, so retrieval-side hit@3 is also measured. 'graph' carries the structured probe + expected substrings (sealed).",
+  "entries": [
+    {
+      "id": "g-1",
+      "query": "Who works at Fjordsonics?",
+      "relevant": ["Work at Fjordsonics"],
+      "graph": {
+        "probe": "worksAtOrg",
+        "arg": "Fjordsonics",
+        "expect": ["Sigrid Halvorsen", "Tomasz"]
+      }
+    },
+    {
+      "id": "g-2",
+      "query": "Who is my manager?",
+      "relevant": ["Work at Fjordsonics"],
+      "graph": { "probe": "byRelation", "arg": "manager", "expect": ["Sigrid Halvorsen"] }
+    },
+    {
+      "id": "g-3",
+      "query": "Who is my physiotherapist?",
+      "relevant": ["Running and fitness"],
+      "graph": { "probe": "byRelation", "arg": "physiotherapist", "expect": ["Kari Nystrøm"] }
+    },
+    {
+      "id": "g-4",
+      "query": "Where does my physiotherapist work?",
+      "relevant": ["Running and fitness"],
+      "graph": { "probe": "employerOf", "arg": "Kari Nystrøm", "expect": ["Rosenborg Fysio"] }
+    },
+    {
+      "id": "g-5",
+      "query": "Who works at Multiconsult?",
+      "relevant": ["Family and friends"],
+      "graph": { "probe": "worksAtOrg", "arg": "Multiconsult", "expect": ["Ingrid Fossum"] }
+    },
+    {
+      "id": "g-6",
+      "query": "Where does Meera work?",
+      "relevant": ["Family and friends"],
+      "graph": { "probe": "employerOf", "arg": "Meera", "expect": ["RBC"] }
+    },
+    {
+      "id": "g-7",
+      "query": "Who is my GP?",
+      "relevant": ["Allergies and medical notes"],
+      "graph": { "probe": "byRelation", "arg": "gp", "expect": ["Henrik Sølvberg"] }
+    },
+    {
+      "id": "g-8",
+      "query": "Where does my GP work?",
+      "relevant": ["Allergies and medical notes"],
+      "graph": {
+        "probe": "employerOf",
+        "arg": "Henrik Sølvberg",
+        "expect": ["Bakklandet Legesenter"]
+      }
+    },
+    {
+      "id": "g-9",
+      "query": "Who is Biscuit's vet?",
+      "relevant": ["Biscuit the whippet"],
+      "graph": { "probe": "byRelation", "arg": "vet", "expect": ["Annika Moe"] }
+    },
+    {
+      "id": "g-10",
+      "query": "Which clinic does the vet work at?",
+      "relevant": ["Biscuit the whippet"],
+      "graph": { "probe": "employerOf", "arg": "Annika Moe", "expect": ["Heimdal Smådyrklinikk"] }
+    },
+    {
+      "id": "g-11",
+      "query": "Who is my landlord?",
+      "relevant": ["Apartment on Bakklandet"],
+      "graph": { "probe": "byRelation", "arg": "landlord", "expect": ["Odd-Einar Strand"] }
+    },
+    {
+      "id": "g-12",
+      "query": "Who is my sister?",
+      "relevant": ["Family and friends"],
+      "graph": { "probe": "byRelation", "arg": "sister", "expect": ["Meera"] }
+    },
+    {
+      "id": "g-13",
+      "query": "Is my car's service shop in the graph?",
+      "relevant": ["Car — Škoda Octavia"],
+      "graph": { "probe": "orgExists", "arg": "Møller Bil", "expect": ["Møller Bil"] }
+    },
+    {
+      "id": "g-14",
+      "query": "Is my employer in the graph?",
+      "relevant": ["Work at Fjordsonics"],
+      "graph": { "probe": "orgExists", "arg": "Fjordsonics", "expect": ["Fjordsonics AS"] }
+    },
+    {
+      "id": "g-15",
+      "query": "Is NTNU (research partner) in the graph?",
+      "relevant": ["Project SILDRE"],
+      "graph": { "probe": "orgExists", "arg": "NTNU", "expect": ["NTNU"] }
+    }
+  ]
+}

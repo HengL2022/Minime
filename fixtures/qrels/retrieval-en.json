@@ -1,0 +1,507 @@
+{
+  "version": 1,
+  "corpus": "persona-en",
+  "area": "retrieval-en",
+  "entries": [
+    {
+      "id": "en-1",
+      "query": "What breed is my dog?",
+      "relevant": ["Biscuit the whippet", "About me"]
+    },
+    {
+      "id": "en-2",
+      "query": "Who is my manager at work?",
+      "relevant": ["Work at Fjordsonics"]
+    },
+    {
+      "id": "en-3",
+      "query": "Which food am I severely allergic to?",
+      "relevant": ["Allergies and medical notes"]
+    },
+    {
+      "id": "en-4",
+      "query": "What musical instrument do I play?",
+      "relevant": ["Nyckelharpa", "About me"]
+    },
+    {
+      "id": "en-5",
+      "query": "When is the full 36-node SILDRE field deployment due?",
+      "relevant": ["Project SILDRE", "Goals for 2026"]
+    },
+    {
+      "id": "en-6",
+      "query": "What is my 10K personal best time?",
+      "relevant": ["Running and fitness"]
+    },
+    {
+      "id": "en-7",
+      "query": "Who built my nyckelharpa?",
+      "relevant": ["Nyckelharpa"]
+    },
+    {
+      "id": "en-8",
+      "query": "Which vet clinic does my dog go to?",
+      "relevant": ["Biscuit the whippet"]
+    },
+    {
+      "id": "en-9",
+      "query": "How much rent do I pay per month?",
+      "relevant": ["Apartment on Bakklandet"]
+    },
+    {
+      "id": "en-10",
+      "query": "What is my landlord's name?",
+      "relevant": ["Apartment on Bakklandet"]
+    },
+    {
+      "id": "en-11",
+      "query": "What kind of car do I drive?",
+      "relevant": ["Car — Škoda Octavia"]
+    },
+    {
+      "id": "en-12",
+      "query": "What is my car's registration plate?",
+      "relevant": ["Car — Škoda Octavia"]
+    },
+    {
+      "id": "en-13",
+      "query": "Where does my sister live and what is her job?",
+      "relevant": ["Family and friends", "About me"]
+    },
+    {
+      "id": "en-14",
+      "query": "What is my sourdough starter called?",
+      "relevant": ["Recipes and cooking"]
+    },
+    {
+      "id": "en-15",
+      "query": "Which garden was the top highlight of my Japan trip?",
+      "relevant": ["Japan trip April 2025"]
+    },
+    {
+      "id": "en-16",
+      "query": "What knife did I buy in Japan?",
+      "relevant": ["Japan trip April 2025", "Recipes and cooking"]
+    },
+    {
+      "id": "en-17",
+      "query": "What operating system does the SILDRE node firmware run on?",
+      "relevant": ["Project SILDRE"]
+    },
+    {
+      "id": "en-18",
+      "query": "What is the total budget of the SILDRE contract?",
+      "relevant": ["Project SILDRE"]
+    },
+    {
+      "id": "en-19",
+      "query": "When is the half-marathon I am training for?",
+      "relevant": ["Running and fitness", "Goals for 2026"]
+    },
+    {
+      "id": "en-20",
+      "query": "Who is treating my knee problem, and where?",
+      "relevant": ["Running and fitness"]
+    },
+    {
+      "id": "en-21",
+      "query": "What diagnosis did I get for the pain when running long distances?",
+      "relevant": ["Running and fitness"]
+    },
+    {
+      "id": "en-22",
+      "query": "How much money do I put aside every month for the cabin?",
+      "relevant": ["Money goals", "Goals for 2026"]
+    },
+    {
+      "id": "en-23",
+      "query": "Near which town do I want to buy a cabin?",
+      "relevant": ["Money goals"]
+    },
+    {
+      "id": "en-24",
+      "query": "Where does my book club meet?",
+      "relevant": ["Books and media"]
+    },
+    {
+      "id": "en-25",
+      "query": "Who is my favorite author?",
+      "relevant": ["Books and media"]
+    },
+    {
+      "id": "en-26",
+      "query": "How did I first meet Ingrid?",
+      "relevant": ["Bouldering", "Family and friends"]
+    },
+    {
+      "id": "en-27",
+      "query": "What bouldering grade am I currently comfortable with?",
+      "relevant": ["Bouldering"]
+    },
+    {
+      "id": "en-28",
+      "query": "What is my dog afraid of?",
+      "relevant": ["Biscuit the whippet"]
+    },
+    {
+      "id": "en-29",
+      "query": "What do I cook when I am feeling homesick?",
+      "relevant": ["Recipes and cooking"]
+    },
+    {
+      "id": "en-30",
+      "query": "Which Norwegian language exam am I taking in November?",
+      "relevant": ["Goals for 2026"]
+    },
+    {
+      "id": "en-31",
+      "query": "When was I born?",
+      "relevant": ["About me"]
+    },
+    {
+      "id": "en-32",
+      "query": "In which city did I grow up?",
+      "relevant": ["About me", "Family and friends"]
+    },
+    {
+      "id": "en-33",
+      "query": "What year did I move to Norway?",
+      "relevant": ["About me"]
+    },
+    {
+      "id": "en-34",
+      "query": "What subject was my master's degree in?",
+      "relevant": ["About me"]
+    },
+    {
+      "id": "en-35",
+      "query": "What is my native language?",
+      "relevant": ["About me"]
+    },
+    {
+      "id": "en-36",
+      "query": "Which bakery currently tops my cinnamon bun ranking?",
+      "relevant": ["About me"]
+    },
+    {
+      "id": "en-37",
+      "query": "When did I join Fjordsonics?",
+      "relevant": ["Work at Fjordsonics"]
+    },
+    {
+      "id": "en-38",
+      "query": "How many people work at my company?",
+      "relevant": ["Work at Fjordsonics"]
+    },
+    {
+      "id": "en-39",
+      "query": "Who is the embedded firmware lead at work?",
+      "relevant": ["Work at Fjordsonics", "Project SILDRE", "Family and friends"]
+    },
+    {
+      "id": "en-40",
+      "query": "Where is my office located?",
+      "relevant": ["Work at Fjordsonics"]
+    },
+    {
+      "id": "en-41",
+      "query": "How big a raise did I negotiate in 2026?",
+      "relevant": ["Work at Fjordsonics", "Money goals"]
+    },
+    {
+      "id": "en-42",
+      "query": "How many hydrophone nodes does the SILDRE array have?",
+      "relevant": ["Project SILDRE", "Goals for 2026"]
+    },
+    {
+      "id": "en-43",
+      "query": "Which fish species does SILDRE track?",
+      "relevant": ["Project SILDRE"]
+    },
+    {
+      "id": "en-44",
+      "query": "Who is the research partner on SILDRE?",
+      "relevant": ["Project SILDRE"]
+    },
+    {
+      "id": "en-45",
+      "query": "What frequency band does the on-node band-pass filter cover?",
+      "relevant": ["Project SILDRE"]
+    },
+    {
+      "id": "en-46",
+      "query": "What microcontroller does the node firmware run on?",
+      "relevant": ["Project SILDRE"]
+    },
+    {
+      "id": "en-47",
+      "query": "When did the SILDRE prototype review pass?",
+      "relevant": ["Project SILDRE"]
+    },
+    {
+      "id": "en-48",
+      "query": "What went wrong during the six-node wet test?",
+      "relevant": ["Project SILDRE"]
+    },
+    {
+      "id": "en-49",
+      "query": "Where were the wet test nodes deployed?",
+      "relevant": ["Project SILDRE"]
+    },
+    {
+      "id": "en-50",
+      "query": "Which component is single-sourced from a vendor in Aberdeen?",
+      "relevant": ["Project SILDRE"]
+    },
+    {
+      "id": "en-51",
+      "query": "How long is the lead time for the acoustic release vendor?",
+      "relevant": ["Project SILDRE"]
+    },
+    {
+      "id": "en-52",
+      "query": "What is my 5K personal best?",
+      "relevant": ["Running and fitness"]
+    },
+    {
+      "id": "en-53",
+      "query": "What is my target time for the half-marathon?",
+      "relevant": ["Running and fitness", "Goals for 2026"]
+    },
+    {
+      "id": "en-54",
+      "query": "What brand of running shoes do I use?",
+      "relevant": ["Running and fitness"]
+    },
+    {
+      "id": "en-55",
+      "query": "What strength exercises did the physiotherapist give me?",
+      "relevant": ["Running and fitness"]
+    },
+    {
+      "id": "en-56",
+      "query": "At what age was my nut allergy diagnosed?",
+      "relevant": ["Allergies and medical notes"]
+    },
+    {
+      "id": "en-57",
+      "query": "Where do I keep my EpiPens?",
+      "relevant": ["Allergies and medical notes"]
+    },
+    {
+      "id": "en-58",
+      "query": "When was my last allergic reaction?",
+      "relevant": ["Allergies and medical notes"]
+    },
+    {
+      "id": "en-59",
+      "query": "Who is my GP?",
+      "relevant": ["Allergies and medical notes"]
+    },
+    {
+      "id": "en-60",
+      "query": "What is my blood type?",
+      "relevant": ["Allergies and medical notes"]
+    },
+    {
+      "id": "en-61",
+      "query": "When was my dog born?",
+      "relevant": ["Biscuit the whippet"]
+    },
+    {
+      "id": "en-62",
+      "query": "Where was my dog's breeder located?",
+      "relevant": ["Biscuit the whippet"]
+    },
+    {
+      "id": "en-63",
+      "query": "What brand of food does my dog eat?",
+      "relevant": ["Biscuit the whippet"]
+    },
+    {
+      "id": "en-64",
+      "query": "Which company insures my dog?",
+      "relevant": ["Biscuit the whippet"]
+    },
+    {
+      "id": "en-65",
+      "query": "What color is my dog's winter jumper?",
+      "relevant": ["Biscuit the whippet"]
+    },
+    {
+      "id": "en-66",
+      "query": "What got me into playing the nyckelharpa?",
+      "relevant": ["Nyckelharpa"]
+    },
+    {
+      "id": "en-67",
+      "query": "In which city did I buy my nyckelharpa?",
+      "relevant": ["Nyckelharpa"]
+    },
+    {
+      "id": "en-68",
+      "query": "Which tune have I been struggling with for months?",
+      "relevant": ["Nyckelharpa", "Goals for 2026"]
+    },
+    {
+      "id": "en-69",
+      "query": "At which pub do I want to perform a slängpolska?",
+      "relevant": ["Nyckelharpa", "Goals for 2026"]
+    },
+    {
+      "id": "en-70",
+      "query": "What is my bouldering project grade?",
+      "relevant": ["Bouldering", "Goals for 2026"]
+    },
+    {
+      "id": "en-71",
+      "query": "Where did Ingrid and I go on last summer's outdoor climbing trip?",
+      "relevant": ["Bouldering"]
+    },
+    {
+      "id": "en-72",
+      "query": "Which finger did I injure climbing in March?",
+      "relevant": ["Bouldering"]
+    },
+    {
+      "id": "en-73",
+      "query": "Which crag are we aiming to climb at in July?",
+      "relevant": ["Bouldering", "Goals for 2026"]
+    },
+    {
+      "id": "en-74",
+      "query": "What ryokan did we stay at in Takayama?",
+      "relevant": ["Japan trip April 2025"]
+    },
+    {
+      "id": "en-75",
+      "query": "What precaution did I take for my allergy before the Japan trip?",
+      "relevant": ["Japan trip April 2025"]
+    },
+    {
+      "id": "en-76",
+      "query": "Where in Japan do I want to see the herring runs?",
+      "relevant": ["Japan trip April 2025"]
+    },
+    {
+      "id": "en-77",
+      "query": "What is my home address?",
+      "relevant": ["Apartment on Bakklandet"]
+    },
+    {
+      "id": "en-78",
+      "query": "How did the sofa get into my apartment?",
+      "relevant": ["Apartment on Bakklandet"]
+    },
+    {
+      "id": "en-79",
+      "query": "What does my landlord leave on my doormat every September?",
+      "relevant": ["Apartment on Bakklandet", "Money goals"]
+    },
+    {
+      "id": "en-80",
+      "query": "What electricity contract do I have?",
+      "relevant": ["Apartment on Bakklandet"]
+    },
+    {
+      "id": "en-81",
+      "query": "How many kilometers are on my car now?",
+      "relevant": ["Car — Škoda Octavia"]
+    },
+    {
+      "id": "en-82",
+      "query": "Where do I take my car for service?",
+      "relevant": ["Car — Škoda Octavia"]
+    },
+    {
+      "id": "en-83",
+      "query": "What winter tires are on my car?",
+      "relevant": ["Car — Škoda Octavia"]
+    },
+    {
+      "id": "en-84",
+      "query": "When is my car's next EU-kontroll due?",
+      "relevant": ["Car — Škoda Octavia"]
+    },
+    {
+      "id": "en-85",
+      "query": "What are my niece and nephew called?",
+      "relevant": ["Family and friends", "Goals for 2026"]
+    },
+    {
+      "id": "en-86",
+      "query": "Where do my parents live?",
+      "relevant": ["Family and friends", "About me"]
+    },
+    {
+      "id": "en-87",
+      "query": "Where does Ingrid work?",
+      "relevant": ["Family and friends"]
+    },
+    {
+      "id": "en-88",
+      "query": "What is the secret to my grandmother's rasam?",
+      "relevant": ["Recipes and cooking"]
+    },
+    {
+      "id": "en-89",
+      "query": "Where do I buy tamarind?",
+      "relevant": ["Recipes and cooking"]
+    },
+    {
+      "id": "en-90",
+      "query": "Who looks after my sourdough starter when I travel?",
+      "relevant": ["Recipes and cooking"]
+    },
+    {
+      "id": "en-91",
+      "query": "How do I care for my santoku knife after using it?",
+      "relevant": ["Recipes and cooking"]
+    },
+    {
+      "id": "en-92",
+      "query": "What book is the club reading in June 2026?",
+      "relevant": ["Books and media"]
+    },
+    {
+      "id": "en-93",
+      "query": "Which Rachel Carson book pointed me toward marine acoustics?",
+      "relevant": ["Books and media"]
+    },
+    {
+      "id": "en-94",
+      "query": "Which Nordic crime series did I watch twice?",
+      "relevant": ["Books and media", "Goals for 2026"]
+    },
+    {
+      "id": "en-95",
+      "query": "What is my cabin down payment target?",
+      "relevant": ["Money goals"]
+    },
+    {
+      "id": "en-96",
+      "query": "Which broker holds my cabin fund?",
+      "relevant": ["Money goals"]
+    },
+    {
+      "id": "en-97",
+      "query": "How much is in the cabin fund as of May 2026?",
+      "relevant": ["Money goals"]
+    },
+    {
+      "id": "en-98",
+      "query": "What is my annual travel budget?",
+      "relevant": ["Money goals"]
+    },
+    {
+      "id": "en-99",
+      "query": "How many nyckelharpa tunes do I currently know by heart?",
+      "relevant": ["Goals for 2026"]
+    },
+    {
+      "id": "en-100",
+      "query": "What did I delete from my phone for peace of mind?",
+      "relevant": ["Goals for 2026"]
+    }
+  ]
+}
