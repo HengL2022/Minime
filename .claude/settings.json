@@ -13,8 +13,10 @@
       "Bash(git add:*)",
       "Bash(git branch:*)",
       "Bash(git checkout:*)",
-      "Bash(git switch:*)"
+      "Bash(git switch:*)",
+      "Bash(restic snapshots:*)"
     ],
+    "ask": ["Bash(make promote-restore:*)"],
     "deny": [
       "Read(./.env)",
       "Read(./.env.local)",
@@ -31,6 +33,15 @@
           {
             "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/protect-secrets.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/protect-live-db.sh\""
           }
         ]
       }

@@ -603,3 +603,35 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   readability. Verified: full offline suite green, regression gate "all bars held",
   live DB migrated (hex lexemes confirmed in minime).
 - **Approved by:** human ("fix the two flags", 2026-06-12).
+
+## 2026-06-12 — Near-real-time backup: 15-min tagged snapshots now, WAL PITR deferred
+
+- **Context:** Backup/restore beyond the nightly dream-job backup (spec §4 restic stack,
+  invariant I1; builds on the 2026-06-11 cloud-restic amendment — same repo, same
+  client-side AES-256, B2 target, no new network surface). Plan:
+  `~/.claude/plans/read-through-this-project-spicy-lynx.md`.
+- **Decision:** Phase 1 implemented: `dbSnapshot()` in new `src/pipeline/backup.ts`
+  (extracted from dream.ts; `backup` re-exported so dream step 7 is unchanged) runs every
+  15 min via `BACKUP_CRON` (croner, empty string disables, only when restic configured).
+  Snapshots tag `db-snap` (keep-hourly 48 / keep-daily 7); nightly keeps tag `dream`
+  (7d/8w/24m); `--group-by host,tags` keeps the two retention policies independent. A
+  shared in-flight flag stops backup()/dbSnapshot() overlap (both write the stable
+  `db-dump/minime.sql` path, kept for restic dedup). Rollback is two deliberate steps:
+  `make restore-pitr TIME=…` restores the latest snapshot ≤ TIME into scratch
+  `minime_restore` (never the live DB; reuses restore-drill's probe + validation block;
+  exit 2 unconfigured / exit 3 no matching snapshot), and `make promote-restore`
+  (settings.json ask-gated; refuses on live connections; pre-promote dump + restic
+  safety net) swaps DBs by rename, with cherry-pick from `minime_restore` documented as
+  the common partial-rollback path. Tests are offline; `test/setup.ts` now clears
+  `RESTIC_REPOSITORY`/`RESTIC_PASSWORD_FILE` because bun auto-loads the owner's `.env`,
+  which had let the suite invoke live restic (I1 fix). B2 creds need no code: `run()`
+  spreads `...process.env`.
+- **Why:** 15-min logical snapshots reach RPO ≈ 15 min with zero new dependencies and a
+  restore path that converges on the already-drilled logical restore; WAL archiving
+  (RPO ≈ 60s) costs two Postgres config paths (Docker + brew) maintained forever plus
+  base-backup/WAL-pruning machinery. **Phase 2 (WAL PITR) deferred — adoption trigger:
+  snapshot-granularity rollback proves insufficient in practice** (sketch preserved in
+  the plan file: archive_mode+archive_timeout=60, weekly pg_basebackup as dream step 7b,
+  restore via throwaway :5433 instance, converging on the same minime_restore promote UX).
+- **Approved by:** human (owner, 2026-06-12 — "both, phased" decision in plan;
+  implementation "you can start" this conversation).

@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 BUN := bun
 
-.PHONY: install up down migrate seed embed test lint verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify restore-drill eval-search eval-search-live eval-snapshot eval-pmb
+.PHONY: install up down migrate seed embed test lint verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify restore-drill restore-pitr promote-restore eval-search eval-search-live eval-snapshot eval-pmb
 
 # Scratch DB for MinimeBench — a throwaway database the runner DROPs and rebuilds. Derived
 # from DATABASE_URL so non-default ports just work; override EVAL_DATABASE_URL to change it.
@@ -71,6 +71,17 @@ verify: verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 ve
 # Restores the latest restic snapshot into a scratch DB and runs the m1 suite against it.
 restore-drill:
 	@./scripts/restore-drill.sh
+
+# Point-in-time restore into the scratch minime_restore DB (live untouched). Picks the latest
+# db-snap/dream snapshot at or before TIME. Usage: make restore-pitr TIME="2026-06-12 14:30"
+restore-pitr:
+	@test -n "$(TIME)" || { echo 'usage: make restore-pitr TIME="2026-06-12 14:30"'; exit 2; }
+	@TIME="$(TIME)" ./scripts/restore-pitr.sh
+
+# Promote minime_restore in as the live minime DB (atomic rename; refuses if live is in use,
+# dumps a pre-promote safety snapshot first). Run restore-pitr first. Undo = rename back.
+promote-restore:
+	@./scripts/promote-restore.sh
 
 # MinimeBench (offline, CI-safe): deterministic mock embeddings, single run, full area table.
 # DATABASE_URL is pinned to the scratch DB at PROCESS START — the pool binds at module load,

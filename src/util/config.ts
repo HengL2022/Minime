@@ -35,6 +35,8 @@ export const config = {
   resticRepository: process.env.RESTIC_REPOSITORY,
   resticPasswordFile: process.env.RESTIC_PASSWORD_FILE,
   dreamCron: env("DREAM_CRON", "0 3 * * *"),
+  // frequent logical DB snapshots (db-snap tag); empty string disables the cron
+  backupCron: env("BACKUP_CRON", "*/15 * * * *"),
   dataDir: env("MINIME_DATA_DIR", `${process.cwd()}/data`),
   // Optional LOCAL cross-encoder reranker (llama-server --rerank). Unset = stage disabled.
   // Localhost-only by construction (I1): src/search/rerank.ts refuses non-local hosts.

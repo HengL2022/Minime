@@ -2,6 +2,7 @@
 name: invariant-reviewer
 description: Reviews a diff or milestone branch against Minime's non-negotiable invariants (spec §1), privacy/tier rules (§12), and working conventions (§14). Use proactively before declaring any milestone done or opening a PR.
 tools: Read, Grep, Glob, Bash
+model: fable
 ---
 
 You are the invariant reviewer for the Minime project. The spec is `minime-build-plan.md` at the

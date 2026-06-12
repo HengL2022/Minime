@@ -9,6 +9,7 @@ import { importEmailMeta } from "./importers/email-meta";
 import { importHealth } from "./importers/health";
 import { type TxProfile, importTransactions } from "./importers/transactions";
 import { startMcpServer } from "./mcp/server";
+import { dbSnapshot } from "./pipeline/backup";
 import { brainSync } from "./pipeline/brain-sync";
 import { dream } from "./pipeline/dream";
 import { startWatcher } from "./pipeline/watcher";
@@ -88,6 +89,24 @@ async function main(): Promise<number> {
       console.error(
         `[minime] dream scheduled: ${config.dreamCron} (next: ${cron.nextRun()?.toISOString()})`,
       );
+      if (config.backupCron && config.resticRepository && config.resticPasswordFile) {
+        const snap = new Cron(config.backupCron, () => {
+          dbSnapshot()
+            .then((r) => {
+              // ran === false is a graceful skip (not configured, binary missing, in
+              // flight) — surface the detail so it isn't a silent no-op.
+              if (!r.ran) console.error(`[minime] db snapshot skipped: ${r.detail}`);
+            })
+            .catch((e) => console.error(`[minime] db snapshot failed: ${e?.message ?? e}`));
+        });
+        console.error(
+          `[minime] db snapshot scheduled: ${config.backupCron} (next: ${snap.nextRun()?.toISOString()})`,
+        );
+      } else {
+        console.error(
+          "[minime] db snapshot disabled (set BACKUP_CRON, RESTIC_REPOSITORY, and RESTIC_PASSWORD_FILE to enable)",
+        );
+      }
       await startMcpServer();
       return -1; // stay alive on stdio
     }

@@ -47,7 +47,15 @@ describe("decision engine", () => {
     state = await call("minime_state", {});
     expect((state.data as any).decision_reviews_due.map((d: any) => d.id)).toContain(decisionId);
 
-    await dream();
+    const dreamSummary = await dream();
+    // B1 regression: step 7 must reach backup() and return its graceful skip — with restic
+    // unconfigured it's "restic not configured…", NEVER "failed: backup is not defined"
+    // (which is what a bare `export ... from` re-export with no local binding would yield).
+    const backupStep = dreamSummary["7_backup"] as { ran: boolean; detail: string } | string;
+    expect(backupStep).not.toBeString(); // a "failed: …" string would mean step() caught a throw
+    expect((backupStep as { ran: boolean }).ran).toBe(false);
+    expect((backupStep as { detail: string }).detail).not.toContain("is not defined");
+
     await dream(); // dedupe: second run must not double-queue
     const queued = await sql`select count(*)::int as n from review_queue
       where kind = 'decision_review' and payload ->> 'decision_id' = ${decisionId}`;

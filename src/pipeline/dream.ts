@@ -1,8 +1,6 @@
 // Nightly dream job (spec §10), 8 steps in order. Each step is best-effort: a failure is
 // recorded and the remaining steps still run. Flags, never auto-resolves (step 3).
 
-import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
 import {
   chunkPairsSharingPerson,
   decisionsNeedingReview,
@@ -18,6 +16,7 @@ import {
 import { drainEmbedBacklog } from "../search/index-parent";
 import { now } from "../util/clock";
 import { config } from "../util/config";
+import { backup } from "./backup";
 
 const ACTOR = "system:dream";
 
@@ -114,64 +113,10 @@ export async function rollupMetrics(days = 90): Promise<number> {
 
 // -- step 7: backup ----------------------------------------------------------
 
-async function run(
-  cmd: string[],
-  env?: Record<string, string>,
-): Promise<{ ok: boolean; err: string }> {
-  try {
-    const proc = Bun.spawn(cmd, {
-      env: { ...process.env, ...env },
-      stdout: "ignore",
-      stderr: "pipe",
-    });
-    const err = await new Response(proc.stderr).text();
-    return { ok: (await proc.exited) === 0, err: err.slice(0, 500) };
-  } catch (e) {
-    return { ok: false, err: e instanceof Error ? e.message : String(e) };
-  }
-}
-
-export async function backup(): Promise<{ ran: boolean; detail: string }> {
-  if (!config.resticRepository || !config.resticPasswordFile) {
-    return {
-      ran: false,
-      detail: "restic not configured (RESTIC_REPOSITORY / RESTIC_PASSWORD_FILE)",
-    };
-  }
-  const which = await run(["sh", "-c", "command -v restic && command -v pg_dump"]);
-  if (!which.ok) return { ran: false, detail: "restic or pg_dump binary not found" };
-
-  const dumpDir = join(process.cwd(), "db-dump");
-  await mkdir(dumpDir, { recursive: true });
-  const dump = await run([
-    "sh",
-    "-c",
-    `pg_dump "${config.databaseUrl}" > "${join(dumpDir, "minime.sql")}"`,
-  ]);
-  if (!dump.ok) return { ran: false, detail: `pg_dump failed: ${dump.err}` };
-
-  const env = {
-    RESTIC_REPOSITORY: config.resticRepository,
-    RESTIC_PASSWORD_FILE: config.resticPasswordFile,
-  };
-  const bk = await run(["restic", "backup", config.dataDir, dumpDir], env);
-  if (!bk.ok) return { ran: false, detail: `restic backup failed: ${bk.err}` };
-  await run(
-    [
-      "restic",
-      "forget",
-      "--prune",
-      "--keep-daily",
-      "7",
-      "--keep-weekly",
-      "8",
-      "--keep-monthly",
-      "24",
-    ],
-    env,
-  );
-  return { ran: true, detail: "backup + prune complete" };
-}
+// re-export for callers that import backup from this module. `backup` itself is
+// imported at the top (a bare `export ... from` creates no local binding, which
+// would leave the step("7_backup", () => backup()) call below referencing nothing).
+export { backup };
 
 // -- orchestration -----------------------------------------------------------
 
