@@ -112,6 +112,9 @@ work becomes part of your searchable history with zero effort.
 - **Backups**: configured in `make setup` (restic, client-side encrypted, local disk or
   B2/S3). Restore drill: `make restore-pitr TIME="…"` into a scratch DB, then
   `make promote-restore` — the live database is never touched in one step.
+- **Updating the software**: `make update` pulls the new version, snapshots the DB
+  first, and applies migrations. Your `.env`, `data/`, and backups are never touched —
+  they live outside git. Restart `serve` afterward.
 
 ## Three habits that make it work
 

@@ -125,6 +125,25 @@ Agent workflow prompts (morning brief, evening review, decision brief) live in
 `docs/GUIDE.md` (the human-facing usage guide) and offer `make setup` if they want cloud
 model providers or off-site backups (interactive — run it in *their* terminal, not yours).
 
+## Update (in place, data and settings preserved)
+
+```
+make update        # = bash scripts/update.sh [--skip-verify]
+```
+
+Fast-forwards to origin, syncs deps, takes a restic `db-snap` first (when configured),
+applies pending migrations (forward-only, idempotent), runs the offline suite, and warns
+if a resident `serve` still runs old code. **Never touches `.env*`, `data/`, or backups**
+— they are gitignored, so `git pull` cannot write them. Same output contract as the
+installer: `[N/6] OK|SKIP|WARN|FAIL` lines, `ERROR:`/`FIX:` on failure, machine-parsable
+`==== MINIME UPDATE SUMMARY ====` block (parse `status:` / `version:`). Exit codes:
+`0` ok, `2` bad flag, `30` git (dirty tree / diverged / no network), `11` deps,
+`50` migrate, `70` verify.
+
+Refuses to run over local modifications to tracked files (FIX: stash). Rollback:
+`git checkout <old-commit>`, and if a migration misbehaved, `make restore-pitr` from the
+pre-update snapshot — promotion stays a deliberate owner step.
+
 ## Uninstall / reset
 
 - Stop: `make down` (Docker) or `brew services stop postgresql@17` / `systemctl stop postgresql@16-main`.

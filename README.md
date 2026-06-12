@@ -63,6 +63,7 @@ evening-review, decision-brief).
 journal, log decisions, import your data, and build the habits that make it compound.
 
 ```
+make update                         # pull the latest version — never touches .env or data
 bun run src/cli.ts serve            # MCP server (stdio) + inbox watcher + dream cron
 bun run src/cli.ts sync             # data/brain/**/*.md -> pages + search index
 bun run src/cli.ts dream            # run nightly maintenance now

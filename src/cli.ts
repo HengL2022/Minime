@@ -24,6 +24,7 @@ const USAGE = `minime <command>
   embed                            drain the embedding backlog
   reembed                          wipe + re-embed all chunks (after switching embed provider/model)
   dream                            run the nightly maintenance job once
+  backup                           take a tagged db snapshot now (pg_dump -> restic db-snap)
   serve                            MCP server (stdio) + inbox watcher + dream cron
   audit --since <Nd>               show what left the box (events), default 7d
   import:calendar <file.ics>
@@ -79,6 +80,12 @@ async function main(): Promise<number> {
       const summary = await dream();
       console.log(JSON.stringify(summary, null, 2));
       return 0;
+    }
+    case "backup": {
+      // exit 1 when nothing was snapshotted so callers (scripts/update.sh) can WARN
+      const r = await dbSnapshot();
+      console.log(`${r.ran ? "snapshot taken" : "skipped"}: ${r.detail}`);
+      return r.ran ? 0 : 1;
     }
     case "serve": {
       await migrate();
