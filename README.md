@@ -95,22 +95,14 @@ Tests run fully offline: Ollama is mocked (`MINIME_MOCK_OLLAMA=1`), the DB is lo
 
 ## How good is the retrieval? (eval data)
 
-Retrieval quality is measured, committed, and gated — not asserted. Every run writes a dated
-scorecard to [`docs/benchmarks/`](docs/benchmarks/) with **all** numbers, weak areas included;
-the offline gate (`make eval-search`) runs in CI on every push and fails the build on any
-regression beyond tolerance against the committed floors in `fixtures/qrels/baseline.ndjson`.
-Anti-gaming is structural: answer keys are sealed (loaded only by the scorer, never the
-retrieval path), question order is seeded-random, and live runs report N=3 min/median/max.
-All corpora are fictional.
-
 **Public benchmarks** (full engine: RRF hybrid + local bge-reranker-v2-m3 + autocut; live
 qwen3-embedding-8b):
 
 | Benchmark | Metric | No reranker | Full engine | Reference |
 |---|---|---|---|---|
 | [LongMemEval-s](docs/benchmarks/2026-06-12-longmemeval-s.md) (500 q) | recall@5 | 94.0% | **97.2%** | gbrain 97.6% |
-| | recall@1 | 74.8% | **88.8%** | |
-| | MRR@10 | 0.830 | **0.926** | |
+| | recall@1 | 74.8% | **88.6%** | |
+| | MRR@10 | 0.830 | **0.925** | |
 | [PrecisionMemBench](docs/benchmarks/2026-06-12-live-rerank-precisionmembench.md) (precision-only) | mean precision | 6.5% | **52.3%** | recall stays 94% |
 
 LongMemEval-s is judge-free (session-evidence labels). PrecisionMemBench scores *precision*
@@ -119,7 +111,7 @@ move it from 6.5% to 52.3%, and we publish the bad default because optimizing fo
 would hurt the common case (recall). `make eval-longmemeval`, `make eval-pmb`.
 
 **MinimeBench** — eight in-house areas with committed bars, run live each integration
-([latest](docs/benchmarks/2026-06-12-live-rerank-minimebench.md)): retrieval-en 97% hit@3,
+([latest](docs/benchmarks/2026-06-12-live-qwen3-minimebench.md)): retrieval-en 97% hit@3,
 retrieval-zh 100% (bilingual zh/en/mixed), graph/identity/time 100% hit@3, provenance 100%,
 robustness 100% (22 adversarial inputs, no crash, no tier leak). `make eval-search-live`.
 
@@ -130,6 +122,10 @@ tool door and scores from the events log (12/13 behavioral contracts pass);
 loop — a deliberately deficient skill rewrote itself 0→perfect on held-out tasks (3/5 → 4/5),
 gated against contamination and held-out regression so it cannot cheat. `make eval-skills`,
 `make optimize-skill SUITE=<name>`.
+
+Kept honest: sealed answer keys (loaded only by the scorer), a CI regression gate on every
+push (`make eval-search` vs committed floors), fictional corpora, N=3 live runs — scorecards
+in [docs/benchmarks/](docs/benchmarks/) publish the weak numbers too.
 
 Honest weak spots, on purpose: PrecisionMemBench scope-disambiguation (3/12) and
 supersession-exclusion (0/3) are open; one MinimeBench content gap persists ("home address",
