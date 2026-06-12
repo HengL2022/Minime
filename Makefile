@@ -86,7 +86,7 @@ EVAL_LME_DATABASE_URL ?= postgres://minime:minime@localhost:5432/minime_eval_lme
 eval-longmemeval:
 	@createdb $(notdir $(EVAL_LME_DATABASE_URL)) 2>/dev/null || true
 	@DATABASE_URL=$(EVAL_LME_DATABASE_URL) EVAL_LME_DATABASE_URL=$(EVAL_LME_DATABASE_URL) \
-		$(BUN) run scripts/eval-longmemeval.ts --phase all
+		$(BUN) run scripts/eval-longmemeval.ts --phase all $(if $(ROUND),--round $(ROUND),)
 
 # PrecisionMemBench (public, 89 cases, judge-free): retrieval-PRECISION benchmark.
 # In-process runner — reads the harness clone's fixtures as data, executes none of its

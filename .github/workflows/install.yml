@@ -48,3 +48,23 @@ jobs:
         run: |
           bash scripts/install.sh --no-ollama --with-demo | tee out.log
           grep -q '^status: degraded$' out.log
+      # The m8 CJK FTS tests fail ONLY on this runner (pass on Linux CI and dev macs);
+      # the summary log hides the assertion detail. Dump the cluster facts + the exact
+      # failing queries so the next failure is diagnosable from the log alone.
+      - name: diagnose CJK FTS (on failure)
+        if: failure()
+        run: |
+          PGB="$(brew --prefix postgresql@17 2>/dev/null)/bin"
+          [ -x "$PGB/psql" ] || PGB="$(dirname "$(command -v psql)")"
+          for db in minime_test minime; do
+            echo "=== $db ==="
+            "$PGB/psql" -h localhost -d "$db" \
+              -c "select version()" \
+              -c "select datname, pg_encoding_to_char(encoding) enc, datcollate, datctype from pg_database" \
+              -c "show default_text_search_config" \
+              -c "select cjk_fold('招商银行') as fold" \
+              -c "select to_tsvector('english', cjk_fold('腊肠只买牛车水那家老铺的')) as tsv" \
+              -c "select websearch_to_tsquery('english', '腊肠 OR 哪里 OR 牛车') as tsq" \
+              -c "select count(*) total, count(*) filter (where tsv @@ websearch_to_tsquery('english','腊肠')) hits from chunks" \
+              || true
+          done

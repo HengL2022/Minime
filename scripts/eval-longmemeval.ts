@@ -212,6 +212,9 @@ async function main(): Promise<number> {
   await guard();
   const phase = flag("phase", "all");
   const limit = Number(flag("limit", "0"));
+  // round-stamped filename: a --limit smoke run must never clobber the committed full
+  // scorecard (incident 2026-06-12: a 10-q smoke overwrote the 500-q record)
+  const round = flag("round", limit > 0 ? `smoke${limit}` : "full");
   const questions: Question[] = JSON.parse(readFileSync(DATASET, "utf8"));
   const qs = limit > 0 ? questions.slice(0, limit) : questions;
   console.error(`questions: ${qs.length}, phase: ${phase}`);
@@ -222,7 +225,8 @@ async function main(): Promise<number> {
     const table = report(rows);
     console.log(`\n${table}\n`);
     mkdirSync(RESULTS_DIR, { recursive: true });
-    const path = join(RESULTS_DIR, "2026-06-12-longmemeval-s.md");
+    const date = new Date().toISOString().slice(0, 10);
+    const path = join(RESULTS_DIR, `${date}-${round}-longmemeval-s.md`);
     writeFileSync(
       path,
       `# LongMemEval-s — Minime hybrid retrieval (session-level recall)\n\n` +
