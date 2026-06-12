@@ -237,3 +237,46 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   `agents/skills/query.md`, measured at hit@1 80% / hit@5 100% with rank fusion. Full
   suite 82 pass / 0 fail.
 - **Approved by:** human (requested "engine fix" after the bilingual eval).
+
+## 2026-06-12 — MinimeBench: area-based retrieval eval harness (Phase 1b)
+
+- **Context:** Search-uplift plan (`.claude/plans/search-uplift.md`, MinimeBench section).
+  Modeled on gbrain-evals: each retrieval area is a real test with a committed pass/fail
+  bar, sealed gold, seeded question order, baseline snapshots, and a published scorecard.
+  New files only — `src/search/eval.ts` (pure IR metrics + `runQrels`), `fixtures/qrels/*`
+  (sealed gold), `fixtures/eval-corpora/*` (fictional corpora), `scripts/eval-search.ts`,
+  `test/m9.eval.test.ts`, Makefile `eval-search`/`eval-search-live`. The harness consumes
+  `hybridSearch` as a black box and reads the qrels only in the scorer, never in the search
+  path — that is what keeps the gold sealed (anti-gaming rule).
+- **Decision:** (1) Ported the three existing suites to qrels: English persona 100q
+  (`retrieval-en`), bilingual 100q with its four buckets (`retrieval-zh`), graph-relational
+  15q (`graph`); corpora copied verbatim from the throwaway /tmp eval dirs into
+  `fixtures/eval-corpora/{persona-en,bilingual-zh}/brain`. (2) Authored four NEW areas
+  (all fictional, extending the same corpora): `identity` (16q — short names/aliases →
+  right page), `time` (16q — as-of/point/range/most-recent), `provenance` (10 checks — top
+  hit's source row id resolves + `derived` flag + `created_by` correct, I5), `robustness`
+  (18 m6-derived fuzz/injection strings — must not crash, must not surface tier-locked
+  content; a sealed tier-2 page `Private therapy notes` with a unique sentinel is the
+  leak tripwire). (3) `graph` is scored via existing repo graph primitives
+  (`entitiesNamedIn`/`oneHopNeighbors`/`parentMeta`) plus a retrieval fallback — no new SQL,
+  no LLM — because the typed-edge graph (not `hybridSearch`) answers relational questions.
+  (4) Baseline is committed to `fixtures/qrels/baseline.ndjson` (one line per area/metric);
+  NEW-area lines are tagged `provisional` with their plan bar; `make eval-search` diffs
+  against it and exits non-zero on regression beyond tolerance (rate metrics ±0.01, latency
+  ±50ms). (5) Scorecards write to `eval-results/` (gitignored — round results never go to
+  GitHub; only the baseline floor is tracked), publishing ALL numbers including misses and
+  bucket breakdowns.
+- **Deviations:** (a) Scorecards land in `eval-results/` (gitignored), not the plan's
+  `docs/benchmarks/`, per the owner's later "round results never go to GitHub; only
+  `baseline.ndjson` is tracked" instruction. (b) The committed baseline is the **mock**
+  (deterministic, MINIME_MOCK_OLLAMA=1) floor so `make eval-search` is a hermetic CI gate;
+  the plan's live bars (en hit@1 92%, zh→zh 100%, graph 15/15) are recorded as `bar` fields
+  for reference and are measured by `make eval-search-live` (N=3). Under mock embeddings the
+  retrieval areas score lower (en hit@1 76%/hit@3 93%, zh hit@3 69%, graph 80%) — this is
+  the bag-of-words pseudo-embedding floor, not the live engine's quality, and it is reported
+  honestly in the scorecard rather than hidden.
+- **Why:** Locks the search quality measured during the GBrain uplift into a regression gate
+  that runs offline in CI and live before merge, with sealed gold and published bad numbers
+  so quality can't silently rot or be gamed.
+- **Approved by:** agent-proposed (plan approved 2026-06-12; deviations follow owner's later
+  instructions on result placement).

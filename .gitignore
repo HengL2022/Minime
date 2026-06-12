@@ -13,3 +13,8 @@ db-dump/
 *.log
 .ollama-serve.log
 .DS_Store
+
+# MinimeBench round results — never pushed to GitHub; only the committed floor
+# (fixtures/qrels/baseline.ndjson) is tracked. The scorecard is regenerated each run.
+eval-results/*
+!eval-results/.gitkeep

@@ -1,0 +1,607 @@
+{
+  "version": 1,
+  "corpus": "bilingual-zh",
+  "area": "retrieval-zh",
+  "entries": [
+    {
+      "id": "zh-1",
+      "query": "我是在哪个城市出生的？",
+      "relevant": ["关于我", "家人"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-2",
+      "query": "我的生日是哪天？",
+      "relevant": ["关于我"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-3",
+      "query": "我在哪所大学读的硕士？",
+      "relevant": ["关于我"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-4",
+      "query": "我读研究生时学的什么专业？",
+      "relevant": ["关于我"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-5",
+      "query": "我是哪一年来新加坡的？",
+      "relevant": ["关于我"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-6",
+      "query": "外婆的老火汤要用哪里产的陈皮？",
+      "relevant": ["外婆的食谱"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-7",
+      "query": "老火汤要煲多长时间？",
+      "relevant": ["外婆的食谱"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-8",
+      "query": "我在哪里买腊肠？",
+      "relevant": ["外婆的食谱"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-9",
+      "query": "煲仔饭最后淋的豉油是用什么调的？",
+      "relevant": ["外婆的食谱"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-10",
+      "query": "做白切鸡的姜葱蓉有什么诀窍？",
+      "relevant": ["外婆的食谱"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-11",
+      "query": "我对什么水果严重过敏？",
+      "relevant": ["健康笔记", "关于我"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-12",
+      "query": "我上一次过敏发作是什么时候？",
+      "relevant": ["健康笔记"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-13",
+      "query": "我的血型是什么？",
+      "relevant": ["健康笔记"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-14",
+      "query": "我的家庭医生是谁？",
+      "relevant": ["健康笔记"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-15",
+      "query": "体检发现我缺什么营养素？",
+      "relevant": ["健康笔记"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-16",
+      "query": "医生让我每天补多少维生素D？",
+      "relevant": ["健康笔记"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-17",
+      "query": "我什么时候去的京都看红叶？",
+      "relevant": ["京都红叶之旅"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-18",
+      "query": "在京都住的哪家旅馆？",
+      "relevant": ["京都红叶之旅"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-19",
+      "query": "京都哪里的夜枫最震撼？",
+      "relevant": ["京都红叶之旅"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-20",
+      "query": "我在五条坂买了什么？",
+      "relevant": ["京都红叶之旅"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-21",
+      "query": "怀石晚餐里最难忘的是哪道菜？",
+      "relevant": ["京都红叶之旅"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-22",
+      "query": "爸爸退休前是做什么工作的？",
+      "relevant": ["家人"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-23",
+      "query": "爸爸退休后迷上了什么？",
+      "relevant": ["家人"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-24",
+      "query": "我弟弟叫什么名字？",
+      "relevant": ["家人"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-25",
+      "query": "弟弟在哪个城市工作？",
+      "relevant": ["家人"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-26",
+      "query": "表姐开的奶茶店叫什么名字？",
+      "relevant": ["家人"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-27",
+      "query": "妈妈每天几点和我微信视频？",
+      "relevant": ["家人"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-28",
+      "query": "我家的钢琴是什么牌子和型号？",
+      "relevant": ["钢琴学习"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-29",
+      "query": "钢琴是花多少钱买的？",
+      "relevant": ["钢琴学习"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-30",
+      "query": "钢琴课是每周什么时候上？",
+      "relevant": ["钢琴学习"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-31",
+      "query": "我现在在练哪首肖邦的曲子？",
+      "relevant": ["钢琴学习"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-32",
+      "query": "刘老师说我弹琴最大的问题是什么？",
+      "relevant": ["钢琴学习"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-33",
+      "query": "我打算什么时候考ABRSM八级？",
+      "relevant": ["钢琴学习"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-34",
+      "query": "我练琴的时候猫在哪里？",
+      "relevant": ["钢琴学习", "猫咪汤圆"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-35",
+      "query": "关于要不要争Group PM，我的结论是什么？",
+      "relevant": ["最近随想"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-36",
+      "query": "如果年底没升职，我打算怎么办？",
+      "relevant": ["最近随想"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-37",
+      "query": "第二只猫我倾向于买还是领养？",
+      "relevant": ["最近随想"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-38",
+      "query": "外婆的老火汤我现在能复刻几成？",
+      "relevant": ["最近随想"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-39",
+      "query": "广州早茶我最想念哪几样？",
+      "relevant": ["关于我"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-40",
+      "query": "我手机里有几个待办清单？",
+      "relevant": ["关于我"],
+      "bucket": "zh→zh"
+    },
+    {
+      "id": "zh-41",
+      "query": "Which fruit am I severely allergic to?",
+      "relevant": ["健康笔记", "关于我"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-42",
+      "query": "What is my blood type?",
+      "relevant": ["健康笔记"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-43",
+      "query": "Who is my family doctor and at which clinic?",
+      "relevant": ["健康笔记"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-44",
+      "query": "Which ryokan did I stay at in Kyoto?",
+      "relevant": ["京都红叶之旅"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-45",
+      "query": "Where did I see the most stunning illuminated autumn leaves?",
+      "relevant": ["京都红叶之旅"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-46",
+      "query": "What souvenir did I bring back for my cat from Kyoto?",
+      "relevant": ["京都红叶之旅"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-47",
+      "query": "What does my younger brother do for work and at which company?",
+      "relevant": ["家人"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-48",
+      "query": "What is my cousin's bubble tea shop called?",
+      "relevant": ["家人"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-49",
+      "query": "What brand of piano do I own?",
+      "relevant": ["钢琴学习"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-50",
+      "query": "Which Chopin piece am I practising?",
+      "relevant": ["钢琴学习"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-51",
+      "query": "What did my piano teacher say my main problem is?",
+      "relevant": ["钢琴学习"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-52",
+      "query": "What are the secrets to my grandmother's slow-simmered soup?",
+      "relevant": ["外婆的食谱"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-53",
+      "query": "Where do I buy Chinese cured sausage?",
+      "relevant": ["外婆的食谱"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-54",
+      "query": "When was my last allergic reaction?",
+      "relevant": ["健康笔记"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-55",
+      "query": "What time does my mom video call me every day?",
+      "relevant": ["家人"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-56",
+      "query": "When am I planning to take the ABRSM Grade 8 exam?",
+      "relevant": ["钢琴学习"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-57",
+      "query": "Am I leaning toward buying or adopting a second cat?",
+      "relevant": ["最近随想"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-58",
+      "query": "Which vitamin am I deficient in?",
+      "relevant": ["健康笔记"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-59",
+      "query": "Which temple bridge in Kyoto was too crowded?",
+      "relevant": ["京都红叶之旅"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-60",
+      "query": "What hobby did my dad pick up after retirement?",
+      "relevant": ["家人"],
+      "bucket": "en→zh"
+    },
+    {
+      "id": "zh-61",
+      "query": "读书会是几点、在哪里聚？",
+      "relevant": ["Book club"],
+      "bucket": "zh→en"
+    },
+    {
+      "id": "zh-62",
+      "query": "读书会六月在读哪本书？",
+      "relevant": ["Book club"],
+      "bucket": "zh→en"
+    },
+    {
+      "id": "zh-63",
+      "query": "九月轮到我选书，我打算选哪本？",
+      "relevant": ["Book club"],
+      "bucket": "zh→en"
+    },
+    {
+      "id": "zh-64",
+      "query": "我每个月的房租是多少？",
+      "relevant": ["Tiong Bahru apartment"],
+      "bucket": "zh→en"
+    },
+    {
+      "id": "zh-65",
+      "query": "我的房东是谁？",
+      "relevant": ["Tiong Bahru apartment"],
+      "bucket": "zh→en"
+    },
+    {
+      "id": "zh-66",
+      "query": "我的租约每年什么时候续？",
+      "relevant": ["Tiong Bahru apartment"],
+      "bucket": "zh→en"
+    },
+    {
+      "id": "zh-67",
+      "query": "我的手冲咖啡配方是什么？",
+      "relevant": ["Coffee"],
+      "bucket": "zh→en"
+    },
+    {
+      "id": "zh-68",
+      "query": "我的磨豆机是什么牌子？",
+      "relevant": ["Coffee"],
+      "bucket": "zh→en"
+    },
+    {
+      "id": "zh-69",
+      "query": "我的咖啡豆在哪里买？",
+      "relevant": ["Coffee"],
+      "bucket": "zh→en"
+    },
+    {
+      "id": "zh-70",
+      "query": "我每个月在哪里做义工？",
+      "relevant": ["Volunteering"],
+      "bucket": "zh→en"
+    },
+    {
+      "id": "zh-71",
+      "query": "我在汤厨房做的是什么工作？",
+      "relevant": ["Volunteering"],
+      "bucket": "zh→en"
+    },
+    {
+      "id": "zh-72",
+      "query": "我还给哪个移工诊所做翻译？",
+      "relevant": ["Volunteering"],
+      "bucket": "zh→en"
+    },
+    {
+      "id": "zh-73",
+      "query": "2026年我的读书目标是多少本？",
+      "relevant": ["Goals for 2026"],
+      "bucket": "zh→en"
+    },
+    {
+      "id": "zh-74",
+      "query": "我想带妈妈哪一年去京都看樱花？",
+      "relevant": ["Goals for 2026"],
+      "bucket": "zh→en"
+    },
+    {
+      "id": "zh-75",
+      "query": "晚上九点后不看工作Slack的规矩，到现在破了几次？",
+      "relevant": ["Goals for 2026"],
+      "bucket": "zh→en"
+    },
+    {
+      "id": "zh-76",
+      "query": "我的 manager 是谁？",
+      "relevant": ["工作 @ Seraya Pay"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-77",
+      "query": "Kingfisher 的 launch 日期定在什么时候？",
+      "relevant": ["Kingfisher 项目笔记"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-78",
+      "query": "Q3 的 OKR 要把 transaction success rate 提到多少？",
+      "relevant": ["工作 @ Seraya Pay"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-79",
+      "query": "公司办公室在哪栋楼？",
+      "relevant": ["工作 @ Seraya Pay"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-80",
+      "query": "我每周哪天 WFH？",
+      "relevant": ["工作 @ Seraya Pay"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-81",
+      "query": "Kingfisher 的 p95 latency 目标是多少？",
+      "relevant": ["Kingfisher 项目笔记"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-82",
+      "query": "中国那边对接的 partner bank 是哪家？",
+      "relevant": ["Kingfisher 项目笔记"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-83",
+      "query": "MAS 的合规 submission 是什么时候交的？",
+      "relevant": ["Kingfisher 项目笔记"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-84",
+      "query": "Kingfisher 的 integration 外包给了哪家公司？",
+      "relevant": ["Kingfisher 项目笔记"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-85",
+      "query": "2026年2月那次 production incident 是怎么造成的？",
+      "relevant": ["Kingfisher 项目笔记"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-86",
+      "query": "我的 10K PB 是多少？",
+      "relevant": ["跑步训练"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-87",
+      "query": "周日的 long run 在哪里跑？",
+      "relevant": ["跑步训练"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-88",
+      "query": "跑完 long run 的固定早餐仪式是什么？",
+      "relevant": ["跑步训练"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-89",
+      "query": "我现在穿什么跑鞋？",
+      "relevant": ["跑步训练"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-90",
+      "query": "我的运动手表是哪款？",
+      "relevant": ["跑步训练"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-91",
+      "query": "BTO 首付的存钱目标是多少？",
+      "relevant": ["理财计划"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-92",
+      "query": "每个月 DCA 多少钱，买哪两个标的？",
+      "relevant": ["理财计划"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-93",
+      "query": "到2026年5月我存到多少了？",
+      "relevant": ["理财计划"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-94",
+      "query": "我用哪个券商？",
+      "relevant": ["理财计划"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-95",
+      "query": "我在个股上亏过多少钱？",
+      "relevant": ["理财计划"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-96",
+      "query": "汤圆是什么品种的猫？",
+      "relevant": ["猫咪汤圆"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-97",
+      "query": "汤圆的 vet 是谁、在哪家医院？",
+      "relevant": ["猫咪汤圆"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-98",
+      "query": "汤圆最怕什么？",
+      "relevant": ["猫咪汤圆"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-99",
+      "query": "我的 Duolingo streak 是多少天？",
+      "relevant": ["西班牙语学习"],
+      "bucket": "mixed"
+    },
+    {
+      "id": "zh-100",
+      "query": "DELE A2 的考点在哪里？",
+      "relevant": ["西班牙语学习"],
+      "bucket": "mixed"
+    }
+  ]
+}

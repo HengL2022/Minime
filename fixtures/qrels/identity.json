@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "corpus": "persona-en",
+  "area": "identity",
+  "note": "NEW area. Short names, aliases and handles must resolve to the page that documents the right person/place. recall = fraction whose correct page is in top-3 (bar recall >= 0.90, provisional).",
+  "entries": [
+    {
+      "id": "id-1",
+      "query": "Tomasz",
+      "relevant": ["Work at Fjordsonics", "Project SILDRE", "Family and friends"]
+    },
+    {
+      "id": "id-2",
+      "query": "Tomasz Wójcik",
+      "relevant": ["Work at Fjordsonics", "Project SILDRE", "Family and friends"]
+    },
+    {
+      "id": "id-3",
+      "query": "Sigrid",
+      "relevant": ["Work at Fjordsonics"]
+    },
+    {
+      "id": "id-4",
+      "query": "Sigrid Halvorsen",
+      "relevant": ["Work at Fjordsonics"]
+    },
+    {
+      "id": "id-5",
+      "query": "Ingrid",
+      "relevant": ["Family and friends", "Bouldering"]
+    },
+    {
+      "id": "id-6",
+      "query": "Ingrid Fossum",
+      "relevant": ["Family and friends", "Bouldering"]
+    },
+    {
+      "id": "id-7",
+      "query": "Kari",
+      "relevant": ["Running and fitness"]
+    },
+    {
+      "id": "id-8",
+      "query": "Kari Nystrøm physio",
+      "relevant": ["Running and fitness"]
+    },
+    {
+      "id": "id-9",
+      "query": "Dr. Annika Moe",
+      "relevant": ["Biscuit the whippet"]
+    },
+    {
+      "id": "id-10",
+      "query": "Annika",
+      "relevant": ["Biscuit the whippet"]
+    },
+    {
+      "id": "id-11",
+      "query": "Dr. Sølvberg",
+      "relevant": ["Allergies and medical notes"]
+    },
+    {
+      "id": "id-12",
+      "query": "Meera",
+      "relevant": ["Family and friends"]
+    },
+    {
+      "id": "id-13",
+      "query": "Biscuit",
+      "relevant": ["Biscuit the whippet"]
+    },
+    {
+      "id": "id-14",
+      "query": "Gunnar starter",
+      "relevant": ["Recipes and cooking"]
+    },
+    {
+      "id": "id-15",
+      "query": "Odd-Einar",
+      "relevant": ["Apartment on Bakklandet"]
+    },
+    {
+      "id": "id-16",
+      "query": "Appa and Amma",
+      "relevant": ["Family and friends"]
+    }
+  ]
+}

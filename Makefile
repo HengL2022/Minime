@@ -1,7 +1,11 @@
 SHELL := /bin/bash
 BUN := bun
 
-.PHONY: install up down migrate seed embed test lint verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify restore-drill
+.PHONY: install up down migrate seed embed test lint verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify restore-drill eval-search eval-search-live
+
+# Scratch DB for MinimeBench — a throwaway database the runner DROPs and rebuilds. Derived
+# from DATABASE_URL so non-default ports just work; override EVAL_DATABASE_URL to change it.
+EVAL_DATABASE_URL ?= postgres://minime:minime@localhost:5432/minime_eval
 
 # One-command setup for fresh machines (see AGENTS.md). Safe to re-run.
 install:
@@ -61,3 +65,15 @@ verify: verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 ve
 # Restores the latest restic snapshot into a scratch DB and runs the m1 suite against it.
 restore-drill:
 	@./scripts/restore-drill.sh
+
+# MinimeBench (offline, CI-safe): deterministic mock embeddings, single run, full area table.
+eval-search:
+	@createdb $(notdir $(EVAL_DATABASE_URL)) 2>/dev/null || true
+	@MINIME_MOCK_OLLAMA=1 EVAL_DATABASE_URL=$(EVAL_DATABASE_URL) \
+		$(BUN) run scripts/eval-search.ts --mode mock --round mock
+
+# MinimeBench (live): configured embed provider, N=3 min/median/max. Needs a provider + DB.
+eval-search-live:
+	@createdb $(notdir $(EVAL_DATABASE_URL)) 2>/dev/null || true
+	@EVAL_DATABASE_URL=$(EVAL_DATABASE_URL) \
+		$(BUN) run scripts/eval-search.ts --mode live --round live-r1 --repeats 3

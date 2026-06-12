@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "corpus": "persona-en",
+  "area": "provenance",
+  "note": "NEW area. Each check fixes the expected top hit and asserts its provenance stamp: the returned id resolves to a real row of the expected title, the derived flag matches, and created_by matches (I5). accuracy = fraction of checks where the top hit's title is in 'relevant' AND prov matches expected (bar accuracy >= 0.95, provisional).",
+  "entries": [
+    {
+      "id": "p-1",
+      "query": "What breed is my dog?",
+      "relevant": ["Biscuit the whippet"],
+      "prov": { "derived": false, "created_by": "human" }
+    },
+    {
+      "id": "p-2",
+      "query": "What is my car's registration plate?",
+      "relevant": ["Car — Škoda Octavia"],
+      "prov": { "derived": false, "created_by": "human" }
+    },
+    {
+      "id": "p-3",
+      "query": "Which food am I severely allergic to?",
+      "relevant": ["Allergies and medical notes"],
+      "prov": { "derived": false, "created_by": "human" }
+    },
+    {
+      "id": "p-4",
+      "query": "What musical instrument do I play, the keyed fiddle?",
+      "relevant": ["Nyckelharpa"],
+      "prov": { "derived": false, "created_by": "human" }
+    },
+    {
+      "id": "p-5",
+      "query": "How many hydrophone nodes does the SILDRE array have?",
+      "relevant": ["Project SILDRE"],
+      "prov": { "derived": false, "created_by": "human" }
+    },
+    {
+      "id": "p-6",
+      "query": "What is my home address on Bakklandet?",
+      "relevant": ["Apartment on Bakklandet"],
+      "prov": { "derived": false, "created_by": "human" }
+    },
+    {
+      "id": "p-7",
+      "query": "What is my sourdough starter called?",
+      "relevant": ["Recipes and cooking"],
+      "prov": { "derived": false, "created_by": "human" }
+    },
+    {
+      "id": "p-8",
+      "query": "Which garden was the top highlight of my Japan trip?",
+      "relevant": ["Japan trip April 2025"],
+      "prov": { "derived": false, "created_by": "human" }
+    },
+    {
+      "id": "p-9",
+      "query": "What is my cabin down payment target near Oppdal?",
+      "relevant": ["Money goals"],
+      "prov": { "derived": false, "created_by": "human" }
+    },
+    {
+      "id": "p-10",
+      "query": "What bouldering grade am I currently comfortable with?",
+      "relevant": ["Bouldering"],
+      "prov": { "derived": false, "created_by": "human" }
+    }
+  ]
+}

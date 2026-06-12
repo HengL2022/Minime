@@ -1,0 +1,104 @@
+{
+  "version": 1,
+  "corpus": "persona-en",
+  "area": "time",
+  "note": "NEW area. As-of / point / range / before-after / most-recent questions. The right page must appear in top-3 (as-of hit@3 >= 0.80, provisional). asOf is the reference date the question pins; the harness records it but scores retrieval (the search path has no temporal reasoner yet — this measures whether the dated page is found).",
+  "entries": [
+    {
+      "id": "t-1",
+      "query": "As of March 2026, what raise did I negotiate?",
+      "relevant": ["Work at Fjordsonics", "Money goals"],
+      "asOf": "2026-03-31"
+    },
+    {
+      "id": "t-2",
+      "query": "What was my 10K personal best as of May 2026?",
+      "relevant": ["Running and fitness"],
+      "asOf": "2026-05-31"
+    },
+    {
+      "id": "t-3",
+      "query": "How much was in the cabin fund as of May 2026?",
+      "relevant": ["Money goals"],
+      "asOf": "2026-05-31"
+    },
+    {
+      "id": "t-4",
+      "query": "When was my most recent allergic reaction?",
+      "relevant": ["Allergies and medical notes"],
+      "asOf": "2026-06-12"
+    },
+    {
+      "id": "t-5",
+      "query": "What did I do in Japan in April 2025?",
+      "relevant": ["Japan trip April 2025"],
+      "asOf": "2025-04-30"
+    },
+    {
+      "id": "t-6",
+      "query": "When did I join Fjordsonics?",
+      "relevant": ["Work at Fjordsonics"],
+      "asOf": "2021-02-28"
+    },
+    {
+      "id": "t-7",
+      "query": "Which exam am I taking in November this year?",
+      "relevant": ["Goals for 2026"],
+      "asOf": "2026-11-30"
+    },
+    {
+      "id": "t-8",
+      "query": "When is the half-marathon I am training for?",
+      "relevant": ["Running and fitness", "Goals for 2026"],
+      "asOf": "2026-09-13"
+    },
+    {
+      "id": "t-9",
+      "query": "When is the full 36-node SILDRE deployment due?",
+      "relevant": ["Project SILDRE", "Goals for 2026"],
+      "asOf": "2026-08-22"
+    },
+    {
+      "id": "t-10",
+      "query": "When did the SILDRE prototype review pass earlier this year?",
+      "relevant": ["Project SILDRE"],
+      "asOf": "2026-02-18"
+    },
+    {
+      "id": "t-11",
+      "query": "When is my car's next EU-kontroll due?",
+      "relevant": ["Car — Škoda Octavia"],
+      "asOf": "2027-06-30"
+    },
+    {
+      "id": "t-12",
+      "query": "What was my 5K parkrun time back in October 2025?",
+      "relevant": ["Running and fitness"],
+      "asOf": "2025-10-31"
+    },
+    {
+      "id": "t-13",
+      "query": "When are my parents next visiting Trondheim?",
+      "relevant": ["Family and friends"],
+      "asOf": "2026-07-31"
+    },
+    {
+      "id": "t-14",
+      "query": "Which book is the club reading in June 2026?",
+      "relevant": ["Books and media"],
+      "asOf": "2026-06-30"
+    },
+    {
+      "id": "t-15",
+      "query": "When did I last get a full medical check-up before this year?",
+      "relevant": ["Allergies and medical notes"],
+      "asOf": "2026-01-01"
+    },
+    {
+      "id": "t-16",
+      "query": "What is my salary review month each year?",
+      "relevant": ["Work at Fjordsonics"],
+      "asOf": "2026-03-01"
+    }
+  ]
+}
