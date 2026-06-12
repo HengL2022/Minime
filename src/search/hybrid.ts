@@ -40,11 +40,21 @@ export interface Hit {
 const RRF_K = 60;
 const W_RRF_VEC = 1.0; // vector arm RRF weight (FTS arm weight comes from the intent nudge)
 const W_RRF_FTS = 1.0;
-const BLEND_RRF = 0.7; // re-score blend: rank agreement vs ...
-const BLEND_COS = 0.3; // ... raw cosine, which still rewards a strong lone semantic match
+// Re-score blend: cross-arm rank agreement vs raw cosine (rewards a strong lone semantic
+// match). Calibration note (MinimeBench live-r1/r2, 2026-06-12): 0.8/0.2 was tried to fix
+// topically-named distractors out-cosining answer pages (en-99, p-3); the live re-run showed
+// it fixed NEITHER while costing a graph question — those misses are an RRF-vs-weighted-sum
+// margin effect, not blend-calibratable. 0.7/0.3 is the better-measured setting; the
+// structural fix for the remaining two misses is the Phase-3 reranker.
+const BLEND_RRF = 0.7;
+const BLEND_COS = 0.3;
 const REC_BAND = 0.05; // recency multiplier spans [1, 1+REC_BAND]
 const GRAPH_BAND = 0.05; // graph-adjacency multiplier ∈ {1, 1+GRAPH_BAND}
 const DERIVED_PENALTY = 0.85;
+// Compiled notes (dream-distilled summaries, source='dream:notes') are high-signal derived
+// content — boosted like GBrain's compiled-truth layer instead of penalized. ×1.5 starting
+// value. // eval-calibration pending
+const NOTES_BOOST = 1.5;
 
 // 1-based rank per candidate id, ordered by `key` descending. Each arm is already sorted in
 // repo (limit 50); we re-derive ranks here so the fusion math is self-contained and testable.
@@ -166,7 +176,9 @@ export async function hybridSearch(opts: {
 
     let score = base * recencyMult * graphMult * title;
     const derived = m.derived_from !== null;
-    if (derived && !includeDerived) score *= DERIVED_PENALTY;
+    // both stamps required: an imported/agent-written page can't claim the boost by source alone
+    if (m.source === "dream:notes" && m.created_by === "system:dream") score *= NOTES_BOOST;
+    else if (derived && !includeDerived) score *= DERIVED_PENALTY;
     return [{ c, m, score, derived }];
   });
 

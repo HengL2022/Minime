@@ -1,6 +1,6 @@
 // MinimeBench runner (Phase 1b). Loads each fictional corpus into a scratch DB
 // (EVAL_DATABASE_URL), syncs it, runs every area's sealed qrels through hybridSearch,
-// diffs against the committed baseline, writes a dated scorecard to eval-results/, prints
+// diffs against the committed baseline, writes a dated scorecard to docs/benchmarks/, prints
 // the area table, and exits non-zero on any regression beyond tolerance.
 //
 //   bun run scripts/eval-search.ts --mode mock --round mock
@@ -29,7 +29,7 @@ import { config } from "../src/util/config";
 const ROOT = join(import.meta.dir, "..");
 const QRELS_DIR = join(ROOT, "fixtures/qrels");
 const CORPORA_DIR = join(ROOT, "fixtures/eval-corpora");
-const RESULTS_DIR = join(ROOT, "eval-results");
+const RESULTS_DIR = join(ROOT, "docs", "benchmarks");
 const BASELINE_PATH = join(QRELS_DIR, "baseline.ndjson");
 
 // Area → qrels file + which corpus it runs against. Order = printed/scorecard order.
@@ -111,10 +111,28 @@ async function main(): Promise<number> {
     console.error("ERROR: EVAL_DATABASE_URL must point at a throwaway scratch database.");
     return 2;
   }
-  process.env.DATABASE_URL = process.env.EVAL_DATABASE_URL;
+  // HARD GUARD (incident 2026-06-12): the pool binds to DATABASE_URL at module load, so an
+  // in-process swap cannot retarget it. The runner must be STARTED with
+  // DATABASE_URL=EVAL_DATABASE_URL (the make targets do this), and the connected database's
+  // own name must say it is a scratch eval DB. Refuse otherwise — this runner drops tables.
+  if (process.env.DATABASE_URL !== process.env.EVAL_DATABASE_URL) {
+    console.error(
+      "ERROR: refusing to run — DATABASE_URL must equal EVAL_DATABASE_URL at process start " +
+        "(use the make targets; the pool binds before main() runs).",
+    );
+    return 2;
+  }
+  const { sql } = await import("../src/db/client");
+  const [{ db }] = (await sql`select current_database() as db`) as unknown as [{ db: string }];
+  if (!/eval/i.test(db)) {
+    console.error(
+      `ERROR: refusing to run — connected database "${db}" is not named like a scratch eval DB.`,
+    );
+    return 2;
+  }
   (config as { databaseUrl: string }).databaseUrl = process.env.EVAL_DATABASE_URL;
 
-  console.error(`MinimeBench: mode=${mode} round=${round} repeats=${repeats} db=scratch`);
+  console.error(`MinimeBench: mode=${mode} round=${round} repeats=${repeats} db=${db}`);
   const runs: AreaReport[][] = [];
   for (let i = 0; i < repeats; i++) {
     const seed = seedFor(repeats > 1 ? (seedFor() + i) >>> 0 : undefined);
@@ -126,9 +144,14 @@ async function main(): Promise<number> {
   const baseline = loadBaseline(BASELINE_PATH);
   const baselineExisted = baseline.size > 0;
   const current: Measurement[] = reports.flatMap(measurements);
-  const regressions = diffBaseline(current, baseline);
+  // The committed floors are mock-mode (engine compute). In live mode, latency includes the
+  // embedding provider's network round-trip (~0.5–1.5s) — report it, but never gate on it;
+  // the p95 bar applies to engine compute, which the mock run measures.
+  const regressions = diffBaseline(current, baseline).filter(
+    (r) => !(mode === "live" && r.metric === "latency_p95_ms"),
+  );
 
-  // Scorecard (gitignored eval-results/) — ALL numbers, misses included.
+  // Scorecard (committed in docs/benchmarks/) — ALL numbers, misses included.
   mkdirSync(RESULTS_DIR, { recursive: true });
   const scorecardPath = join(RESULTS_DIR, `${todayStr()}-${round}-minimebench.md`);
   writeFileSync(

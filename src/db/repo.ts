@@ -190,6 +190,7 @@ export interface ParentMeta {
   updated_at: Date;
   created_by: string;
   derived_from: string | null;
+  source: string;
 }
 
 export async function parentMeta(
@@ -201,7 +202,8 @@ export async function parentMeta(
   const { table, titleCol } = parentTable(type);
   // table/titleCol come from the fixed PARENTS map above, never from user input.
   const rows = await sql`
-    select id, left(${sql(titleCol)}::text, 120) as title, updated_at, created_by, derived_from
+    select id, left(${sql(titleCol)}::text, 120) as title, updated_at, created_by, derived_from,
+           source
     from ${sql(table)}
     where id = any(${ids}) and tier <= ${allowed}`;
   return new Map(rows.map((r: any) => [r.id as string, r as ParentMeta]));
@@ -1008,8 +1010,10 @@ export interface NoteCandidate {
 }
 
 // People with at least `minChunks` chunks that mention them. `max_tier` drives the note tier;
-// `latest_mention_at` is the cheap staleness signal (vs. the note page's updated_at). Chunks
-// belonging to the note pages themselves are excluded so a note never feeds itself.
+// `latest_mention_at` is the cheap staleness signal (vs. the note page's updated_at). Mention
+// edges are PARENT-anchored (src = the mentioning row, M7 extraction shape), so the chunks
+// are joined via the edge's src parent. Note pages themselves are excluded so a note never
+// feeds itself.
 export async function noteCandidates(minChunks: number): Promise<NoteCandidate[]> {
   const rows = (await sql`
     select 'person'::text as kind, e.dst_id as id, p.canonical_name as name,
@@ -1017,11 +1021,11 @@ export async function noteCandidates(minChunks: number): Promise<NoteCandidate[]
            max(c.tier)::int as max_tier,
            max(e.created_at) as latest_mention_at
     from edges e
-    join chunks c on c.id = e.source_id
+    join chunks c on c.parent_type = e.src_type and c.parent_id = e.src_id
     join people p on p.id = e.dst_id
-    where e.rel = 'mentions' and e.dst_type = 'person' and e.source_table = 'chunks'
-      and not (c.parent_type = 'page' and exists (
-        select 1 from pages pg where pg.id = c.parent_id and pg.source = 'dream:notes'))
+    where e.rel = 'mentions' and e.dst_type = 'person'
+      and not (e.src_type = 'page' and exists (
+        select 1 from pages pg where pg.id = e.src_id and pg.source = 'dream:notes'))
     group by e.dst_id, p.canonical_name
     having count(distinct c.id) >= ${minChunks}
     order by chunk_count desc`) as any;
@@ -1029,7 +1033,9 @@ export async function noteCandidates(minChunks: number): Promise<NoteCandidate[]
 }
 
 // The mentioning chunks for one person, oldest first (so the representative source —
-// derived_from — is the earliest mentioning row). Excludes the note pages' own chunks.
+// derived_from — is the earliest mentioning row). Parent-anchored edges as above; only
+// chunks that literally contain one of the person's names are distilled, so the note
+// quotes mentioning text rather than every chunk of a long mentioning page.
 export async function noteSourceChunks(
   _kind: "person",
   id: string,
@@ -1037,11 +1043,16 @@ export async function noteSourceChunks(
   return sql`
     select c.id, c.parent_type, c.parent_id, c.text, c.tier
     from edges e
-    join chunks c on c.id = e.source_id
+    join chunks c on c.parent_type = e.src_type and c.parent_id = e.src_id
     where e.rel = 'mentions' and e.dst_type = 'person' and e.dst_id = ${id}
-      and e.source_table = 'chunks'
-      and not (c.parent_type = 'page' and exists (
-        select 1 from pages pg where pg.id = c.parent_id and pg.source = 'dream:notes'))
+      and not (e.src_type = 'page' and exists (
+        select 1 from pages pg where pg.id = e.src_id and pg.source = 'dream:notes'))
+      and exists (
+        select 1 from people p
+        left join person_aliases a on a.person_id = p.id
+        where p.id = ${id}
+          and (c.text ilike '%' || p.canonical_name || '%'
+               or (a.alias is not null and c.text ilike '%' || a.alias || '%')))
     order by c.updated_at, c.ord, c.id` as any;
 }
 

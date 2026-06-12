@@ -1,6 +1,7 @@
 // Deterministic offline embedding (MINIME_MOCK_OLLAMA=1): tests/CI never touch a network.
 // The matching classify mock is heuristicClassify in src/pipeline/classify.ts.
 
+import { cjkFold } from "../util/cjk";
 import { EMBED_DIMS } from "./types";
 
 // FNV-1a hash → seed for a tiny PRNG; same text always yields the same vector.
@@ -25,13 +26,16 @@ function mulberry32(seed: number): () => number {
 }
 
 // Bag-of-words pseudo-embedding: texts sharing words are cosine-close, which keeps the
-// M3 retrieval eval meaningful offline.
+// M3 retrieval eval meaningful offline. Han runs are bigram-folded (same trick as the FTS
+// index, src/util/cjk.ts) so Chinese text gets real tokens too — without this, zh mock
+// vectors were degenerate and rank-based fusion let the garbage vector arm outvote the
+// healthy FTS arm on Chinese queries (MinimeBench integration run, 2026-06-12).
 export function mockEmbed(text: string): number[] {
   const v = new Array<number>(EMBED_DIMS).fill(0);
-  const tokens = text
+  const tokens = cjkFold(text)
     .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((t) => t.length > 2);
+    .split(/[^a-z0-9㐀-䶿一-鿿]+/u)
+    .filter((t) => t.length >= 2);
   for (const tok of tokens) {
     const rand = mulberry32(fnv1a(tok));
     for (let k = 0; k < 8; k++) {

@@ -67,13 +67,15 @@ restore-drill:
 	@./scripts/restore-drill.sh
 
 # MinimeBench (offline, CI-safe): deterministic mock embeddings, single run, full area table.
+# DATABASE_URL is pinned to the scratch DB at PROCESS START — the pool binds at module load,
+# so an in-process swap is too late (incident 2026-06-12: the runner reset the real DB).
 eval-search:
 	@createdb $(notdir $(EVAL_DATABASE_URL)) 2>/dev/null || true
-	@MINIME_MOCK_OLLAMA=1 EVAL_DATABASE_URL=$(EVAL_DATABASE_URL) \
+	@MINIME_MOCK_OLLAMA=1 DATABASE_URL=$(EVAL_DATABASE_URL) EVAL_DATABASE_URL=$(EVAL_DATABASE_URL) \
 		$(BUN) run scripts/eval-search.ts --mode mock --round mock
 
 # MinimeBench (live): configured embed provider, N=3 min/median/max. Needs a provider + DB.
 eval-search-live:
 	@createdb $(notdir $(EVAL_DATABASE_URL)) 2>/dev/null || true
-	@EVAL_DATABASE_URL=$(EVAL_DATABASE_URL) \
+	@DATABASE_URL=$(EVAL_DATABASE_URL) EVAL_DATABASE_URL=$(EVAL_DATABASE_URL) \
 		$(BUN) run scripts/eval-search.ts --mode live --round live-r1 --repeats 3

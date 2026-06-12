@@ -75,10 +75,16 @@ export function heuristicDistill(name: string, chunks: SourceChunk[]): string {
   return capWords(`${name}: ${lines.join(" ")}`, MAX_WORDS);
 }
 
-// Local classify provider (Ollama by default; honors CLOUD_MAX_TIER like every other call) —
-// ollama forces JSON output, so the prompt asks for {"note": "..."} and we read that field.
-async function modelDistill(name: string, chunks: SourceChunk[]): Promise<string> {
-  const { classifyProvider } = await import("../llm");
+// Classify provider (local Ollama by default). CLOUD_MAX_TIER gate (§12, same pattern as
+// the contradiction scan): when the provider is cloud, chunks above the ceiling are dropped
+// BEFORE the prompt is built — tier-2 text never leaves the box uninvited. If the gate
+// empties the source list, the caller falls back to the local heuristic distillation.
+async function modelDistill(name: string, allChunks: SourceChunk[]): Promise<string> {
+  const { classifyProvider, classifyIsCloud } = await import("../llm");
+  const chunks = classifyIsCloud()
+    ? allChunks.filter((c) => c.tier <= config.cloudMaxTier)
+    : allChunks;
+  if (chunks.length === 0) throw new Error("all source chunks above CLOUD_MAX_TIER");
   const sources = chunks.map((c, i) => `[S${i + 1}] ${c.text.slice(0, 1200)}`).join("\n\n");
   // The prompt forbids invention: facts must come verbatim from the sources (I5/I7 spirit).
   const prompt = `You are compiling a factual reference note about "${name}" from the source excerpts below. Write a neutral, ${MAX_WORDS}-word-or-fewer distillation.
@@ -134,9 +140,17 @@ async function compileOne(c: NoteCandidate): Promise<NoteResult> {
   const tier = chunks.reduce((max, ch) => Math.max(max, ch.tier), 0);
   const representative = chunks[0]!.parent_id; // earliest mentioning row (derived_from)
 
+  // cloud-gate fallback: if every source chunk sits above CLOUD_MAX_TIER (or the provider
+  // fails), distill locally rather than sending tier-locked text off-box or dropping the
+  // note. Log the reason (entity name only, never chunk text) so degradation is visible.
   const distillation = config.mockOllama
     ? heuristicDistill(c.name, chunks)
-    : await modelDistill(c.name, chunks);
+    : await modelDistill(c.name, chunks).catch((e) => {
+        console.error(
+          `[dream:notes] model distill failed for "${c.name}" (${e instanceof Error ? e.message : e}); using heuristic`,
+        );
+        return heuristicDistill(c.name, chunks);
+      });
   const body = renderNote(c.name, distillation, chunks);
   const contentHash = new Bun.CryptoHasher("sha256").update(body).digest("hex");
 

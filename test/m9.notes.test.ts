@@ -85,8 +85,13 @@ describe("compileNotes provenance and tier", () => {
       "Public talk",
       "Ingrid Solberg gave a talk on kelp forests to the local school.",
     );
-    const linked = await entityLinkPass();
-    expect(linked).toBeGreaterThanOrEqual(3);
+    // on current main, indexParent already extracted the mention edges per-write;
+    // entityLinkPass is only the backlog sweep — assert the edges, not the sweep count
+    await entityLinkPass();
+    const [edges] = await sql`
+      select count(*)::int as n from edges
+      where rel = 'mentions' and dst_type = 'person' and dst_id = ${personId}`;
+    expect(edges!.n).toBeGreaterThanOrEqual(3);
 
     const res = await compileNotes();
     expect(res.compiled).toBe(1);
