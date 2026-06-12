@@ -60,6 +60,12 @@ Capture: drop text/markdown files into `data/inbox/` (iOS Shortcut + Syncthing, 
 or `minime_capture` from an agent). The watcher classifies and files them; anything it isn't
 sure about waits for the evening review.
 
+Session capture (optional): `make install-hooks` adds a Claude Code `SessionEnd` hook that
+summarizes every agent work session — first request, outcome, files touched — into
+`data/inbox/` (heuristic extraction, no model call, trivial sessions skipped). Same inbox
+door as any other capture; confirmation-gated install, backs up `~/.claude/settings.json`
+first.
+
 ## Architecture (short version)
 
 - **Files are the archive, rows are the state, Postgres is the index.** Prose lives as

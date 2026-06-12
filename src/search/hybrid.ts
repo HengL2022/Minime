@@ -3,9 +3,9 @@
 // of max-normalized scores:
 //   rrf(c) = Σ_arm weight_arm / (RRF_K + rank_arm(c))           over {vector, fts}
 //   base   = 0.7·rrf_norm + 0.3·cosine                          (re-score blend)
-//   score  = base · recencyMult · graphMult · titleBoost · (derived ? 0.85 : 1)
-// Recency and graph adjacency are small post-fusion MULTIPLIERS (≤~×1.05 band), not weighted
-// terms — they nudge near-ties without swamping relevance. A zero-LLM intent classifier
+//   score  = base · recencyMult · graphMult · accessMult · titleBoost · (derived ? 0.85 : 1)
+// Recency, graph adjacency and access frequency are small post-fusion MULTIPLIERS
+// (≤~×1.05 band each), not weighted terms — they nudge near-ties without swamping relevance. A zero-LLM intent classifier
 // nudges the FTS arm weight, the recency band, and the title boost. Constants are starting
 // values; tune only against the eval harness. // eval-calibration pending
 
@@ -13,6 +13,7 @@ import {
   type Candidate,
   type ParentMeta,
   type ParentType,
+  accessCounts,
   entitiesNamedIn,
   ftsCandidates,
   oneHopNeighbors,
@@ -53,6 +54,13 @@ const BLEND_RRF = 0.7;
 const BLEND_COS = 0.3;
 const REC_BAND = 0.05; // recency multiplier spans [1, 1+REC_BAND]
 const GRAPH_BAND = 0.05; // graph-adjacency multiplier ∈ {1, 1+GRAPH_BAND}
+// Access-frequency nudge (agentmemory-inspired, DECISIONS.md 2026-06-12): parents the
+// owner's agents deliberately drilled into (minime_get_context returns, NOT search hits —
+// that would self-reinforce) get up to ×(1+ACCESS_BAND), saturating at ACCESS_CAP
+// drill-ins inside the window. // eval-calibration pending
+const ACCESS_BAND = 0.05;
+const ACCESS_CAP = 5;
+const ACCESS_WINDOW_DAYS = 90;
 const DERIVED_PENALTY = 0.85;
 // Compiled notes (dream-distilled summaries, source='dream:notes') are high-signal derived
 // content — boosted like GBrain's compiled-truth layer instead of penalized. ×1.5 starting
@@ -197,6 +205,12 @@ export async function hybridSearch(opts: {
   // graph boost: parent within 1 edge hop of an entity literally named in the query
   const boosted = await oneHopNeighbors(await entitiesNamedIn(query));
 
+  // access boost: parents the owner's agents drilled into recently (audit log, ids only)
+  const access = await accessCounts(
+    [...new Set(candidates.map((c) => c.parent_id))],
+    ACCESS_WINDOW_DAYS,
+  );
+
   // RRF score per candidate, then max-normalize so the blend lives on a [0,1] scale.
   const rrfRaw = new Map<string, number>();
   for (const c of candidates) {
@@ -221,9 +235,11 @@ export async function hybridSearch(opts: {
     const ageDays = Math.max(0, (t - new Date(m.updated_at).getTime()) / 86_400_000);
     const recencyMult = 1 + REC_BAND * nudge.recencyScale * Math.exp(-ageDays / 180);
     const graphMult = boosted.has(`${c.parent_type}:${c.parent_id}`) ? 1 + GRAPH_BAND : 1;
+    const drills = access.get(c.parent_id) ?? 0;
+    const accessMult = 1 + ACCESS_BAND * (Math.min(drills, ACCESS_CAP) / ACCESS_CAP);
     const title = titleBoost(query, m.title, nudge.titleBoostScale);
 
-    let score = base * recencyMult * graphMult * title;
+    let score = base * recencyMult * graphMult * accessMult * title;
     const derived = m.derived_from !== null;
     // both stamps required: an imported/agent-written page can't claim the boost by source alone
     if (m.source === "dream:notes" && m.created_by === "system:dream") score *= NOTES_BOOST;

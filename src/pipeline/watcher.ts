@@ -128,6 +128,7 @@ async function fileRow(
         contentHash: hash,
         createdBy: ACTOR,
         source: "capture",
+        derivedFrom: inboxId,
       });
       await indexParent("page", id, body, c.fields.title || firstLine, 1);
       return ["pages", id];

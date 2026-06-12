@@ -256,6 +256,23 @@ export async function oneHopNeighbors(refs: EntityRef[]): Promise<Set<string>> {
   return set;
 }
 
+// Access-frequency signal for ranking (DECISIONS.md 2026-06-12). Counts how often each
+// parent id was returned by minime_get_context — a deliberate drill-in, unlike search
+// hits, so the boost cannot feed back into itself (search results boosting their own
+// rank). Read straight off the append-only audit log (I8): ids only, never content.
+export async function accessCounts(ids: string[], sinceDays: number): Promise<Map<string, number>> {
+  if (ids.length === 0) return new Map();
+  const since = new Date(now().getTime() - sinceDays * 86_400_000);
+  const rows = await sql`
+    select rid as id, count(*)::int as n
+    from events e, jsonb_array_elements_text(e.payload->'returned_ids') rid
+    where e.verb = 'tool:minime_get_context'
+      and e.at >= ${since}
+      and rid = any(${ids})
+    group by rid`;
+  return new Map(rows.map((r: any) => [r.id as string, r.n as number]));
+}
+
 // ---------------------------------------------------------------- people
 
 export async function resolvePerson(name: string): Promise<any | null> {

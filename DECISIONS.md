@@ -635,3 +635,32 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   restore via throwaway :5433 instance, converging on the same minime_restore promote UX).
 - **Approved by:** human (owner, 2026-06-12 — "both, phased" decision in plan;
   implementation "you can start" this conversation).
+
+## 2026-06-12 — agentmemory learnings: SessionEnd episodic capture + access-frequency rank nudge
+
+- **Context:** Post-M9 new scope (spec §15 deferred list never covered agent-session
+  capture; the access boost changes search weights, spec §9 Phase-1a amendment lineage).
+  Source: owner-requested review of github.com/rohitg00/agentmemory. Plan:
+  `~/.claude/plans/https-github-com-rohitg00-agentmemory-ta-humming-karp.md`. Their
+  retrieval/eval stack is behind ours (95.2% R@5 session-level/MiniLM vs our 97.2%
+  chunk-level) — only the capture idea and the access signal were adopted; TTL hard-delete
+  forgetting rejected (conflicts I5/I8 append-only provenance), per-parent diversity cap
+  rejected (hybrid.ts already dedupes to best chunk per parent).
+- **Decision:** (a) `agents/hooks/session-capture.sh` — Claude Code SessionEnd hook,
+  heuristic transcript extraction (no model call, no network, I1), writes markdown into
+  `data/inbox/` (same one-door capture path, I2); watcher files it as a note page,
+  `source='capture'`, `derived_from=<inbox_item>` (I5; the watcher's note branch now
+  stamps derived_from — it was the only branch missing it). Idempotent per session_id;
+  sessions with <2 user prompts skipped. Install is owner-run + confirmation-gated
+  (`make install-hooks`, backs up `~/.claude/settings.json`). (b) `accessCounts()` in
+  repo.ts reads drill-in frequency off the append-only events log (ids only) — counts
+  `tool:minime_get_context` returns, NOT `minime_search` returns, so results cannot boost
+  their own rank; hybrid.ts applies it as a fourth narrow-band post-fusion multiplier
+  (ACCESS_BAND=0.05, saturates at 5 drill-ins/90d). // eval-calibration pending — keep,
+  shrink, or zero the band on the next live MinimeBench A/B.
+- **Why:** Minime had no episodic record of agent work sessions, and the audit log
+  already contained a free relevance signal; both land with zero new dependencies and
+  without touching the forgetting/append-only invariants. Verified: new offline tests
+  (accessCounts window/verb filtering, tie-break boost e2e, hook e2e incl. idempotency +
+  watcher filing), full suite + mock eval floors green.
+- **Approved by:** human (owner, 2026-06-12 — plan approved, "start the coding part").
