@@ -98,21 +98,24 @@ export async function hybridSearch(opts: {
   types?: string[] | null;
   limit?: number;
   includeDerived?: boolean;
+  /** optional scope: restrict candidates to these parent row ids (e.g. a benchmark haystack) */
+  scopeParentIds?: string[] | null;
 }): Promise<Hit[]> {
   const { query } = opts;
   const types = opts.types?.length ? opts.types : null;
   const limit = opts.limit ?? 10;
   const includeDerived = opts.includeDerived ?? false;
+  const scope = opts.scopeParentIds?.length ? opts.scopeParentIds : null;
   const nudge = intentNudge(query); // zero-LLM; never overrides explicit filters
 
   // candidates = top-50 cosine ∪ top-50 fts (each already tier-filtered in repo)
   let vec: Candidate[] = [];
   try {
-    vec = await vectorCandidates(await embedQuery(query), types);
+    vec = await vectorCandidates(await embedQuery(query), types, scope);
   } catch {
     // embeddings unavailable (e.g. Ollama down): degrade to FTS-only
   }
-  const fts = await ftsCandidates(query, types);
+  const fts = await ftsCandidates(query, types, scope);
 
   // RRF ranks come from each arm's OWN ordering (before the union erases per-arm position).
   const vecRank = armRanks(vec, (c) => c.cosine);

@@ -74,6 +74,14 @@ eval-search:
 	@MINIME_MOCK_OLLAMA=1 DATABASE_URL=$(EVAL_DATABASE_URL) EVAL_DATABASE_URL=$(EVAL_DATABASE_URL) \
 		$(BUN) run scripts/eval-search.ts --mode mock --round mock
 
+# LongMemEval-s (public, 500 questions): one-off ~49M-token ingest, then judge-free
+# session-level recall. Same scratch-DB safety contract as MinimeBench.
+EVAL_LME_DATABASE_URL ?= postgres://minime:minime@localhost:5432/minime_eval_lme1
+eval-longmemeval:
+	@createdb $(notdir $(EVAL_LME_DATABASE_URL)) 2>/dev/null || true
+	@DATABASE_URL=$(EVAL_LME_DATABASE_URL) EVAL_LME_DATABASE_URL=$(EVAL_LME_DATABASE_URL) \
+		$(BUN) run scripts/eval-longmemeval.ts --phase all
+
 # MinimeBench (live): configured embed provider, N=3 min/median/max. Needs a provider + DB.
 eval-search-live:
 	@createdb $(notdir $(EVAL_DATABASE_URL)) 2>/dev/null || true

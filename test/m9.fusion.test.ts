@@ -114,3 +114,33 @@ describe("intent classifier", () => {
     expect(event.titleBoostScale).toBe(1);
   });
 });
+
+describe("scoped search (scopeParentIds)", () => {
+  test("results are restricted to the given parent ids", async () => {
+    const { upsertPage } = await import("../src/db/repo");
+    const { indexParent } = await import("../src/search/index-parent");
+    const { hybridSearch } = await import("../src/search/hybrid");
+    const a = await upsertPage({
+      path: "scope/a.md",
+      title: "Skiff maintenance",
+      bodyMd: "The skiff needs antifouling paint every spring season.",
+      contentHash: "scope-a",
+      source: "test",
+    });
+    const b = await upsertPage({
+      path: "scope/b.md",
+      title: "Skiff log",
+      bodyMd: "Took the skiff out past the breakwater; antifouling held up well.",
+      contentHash: "scope-b",
+      source: "test",
+    });
+    await indexParent("page", a.id, "The skiff needs antifouling paint every spring season.", "Skiff maintenance", 1);
+    await indexParent("page", b.id, "Took the skiff out past the breakwater; antifouling held up well.", "Skiff log", 1);
+
+    const all = await hybridSearch({ query: "skiff antifouling" });
+    expect(all.length).toBeGreaterThanOrEqual(2);
+    const scoped = await hybridSearch({ query: "skiff antifouling", scopeParentIds: [a.id] });
+    expect(scoped.length).toBe(1);
+    expect(scoped[0]!.id).toBe(a.id);
+  });
+});

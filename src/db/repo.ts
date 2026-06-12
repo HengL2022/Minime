@@ -142,7 +142,11 @@ export interface Candidate {
   fts: number;
 }
 
-export async function ftsCandidates(query: string, types: string[] | null): Promise<Candidate[]> {
+export async function ftsCandidates(
+  query: string,
+  types: string[] | null,
+  parentIds: string[] | null = null, // optional scope: restrict to these parent rows
+): Promise<Candidate[]> {
   const allowed = await allowedTier();
   // OR the query words: plainto_tsquery ANDs every term, so a natural-language question
   // matched nothing whenever one contentful word was absent from a chunk — on a 100-question
@@ -163,6 +167,7 @@ export async function ftsCandidates(query: string, types: string[] | null): Prom
     where c.tier <= ${allowed}
       and c.tsv @@ websearch_to_tsquery('english', ${orQuery})
       and (${types === null} or c.parent_type = any(${types ?? []}))
+      and (${parentIds === null} or c.parent_id = any(${parentIds ?? []}))
     order by fts desc
     limit 50` as any;
 }
@@ -170,6 +175,7 @@ export async function ftsCandidates(query: string, types: string[] | null): Prom
 export async function vectorCandidates(
   embedding: number[],
   types: string[] | null,
+  parentIds: string[] | null = null, // optional scope: restrict to these parent rows
 ): Promise<Candidate[]> {
   const allowed = await allowedTier();
   const vec = JSON.stringify(embedding);
@@ -180,6 +186,7 @@ export async function vectorCandidates(
     from chunks c
     where c.tier <= ${allowed} and c.embedding is not null
       and (${types === null} or c.parent_type = any(${types ?? []}))
+      and (${parentIds === null} or c.parent_id = any(${parentIds ?? []}))
     order by c.embedding <=> ${vec}::vector
     limit 50` as any;
 }
@@ -906,6 +913,13 @@ export async function openItemsFor(
 export async function journalCountSince(since: Date): Promise<number> {
   const [r] = await sql`select count(*)::int as n from journal_entries where at >= ${since}`;
   return r!.n;
+}
+
+// Resolve page rows by path, e.g. mapping benchmark haystack ids (encoded in paths) to
+// page UUIDs for scoped search.
+export async function pagesByPaths(paths: string[]): Promise<{ id: string; path: string }[]> {
+  if (paths.length === 0) return [];
+  return sql`select id, path from pages where path = any(${paths})` as any;
 }
 
 // ---------------------------------------------------------------- dream support

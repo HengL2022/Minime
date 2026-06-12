@@ -361,3 +361,20 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   (e.g. graph hit@1 floor 0.60 → 0.53). The binding live record is
   `docs/benchmarks/2026-06-12-live-final-minimebench.md`; the rejected-blend run is kept
   as `2026-06-12-live-r2-rejected-blend-minimebench.md` (we publish the bad numbers).
+
+## 2026-06-12 — LongMemEval-s public benchmark runner (500 questions, judge-free)
+
+- **Context:** Plan's stretch item. New `make eval-longmemeval` + `scripts/eval-longmemeval.ts`
+  (same scratch-DB hard-guard contract as MinimeBench; DB `minime_eval_lme1`). One engine
+  addition: `hybridSearch`/candidates accept an optional `scopeParentIds` restriction —
+  each question searches only its own haystack, per the benchmark contract.
+- **Decision:** 19,829 globally-deduped chat sessions ingested once (111,971 chunks,
+  qwen3-embedding-8b live; no entity extraction on benchmark logs), 500 questions scored
+  by session-level recall against the dataset's evidence labels. Result: recall@5 94.0%,
+  recall@10 97.6%, MRR@10 0.830. Weakest types: single-session-preference (70% @5) and
+  temporal-reasoning (90.2% @5) — paraphrase-heavy and date-arithmetic questions, i.e.
+  reranker-class (Phase 3) and time-aware-scoring candidates. Reference: gbrain reports
+  97.6% recall@5 on this dataset with its full tuned stack.
+- **Why:** First public-benchmark anchor for the engine, fully deterministic and
+  reproducible (`docs/benchmarks/2026-06-12-longmemeval-s.md`).
+- **Approved by:** human (requested the full 500-question run).
