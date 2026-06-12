@@ -45,6 +45,42 @@ export function flag(name: string, dflt: string): string {
   return i >= 0 ? (process.argv[i + 1] ?? dflt) : dflt;
 }
 
+// TARGET model — the agent that executes the skill under test. gbrain pins a CHEAP
+// target (Haiku) so skill quality, not raw model strength, is what gets measured;
+// Opus + the resolver paper over skill defects (cat30 finding, DECISIONS 2026-06-12).
+// SKILL_TARGET_MODEL overrides the configured provider's model id for this role only —
+// the optimizer keeps the full-strength classify config. Provider instances capture
+// their model id at build time, so we swap the config field, build, and restore.
+let targetLlmCache: import("../src/llm/types").LlmProvider | null = null;
+export async function targetProvider(): Promise<import("../src/llm/types").LlmProvider> {
+  if (targetLlmCache) return targetLlmCache;
+  const { classifyProvider } = await import("../src/llm");
+  const override = process.env.SKILL_TARGET_MODEL;
+  if (!override) {
+    targetLlmCache = classifyProvider();
+    return targetLlmCache;
+  }
+  const { config } = await import("../src/util/config");
+  const field = (
+    {
+      bedrock: "bedrockModel",
+      anthropic: "anthropicModel",
+      ollama: "classifyModel",
+      openai: "openaiModel",
+      openrouter: "openrouterModel",
+    } as const
+  )[config.classifyProvider];
+  if (!field) throw new Error(`unknown classify provider: ${config.classifyProvider}`);
+  const prev = (config as Record<string, unknown>)[field];
+  (config as Record<string, unknown>)[field] = override;
+  try {
+    targetLlmCache = classifyProvider();
+  } finally {
+    (config as Record<string, unknown>)[field] = prev;
+  }
+  return targetLlmCache;
+}
+
 export async function guardScratchDb(): Promise<void> {
   if (
     !process.env.EVAL_SKILLS_DATABASE_URL ||
@@ -116,10 +152,9 @@ export async function runEpisode(
   maxSteps: number,
   skillOverride?: string,
 ): Promise<Episode> {
-  const { classifyProvider } = await import("../src/llm");
   const { toolByName } = await import("../src/mcp/tools");
   const { invokeTool } = await import("../src/mcp/tools/registry");
-  const llm = classifyProvider();
+  const llm = await targetProvider();
 
   const system = await systemPrompt(task.skill, skillOverride);
   const transcript: string[] = [`OWNER: ${task.prompt}`];

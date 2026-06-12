@@ -561,3 +561,18 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
     raised to 4096 in bedrock/anthropic providers (classify outputs unaffected;
     request-shape test updated).
 - **Approved by:** human ("gogo", 2026-06-12).
+
+- **Addendum (same day) — target/optimizer role split:** `SKILL_TARGET_MODEL` now pins
+  the agent that EXECUTES skills (gbrain's cheap-target practice) while the optimizer
+  keeps the full classify model; standing target: Haiku 4.5 via Bedrock
+  (global.anthropic.claude-haiku-4-5-20251001-v1:0), optimizer Opus 4.8. Both stamped
+  per scorecard. Re-baselined SkillEval on the Haiku target: 11/13 — and Haiku exposed
+  a live-skill defect Opus masked: following the CURRENT query.md it called
+  minime_unlock unprompted (audit-caught). Validation reruns: cat30-haiku converged
+  without learning (deficient skill passed all 4 train tasks on Haiku while failing 3/5
+  held-out) and r2-haiku rejected 3 non-improving rewrites — both correct gate behavior
+  exposing the actual bottleneck: TRAIN-SET COVERAGE. With 4 single-shot tasks per
+  suite, train misses failure modes held-out catches (unlock temptation, citation
+  pressure) and ±1 run variance swamps the strict-improvement gate. Next lever (before
+  any committed bars): denser train sets per suite + N-repeat averaged gating, not loop
+  changes.

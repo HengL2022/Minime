@@ -168,8 +168,11 @@ async function main(): Promise<number> {
 
   await seedCorpus();
   const { classifyProvider } = await import("../src/llm");
-  const driver = classifyProvider();
-  console.error(`optimizer+target: ${driver.name}:${driver.model} — suite ${suite}`);
+  const { targetProvider } = await import("./skill-eval-lib");
+  const optimizer = classifyProvider();
+  const target = await targetProvider();
+  const roles = `target ${target.name}:${target.model} / optimizer ${optimizer.name}:${optimizer.model}`;
+  console.error(`${roles} — suite ${suite}`);
 
   console.error(`baseline train (${train.length} tasks)...`);
   let cur = await runWithTranscripts(train, suite, maxSteps, startSkill);
@@ -241,7 +244,7 @@ async function main(): Promise<number> {
   const md = [
     `# SkillOpt — ${skillFile} (round ${roundLabel})`,
     "",
-    `Optimizer+target: ${driver.name}:${driver.model}. Train: ${train.length} tasks; held-out:`,
+    `Roles: ${roles}. Train: ${train.length} tasks; held-out:`,
     `${heldout.length} tasks (never shown to the optimizer). Gates: mechanical contamination`,
     "check → train must strictly improve → held-out must not regress.",
     startFrom

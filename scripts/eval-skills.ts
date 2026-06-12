@@ -71,10 +71,10 @@ async function main(): Promise<number> {
 
   await seedCorpus();
 
-  const { classifyProvider } = await import("../src/llm");
-  const driver = classifyProvider();
+  const { targetProvider } = await import("./skill-eval-lib");
+  const driver = await targetProvider();
   const model = `${driver.name}:${driver.model}`;
-  console.error(`driver: ${model}`);
+  console.error(`target: ${model}`);
 
   const suiteFiles = readdirSync(TASKS_DIR)
     .filter((f) => f.endsWith(".json"))
