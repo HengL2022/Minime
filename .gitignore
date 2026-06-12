@@ -13,3 +13,5 @@ db-dump/
 *.log
 .ollama-serve.log
 .DS_Store
+
+.claude/worktrees/
