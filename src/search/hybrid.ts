@@ -1,7 +1,13 @@
-// Hybrid search fusion (spec §9). Candidates from repo (tier-filtered), scored here:
-//   score = 0.55·cosine_norm + 0.30·fts_norm + 0.10·recency + 0.05·graph_boost
-//   recency = exp(-age_days/180); derived penalty ×0.85 unless include_derived.
-// Weights are starting values; tune only against the M3 eval (DECISIONS.md).
+// Hybrid search fusion (spec §9, Phase-1a amendment — DECISIONS.md). Candidates from repo
+// (tier-filtered) are fused here by reciprocal-rank fusion (RRF) rather than a weighted sum
+// of max-normalized scores:
+//   rrf(c) = Σ_arm weight_arm / (RRF_K + rank_arm(c))           over {vector, fts}
+//   base   = 0.7·rrf_norm + 0.3·cosine                          (re-score blend)
+//   score  = base · recencyMult · graphMult · titleBoost · (derived ? 0.85 : 1)
+// Recency and graph adjacency are small post-fusion MULTIPLIERS (≤~×1.05 band), not weighted
+// terms — they nudge near-ties without swamping relevance. A zero-LLM intent classifier
+// nudges the FTS arm weight, the recency band, and the title boost. Constants are starting
+// values; tune only against the eval harness. // eval-calibration pending
 
 import {
   type Candidate,
@@ -15,6 +21,8 @@ import {
 } from "../db/repo";
 import { now } from "../util/clock";
 import { embedQuery } from "./embed";
+import { intentNudge } from "./intent";
+import { titleBoost } from "./title-match";
 
 export interface Hit {
   type: ParentType;
@@ -27,10 +35,27 @@ export interface Hit {
   created_by: string;
 }
 
-const W_COS = 0.55;
-const W_FTS = 0.3;
-const W_REC = 0.1;
-const W_GRAPH = 0.05;
+// RRF dampening constant (Cormack et al. 2009 use 60): large enough that the top several
+// ranks of each arm contribute comparably, so neither arm's raw score scale leaks in.
+const RRF_K = 60;
+const W_RRF_VEC = 1.0; // vector arm RRF weight (FTS arm weight comes from the intent nudge)
+const W_RRF_FTS = 1.0;
+const BLEND_RRF = 0.7; // re-score blend: rank agreement vs ...
+const BLEND_COS = 0.3; // ... raw cosine, which still rewards a strong lone semantic match
+const REC_BAND = 0.05; // recency multiplier spans [1, 1+REC_BAND]
+const GRAPH_BAND = 0.05; // graph-adjacency multiplier ∈ {1, 1+GRAPH_BAND}
+const DERIVED_PENALTY = 0.85;
+
+// 1-based rank per candidate id, ordered by `key` descending. Each arm is already sorted in
+// repo (limit 50); we re-derive ranks here so the fusion math is self-contained and testable.
+function armRanks(arm: Candidate[], key: (c: Candidate) => number): Map<string, number> {
+  const ordered = [...arm].sort((a, b) => key(b) - key(a));
+  const m = new Map<string, number>();
+  ordered.forEach((c, i) => {
+    if (!m.has(c.id)) m.set(c.id, i + 1); // first occurrence = best rank
+  });
+  return m;
+}
 
 function normalize(values: number[]): (v: number) => number {
   const max = Math.max(...values, 0);
@@ -68,6 +93,7 @@ export async function hybridSearch(opts: {
   const types = opts.types?.length ? opts.types : null;
   const limit = opts.limit ?? 10;
   const includeDerived = opts.includeDerived ?? false;
+  const nudge = intentNudge(query); // zero-LLM; never overrides explicit filters
 
   // candidates = top-50 cosine ∪ top-50 fts (each already tier-filtered in repo)
   let vec: Candidate[] = [];
@@ -77,6 +103,10 @@ export async function hybridSearch(opts: {
     // embeddings unavailable (e.g. Ollama down): degrade to FTS-only
   }
   const fts = await ftsCandidates(query, types);
+
+  // RRF ranks come from each arm's OWN ordering (before the union erases per-arm position).
+  const vecRank = armRanks(vec, (c) => c.cosine);
+  const ftsRank = armRanks(fts, (c) => c.fts);
 
   const byId = new Map<string, Candidate>();
   for (const c of [...vec, ...fts]) {
@@ -108,20 +138,35 @@ export async function hybridSearch(opts: {
   // graph boost: parent within 1 edge hop of an entity literally named in the query
   const boosted = await oneHopNeighbors(await entitiesNamedIn(query));
 
-  const normCos = normalize(candidates.map((c) => c.cosine));
-  const normFts = normalize(candidates.map((c) => c.fts));
+  // RRF score per candidate, then max-normalize so the blend lives on a [0,1] scale.
+  const rrfRaw = new Map<string, number>();
+  for (const c of candidates) {
+    const vr = vecRank.get(c.id);
+    const fr = ftsRank.get(c.id);
+    const r =
+      (vr ? W_RRF_VEC / (RRF_K + vr) : 0) +
+      (fr ? (W_RRF_FTS * nudge.ftsRrfWeight) / (RRF_K + fr) : 0);
+    rrfRaw.set(c.id, r);
+  }
+  const normRrf = normalize([...rrfRaw.values()]);
   const t = now().getTime();
 
   const scored = candidates.flatMap((c) => {
     const m = meta.get(`${c.parent_type}:${c.parent_id}`);
     if (!m) return []; // parent invisible at current tier (or deleted)
+
+    // re-score blend: rank-fusion agreement, lifted by raw cosine for strong semantic hits.
+    const base = BLEND_RRF * normRrf(rrfRaw.get(c.id)!) + BLEND_COS * c.cosine;
+
+    // post-fusion multipliers (recency/graph in a narrow band; intent nudges recency width).
     const ageDays = Math.max(0, (t - new Date(m.updated_at).getTime()) / 86_400_000);
-    const recency = Math.exp(-ageDays / 180);
-    const graph = boosted.has(`${c.parent_type}:${c.parent_id}`) ? 1 : 0;
-    let score =
-      W_COS * normCos(c.cosine) + W_FTS * normFts(c.fts) + W_REC * recency + W_GRAPH * graph;
+    const recencyMult = 1 + REC_BAND * nudge.recencyScale * Math.exp(-ageDays / 180);
+    const graphMult = boosted.has(`${c.parent_type}:${c.parent_id}`) ? 1 + GRAPH_BAND : 1;
+    const title = titleBoost(query, m.title, nudge.titleBoostScale);
+
+    let score = base * recencyMult * graphMult * title;
     const derived = m.derived_from !== null;
-    if (derived && !includeDerived) score *= 0.85;
+    if (derived && !includeDerived) score *= DERIVED_PENALTY;
     return [{ c, m, score, derived }];
   });
 
