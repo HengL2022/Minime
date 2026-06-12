@@ -576,3 +576,30 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   pressure) and ±1 run variance swamps the strict-improvement gate. Next lever (before
   any committed bars): denser train sets per suite + N-repeat averaged gating, not loop
   changes.
+
+## 2026-06-12 — CJK FTS lexemes go ASCII-hex (010): macOS libc broke Han tokenization
+
+- **Context:** The install CI's macOS job (brew PG17) failed exactly two m8 tests — the
+  ones needing Chinese chunks to be FOUND — while the cjk_fold parity test passed.
+  A failure-only diagnostic step added to the workflow produced the real evidence:
+  cluster UTF8 + en_US.UTF-8 (identical to working dev machines), cjk_fold correct, but
+  to_tsvector('english', <Han bigrams>) returned ZERO lexemes. Root cause: Postgres's
+  text-search parser classifies word characters through the platform libc, and macOS 14's
+  iswalpha drops Han even under en_US.UTF-8; the same settings work on macOS 15 (dev box,
+  Darwin 25) and glibc. Not fixable by locale/provider settings across macOS versions.
+- **Decision:** cjk_fold (SQL, migration 010) and cjkFold (TS twin) now emit bigrams as
+  pure-ASCII hex lexemes — "招商银行" → " zh62db5546 zh554694f6 zh94f6884c " — which
+  every parser on every platform tokenizes identically. isCjkStopToken decodes the hex
+  form, so the query-side function-word filter and title-boost behavior are preserved.
+  The MOCK embedding keeps the pre-hex fold (new cjkFoldRaw) because the committed eval
+  floors depend on byte-stable mock vectors — and indeed `make eval-search` holds all
+  bars with zero drift after the change. The chunks.tsv generated column is rebuilt by
+  the migration (table rewrite); index and query sides move in the same deploy.
+  Also: scripts/eval-longmemeval.ts scorecards are now round-stamped
+  (<date>-<round|smokeN>-longmemeval-s.md) so a smoke run can never again clobber the
+  committed full record, and the macOS CI job keeps the failure-only CJK diagnostic.
+- **Why:** A retrieval feature that silently varies with the OS's iswalpha is exactly the
+  kind of decade-scale trap this project avoids; ASCII lexemes cost only tsvector
+  readability. Verified: full offline suite green, regression gate "all bars held",
+  live DB migrated (hex lexemes confirmed in minime).
+- **Approved by:** human ("fix the two flags", 2026-06-12).

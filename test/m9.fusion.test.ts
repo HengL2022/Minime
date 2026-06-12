@@ -54,8 +54,8 @@ describe("title-phrase boost", () => {
     expect(titleBoost("中国银行", "招商银行 年度报告")).toBe(1);
   });
 
-  test("tokenize folds Han runs to overlapping bigrams", () => {
-    expect(tokenize("招商银行")).toEqual(["招商", "商银", "银行"]);
+  test("tokenize folds Han runs to overlapping hex bigram lexemes", () => {
+    expect(tokenize("招商银行")).toEqual(["zh62db5546", "zh554694f6", "zh94f6884c"]);
     expect(tokenize("Rivian R1T")).toEqual(["rivian", "r1t"]);
   });
 
@@ -134,8 +134,20 @@ describe("scoped search (scopeParentIds)", () => {
       contentHash: "scope-b",
       source: "test",
     });
-    await indexParent("page", a.id, "The skiff needs antifouling paint every spring season.", "Skiff maintenance", 1);
-    await indexParent("page", b.id, "Took the skiff out past the breakwater; antifouling held up well.", "Skiff log", 1);
+    await indexParent(
+      "page",
+      a.id,
+      "The skiff needs antifouling paint every spring season.",
+      "Skiff maintenance",
+      1,
+    );
+    await indexParent(
+      "page",
+      b.id,
+      "Took the skiff out past the breakwater; antifouling held up well.",
+      "Skiff log",
+      1,
+    );
 
     const all = await hybridSearch({ query: "skiff antifouling" });
     expect(all.length).toBeGreaterThanOrEqual(2);

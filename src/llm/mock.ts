@@ -1,7 +1,9 @@
 // Deterministic offline embedding (MINIME_MOCK_OLLAMA=1): tests/CI never touch a network.
 // The matching classify mock is heuristicClassify in src/pipeline/classify.ts.
 
-import { cjkFold } from "../util/cjk";
+// cjkFoldRaw (not cjkFold): the committed eval floors depend on byte-stable mock vectors,
+// and the FTS-side hex fold has no bearing on this deterministic embedding proxy.
+import { cjkFoldRaw } from "../util/cjk";
 import { EMBED_DIMS } from "./types";
 
 // FNV-1a hash → seed for a tiny PRNG; same text always yields the same vector.
@@ -32,7 +34,7 @@ function mulberry32(seed: number): () => number {
 // healthy FTS arm on Chinese queries (MinimeBench integration run, 2026-06-12).
 export function mockEmbed(text: string): number[] {
   const v = new Array<number>(EMBED_DIMS).fill(0);
-  const tokens = cjkFold(text)
+  const tokens = cjkFoldRaw(text)
     .toLowerCase()
     .split(/[^a-z0-9㐀-䶿一-鿿]+/u)
     .filter((t) => t.length >= 2);

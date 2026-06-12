@@ -30,9 +30,11 @@ describe("cjkFold parity (TS twin vs SQL cjk_fold)", () => {
     }
   });
 
-  test("bigrams overlap; single char stays unigram; English untouched", () => {
-    expect(cjkFold("招商银行").trim()).toBe("招商 商银 银行");
-    expect(cjkFold("猫").trim()).toBe("猫");
+  test("bigrams overlap as hex lexemes; single char stays unigram; English untouched", () => {
+    // ASCII hex lexemes: the ts parser's libc-based classification drops Han chars on
+    // some platforms (macOS 14 CI), so lexemes must never contain them (010 migration)
+    expect(cjkFold("招商银行").trim()).toBe("zh62db5546 zh554694f6 zh94f6884c");
+    expect(cjkFold("猫").trim()).toBe("zh732b");
     expect(cjkFold("hello world")).toBe("hello world");
   });
 });

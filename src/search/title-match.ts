@@ -12,10 +12,10 @@
 // the latter covers legitimate one-word titles like "Quokkas".
 //
 // CJK-aware: Han runs are bigram-folded with cjkFold() (mirroring the FTS index side)
-// before tokenizing, so "招商银行" tokenizes to ["招商","商银","银行"] on both sides and
-// matches on token boundaries rather than raw characters.
+// before tokenizing, so "招商银行" tokenizes to ["zh62db5546","zh554694f6","zh94f6884c"]
+// on both sides and matches on token boundaries rather than raw characters.
 
-import { CJK_CHAR, cjkFold, isCjkStopToken } from "../util/cjk";
+import { cjkFold, isCjkStopToken, isCjkToken } from "../util/cjk";
 
 // Bounded multiplier applied to a hit's fused score when its title matches the query.
 // Kept modest: the boost should reorder near-ties, not let a title match dominate a much
@@ -92,9 +92,10 @@ export function titleBoost(query: string, title: string, scale = 1): number {
   const exact = q.length === t.length; // containsRun + equal length ⇒ same sequence
   if (exact) return 1 + (TITLE_BOOST_EXACT - 1) * scale;
 
-  // CJK bigram tokens are content even though Han chars never hit the English stopword
-  // list; count any token that isn't a stopword (CJK bigrams pass isStop() as false).
-  const content = q.filter((tok) => !isStop(tok) || CJK_CHAR.test(tok));
+  // CJK bigram lexemes count as content even when they fold function words — dropping
+  // them here would let an all-function-word run lose a boost the raw-char era granted
+  // (behavior preserved across the hex-lexeme migration).
+  const content = q.filter((tok) => !isStop(tok) || isCjkToken(tok));
   if (content.length < 2) return 1; // not enough signal for a partial match
   return 1 + (TITLE_BOOST - 1) * scale;
 }
