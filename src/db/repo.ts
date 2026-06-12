@@ -581,14 +581,15 @@ export async function upsertPage(
   if (existing) {
     const [row] = await sql`
       update pages set title = ${p.title}, body_md = ${p.bodyMd}, content_hash = ${p.contentHash},
-                       tier = ${p.tier ?? 1}, status = 'active'
+                       tier = ${p.tier ?? 1}, status = 'active',
+                       derived_from = coalesce(${p.derivedFrom ?? null}, derived_from)
       where id = ${existing.id} returning id`;
     return { id: row!.id, changed: true };
   }
   const [row] = await sql`
-    insert into pages (path, title, body_md, content_hash, tier, created_by, source)
+    insert into pages (path, title, body_md, content_hash, tier, created_by, source, derived_from)
     values (${p.path}, ${p.title}, ${p.bodyMd}, ${p.contentHash}, ${p.tier ?? 1},
-            ${p.createdBy ?? "human"}, ${p.source ?? "brain-sync"})
+            ${p.createdBy ?? "human"}, ${p.source ?? "brain-sync"}, ${p.derivedFrom ?? null})
     returning id`;
   return { id: row!.id, changed: true };
 }
@@ -988,4 +989,68 @@ export async function reviewItemExists(
   const rows = await sql`select 1 from review_queue where kind = ${kind} and status = 'open'
     and payload ->> ${payloadKey} = ${payloadValue} limit 1`;
   return rows.length > 0;
+}
+
+// ---------------------------------------------------------------- compiled notes (dream step)
+// System-job reads (like chunkPairsSharingPerson): chunk text stays on-box and the resulting
+// note page carries the inherited tier, so agent reads are tier-gated at the page. No
+// allowedTier predicate here — the dream job is not an agent context. The entity-link pass
+// anchors `mentions` edges at the chunk (source_table='chunks', source_id=chunk.id), so a
+// candidate's source chunks are exactly those edges' chunks.
+
+export interface NoteCandidate {
+  kind: "person";
+  id: string;
+  name: string;
+  chunk_count: number;
+  max_tier: number;
+  latest_mention_at: Date;
+}
+
+// People with at least `minChunks` chunks that mention them. `max_tier` drives the note tier;
+// `latest_mention_at` is the cheap staleness signal (vs. the note page's updated_at). Chunks
+// belonging to the note pages themselves are excluded so a note never feeds itself.
+export async function noteCandidates(minChunks: number): Promise<NoteCandidate[]> {
+  const rows = (await sql`
+    select 'person'::text as kind, e.dst_id as id, p.canonical_name as name,
+           count(distinct c.id)::int as chunk_count,
+           max(c.tier)::int as max_tier,
+           max(e.created_at) as latest_mention_at
+    from edges e
+    join chunks c on c.id = e.source_id
+    join people p on p.id = e.dst_id
+    where e.rel = 'mentions' and e.dst_type = 'person' and e.source_table = 'chunks'
+      and not (c.parent_type = 'page' and exists (
+        select 1 from pages pg where pg.id = c.parent_id and pg.source = 'dream:notes'))
+    group by e.dst_id, p.canonical_name
+    having count(distinct c.id) >= ${minChunks}
+    order by chunk_count desc`) as any;
+  return rows as NoteCandidate[];
+}
+
+// The mentioning chunks for one person, oldest first (so the representative source —
+// derived_from — is the earliest mentioning row). Excludes the note pages' own chunks.
+export async function noteSourceChunks(
+  _kind: "person",
+  id: string,
+): Promise<{ id: string; parent_type: string; parent_id: string; text: string; tier: number }[]> {
+  return sql`
+    select c.id, c.parent_type, c.parent_id, c.text, c.tier
+    from edges e
+    join chunks c on c.id = e.source_id
+    where e.rel = 'mentions' and e.dst_type = 'person' and e.dst_id = ${id}
+      and e.source_table = 'chunks'
+      and not (c.parent_type = 'page' and exists (
+        select 1 from pages pg where pg.id = c.parent_id and pg.source = 'dream:notes'))
+    order by c.updated_at, c.ord, c.id` as any;
+}
+
+// The note page's last-compiled marker. updated_at advances only when the body changed
+// (upsertPage no-ops on identical content_hash), so a mention newer than this means stale.
+export async function notePageFreshness(
+  path: string,
+): Promise<{ id: string; updated_at: Date } | null> {
+  const rows =
+    await sql`select id, updated_at from pages where path = ${path} and status = 'active'`;
+  return (rows[0] as any) ?? null;
 }

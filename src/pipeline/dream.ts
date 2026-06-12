@@ -187,6 +187,11 @@ export async function dream(): Promise<Record<string, unknown>> {
 
   await step("1_embed_backlog", () => drainEmbedBacklog());
   await step("2_entity_link", () => entityLinkPass());
+  await step("2b_compile_notes", async () => {
+    const { compileNotes } = await import("./notes");
+    const { candidates, compiled, skipped } = await compileNotes();
+    return { candidates, compiled, skipped };
+  });
   await step("3_contradictions", () => contradictionScan());
   await step("4_stale", async () => {
     let flagged = 0;
