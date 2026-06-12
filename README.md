@@ -17,6 +17,20 @@ Docker/brew/apt, Ollama + models), migrates, verifies, and prints how to registe
 server. Add `--with-demo` for a fictional dataset to explore. Full contract — flags,
 degraded modes, machine-parsable output for coding agents — in [AGENTS.md](AGENTS.md).
 
+**Have an AI agent install it for you** — paste this into Claude Code (or any agent with
+shell access):
+
+> Retrieve and follow the instructions at:
+> https://raw.githubusercontent.com/HengL2022/Minime/main/AGENTS.md
+
+**Want cloud models or off-site backups?** Run the guided wizard first — it walks you
+through provider credentials (Bedrock/Anthropic/OpenAI/OpenRouter) and backup storage
+(local disk, Backblaze B2, or S3), writing a private `.env`:
+
+```
+make setup     # interactive; the local-Ollama defaults need no credentials at all
+```
+
 <details>
 <summary>Manual install (what the script does, step by step)</summary>
 
@@ -44,6 +58,9 @@ skill (query, graph-query, person-brief, capture, review-triage, morning-brief,
 evening-review, decision-brief).
 
 ## Daily use
+
+**New here? Read the [owner's guide](docs/GUIDE.md)** — how to capture notes and ideas,
+journal, log decisions, import your data, and build the habits that make it compound.
 
 ```
 bun run src/cli.ts serve            # MCP server (stdio) + inbox watcher + dream cron

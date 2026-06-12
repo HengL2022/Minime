@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 BUN := bun
 
-.PHONY: install install-hooks up down migrate seed embed test lint verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify restore-drill restore-pitr promote-restore eval-search eval-search-live eval-snapshot eval-pmb
+.PHONY: install setup install-hooks up down migrate seed embed test lint verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify restore-drill restore-pitr promote-restore eval-search eval-search-live eval-snapshot eval-pmb
 
 # Scratch DB for MinimeBench — a throwaway database the runner DROPs and rebuilds. Derived
 # from DATABASE_URL so non-default ports just work; override EVAL_DATABASE_URL to change it.
@@ -10,6 +10,11 @@ EVAL_DATABASE_URL ?= postgres://minime:minime@localhost:5432/minime_eval
 # One-command setup for fresh machines (see AGENTS.md). Safe to re-run.
 install:
 	@bash scripts/install.sh
+
+# Interactive credentials + backup-storage wizard (writes .env). Optional — the
+# local-Ollama defaults need no credentials; install.sh stays non-interactive.
+setup:
+	@bash scripts/setup-env.sh
 
 # Owner-run, confirmation-gated: SessionEnd hook so every Claude Code session drops an
 # episodic summary into the inbox (agents/hooks/session-capture.sh). Safe to re-run.

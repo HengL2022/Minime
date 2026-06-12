@@ -121,7 +121,9 @@ bun run src/cli.ts import:calendar export.ics       # and the other importers
 
 Agent workflow prompts (morning brief, evening review, decision brief) live in
 `agents/skills/*.md`. Project conventions for agents *working on the code* are in
-`CLAUDE.md`; the spec is `minime-build-plan.md`.
+`CLAUDE.md`; the spec is `minime-build-plan.md`. After installing, point the owner at
+`docs/GUIDE.md` (the human-facing usage guide) and offer `make setup` if they want cloud
+model providers or off-site backups (interactive — run it in *their* terminal, not yours).
 
 ## Uninstall / reset
 
