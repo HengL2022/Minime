@@ -432,3 +432,37 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
 - **Why:** A gate that fires on approximate-index jitter trains people to ignore it. The
   honest floor is "no real regression," and 0.03 encodes that for these corpus sizes.
 - **Approved by:** agent-proposed (pending human review); diagnosis is mechanical.
+
+## 2026-06-12 — PrecisionMemBench runner (89 cases, judge-free retrieval precision)
+
+- **Context:** Second public-benchmark anchor (github.com/tenurehq/precisionmembench,
+  MIT, dataset verified public on HuggingFace). It measures the inverse of LongMemEval:
+  not "is the answer in the top K" but "did you return ONLY the right things" — precision
+  is penalized for every extra result. This is the surface rerank+autocut exists for.
+- **Decision:** Two integration paths. (1) `make eval-pmb` — in-process runner
+  (`scripts/eval-precisionmembench.ts`) that reads the harness clone's JSON fixtures as
+  data, executes none of its code, and ports its external-provider scorer verbatim
+  (BaseAdapter.buildContext + both *.external.eval.test.ts), emitting reports in their
+  exact JSON shape. (2) `make eval-pmb-official` — their real ava harness driving
+  `scripts/pmb-server.ts` (/add /search /reset over HTTP) for leaderboard-comparable
+  runs; this executes third-party code, so the owner runs it (the autonomous-run
+  permission classifier blocked it, correctly). Same scratch-DB hard-guard contract as
+  the other runners (DB `minime_eval_pmb`).
+  Provider-side mapping: one belief = one page at `pmb/<user_id>/<beliefId>.md`;
+  STRICT single-scope filter (the harness forwards only scope[0] to external providers —
+  the one multi-scope case is structurally unwinnable for every external system);
+  retrieval-suite /add metadata carries no type/supersession/resolved status, so those
+  exclusion cases are taken honestly as the shared external-provider handicap; the
+  session suite's metadata DOES carry type/superseded_by, so the session path filters
+  open questions and superseded beliefs (contract-legit, implemented in both paths).
+- **Why:** Round live-r1 (qwen3-embedding-8b + bge-reranker-v2-m3 + autocut):
+  retrieval 40/77 pass, mean precision 52.3% / recall 94.0%; session turns 4/12,
+  precision 61.0% / recall 84.8%. No-rerank baseline: 11/77, precision 6.5% — published
+  to show what the benchmark punishes (Tenure's native system: 89/89, precision 1.0).
+  Headline finding: autocut FAILS OPEN on flat score curves — long conversational
+  queries (session drift turns, cap-stress cases) produce no rerank-score cliff, so the
+  full candidate list comes back (precision ~6%, the no-rerank number). The cliff
+  heuristic alone is not a precision mechanism; a candidate fix (absolute rerank-score
+  relevance floor) is a separate, gated calibration cycle.
+- **Approved by:** agent-built per "keep working on eval" (2026-06-12); scorecards
+  committed at docs/benchmarks/2026-06-12-live-{baseline,rerank}-precisionmembench.md.

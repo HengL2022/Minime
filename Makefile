@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 BUN := bun
 
-.PHONY: install up down migrate seed embed test lint verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify restore-drill eval-search eval-search-live eval-snapshot
+.PHONY: install up down migrate seed embed test lint verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify restore-drill eval-search eval-search-live eval-snapshot eval-pmb
 
 # Scratch DB for MinimeBench — a throwaway database the runner DROPs and rebuilds. Derived
 # from DATABASE_URL so non-default ports just work; override EVAL_DATABASE_URL to change it.
@@ -87,6 +87,25 @@ eval-longmemeval:
 	@createdb $(notdir $(EVAL_LME_DATABASE_URL)) 2>/dev/null || true
 	@DATABASE_URL=$(EVAL_LME_DATABASE_URL) EVAL_LME_DATABASE_URL=$(EVAL_LME_DATABASE_URL) \
 		$(BUN) run scripts/eval-longmemeval.ts --phase all
+
+# PrecisionMemBench (public, 89 cases, judge-free): retrieval-PRECISION benchmark.
+# In-process runner — reads the harness clone's fixtures as data, executes none of its
+# code, ports its scorer verbatim. Needs PMB_DIR (the clone), a live embed provider, and
+# ideally the reranker (autocut is the experiment). ROUND labels the scorecard.
+EVAL_PMB_DATABASE_URL ?= postgres://minime:minime@localhost:5432/minime_eval_pmb
+ROUND ?= r1
+eval-pmb:
+	@createdb -O minime $(notdir $(EVAL_PMB_DATABASE_URL)) 2>/dev/null || true
+	@psql -d $(notdir $(EVAL_PMB_DATABASE_URL)) \
+		-c "create extension if not exists vector; create extension if not exists pgcrypto;" >/dev/null
+	@DATABASE_URL=$(EVAL_PMB_DATABASE_URL) EVAL_PMB_DATABASE_URL=$(EVAL_PMB_DATABASE_URL) \
+		$(BUN) run scripts/eval-precisionmembench.ts --out /tmp/minime-pmb
+	@$(BUN) run scripts/eval-pmb-report.ts /tmp/minime-pmb --round $(ROUND)
+
+# Official-harness variant for leaderboard submission: runs the third-party ava harness
+# (external code — run this yourself) against scripts/pmb-server.ts over HTTP.
+eval-pmb-official:
+	@./scripts/eval-pmb.sh
 
 # Release snapshot: dated, committed scorecard for the stability streak. Usage:
 #   make eval-snapshot ROUND=v0.9   → docs/benchmarks/<date>-release-v0.9-minimebench.md
