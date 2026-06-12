@@ -1,0 +1,49 @@
+# Retrieval-regression gate: the offline MinimeBench (deterministic mock embeddings) runs
+# against the committed baseline floors in fixtures/qrels/baseline.ndjson on every push.
+# A drop beyond tolerance fails the build — new features must not quietly make retrieval
+# worse. Fully offline (I1): no model provider, no network beyond the local pg service.
+name: eval
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  minimebench:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: minime
+          POSTGRES_PASSWORD: minime
+          POSTGRES_DB: minime
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U minime" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      PGHOST: localhost
+      PGUSER: minime
+      PGPASSWORD: minime
+      DATABASE_URL: postgres://minime:minime@localhost:5432/minime
+      MINIME_MOCK_OLLAMA: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: create test + eval scratch DBs
+        run: |
+          createdb minime_test || true
+          createdb minime_eval || true
+      - name: full offline suite
+        run: bun test
+      - name: retrieval-regression gate (MinimeBench vs committed floors)
+        run: make eval-search
+      - name: upload scorecard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimebench-scorecard
+          path: docs/benchmarks/*-mock-minimebench.md
+          if-no-files-found: ignore

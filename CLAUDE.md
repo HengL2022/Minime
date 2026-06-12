@@ -49,6 +49,10 @@ raw SQL, **no ORM** · plain numbered `.sql` migrations in `db/migrations/` ·
 ```
 make up            # start Postgres (+extensions), check Ollama models
 make verify-mN     # acceptance gate for milestone N
+make verify        # all milestones + the retrieval-regression gate (eval-search)
+make eval-search   # offline MinimeBench vs committed floors (fixtures/qrels/baseline.ndjson)
+make eval-search-live          # live embeddings, N=3 (owner-run; writes docs/benchmarks/)
+make eval-snapshot ROUND=vX    # dated release scorecard for the stability streak
 bun test           # test suite (offline; Ollama mocked)
 bunx biome check --write .   # lint + format
 ```

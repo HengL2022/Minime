@@ -401,3 +401,18 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   Weak types moved as predicted: preference 70.0→83.3 @5, temporal 90.2→95.5 @5.
   Rerank cost ~0.3-0.6s per query on Metal, local and free.
 - **Approved by:** human (requested Phase 3).
+
+## 2026-06-12 — Stability discipline: retrieval-regression gate in verify + CI, release snapshots
+
+- **Context:** Adopting gbrain-evals' "zero regression across releases" practice
+  (owner-requested). MinimeBench already diffs against committed floors; this wires it
+  into the gates.
+- **Decision:** `make verify` now ends with `verify-m9` (the m9 suites were in no gate)
+  and `make eval-search` — any retrieval drop beyond tolerance fails the gate. New
+  `.github/workflows/eval.yml` runs the full offline suite + the regression gate on every
+  push/PR (pgvector service container; fully offline per I1; scorecard uploaded as an
+  artifact). New `make eval-snapshot ROUND=<tag>` writes the dated release scorecard to
+  docs/benchmarks/ — one per release, committed, the streak starts at today's numbers.
+- **Why:** A committed floor that nothing enforces is a hope; the gate makes "new
+  features did not quietly make retrieval worse" structural.
+- **Approved by:** human ("just do it", 2026-06-12).
