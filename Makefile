@@ -112,6 +112,20 @@ eval-pmb-official:
 # from the events log. Runs on the standing config (Bedrock LLM + OpenRouter embed);
 # local Ollama is only the free fallback for harness smoke tests.
 EVAL_SKILLS_DATABASE_URL ?= postgres://minime:minime@localhost:5432/minime_eval_skills
+
+# SkillOpt: gbrain-style optimizer loop. Trains on fixtures/skill-tasks/train/, gated by
+# contamination check + train-improves + held-out-no-regression. Candidates go to
+# agents/skills/candidates/ for review. Usage: make optimize-skill SUITE=query
+# [START_FROM=fixtures/skill-tasks/deficient-query.md] for the loop-validation run.
+optimize-skill:
+	@test -n "$(SUITE)" || { echo "usage: make optimize-skill SUITE=<suite> [START_FROM=...]"; exit 2; }
+	@createdb -O minime $(notdir $(EVAL_SKILLS_DATABASE_URL)) 2>/dev/null || true
+	@psql -d $(notdir $(EVAL_SKILLS_DATABASE_URL)) \
+		-c "create extension if not exists vector; create extension if not exists pgcrypto;" >/dev/null
+	@DATABASE_URL=$(EVAL_SKILLS_DATABASE_URL) EVAL_SKILLS_DATABASE_URL=$(EVAL_SKILLS_DATABASE_URL) \
+		$(BUN) run scripts/optimize-skill.ts --suite $(SUITE) --round $(or $(ROUND),r1) \
+		$(if $(START_FROM),--start-from $(START_FROM),)
+
 eval-skills:
 	@createdb -O minime $(notdir $(EVAL_SKILLS_DATABASE_URL)) 2>/dev/null || true
 	@psql -d $(notdir $(EVAL_SKILLS_DATABASE_URL)) \

@@ -527,3 +527,37 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   I1 forbids chunk text leaving the box for ranking regardless of provider preference.
 - **Approved by:** human (2026-06-12, "make sure the priority... please repeat the
   benchmark testing"; Bedrock Opus 4.8 confirmed explicitly).
+
+## 2026-06-12 — SkillOpt: validation-gated optimizer loop for the skills layer
+
+- **Context:** Owner approved closing the gbrain-parity gap ("gogo"): skills that can
+  rewrite themselves, gated so they cannot cheat or regress. gbrain's skillopt is the
+  model (their cat30: deficient skills 0→1.00 on held-out; cat32: cheating caught by a
+  judge; Haiku 4.5 target / Sonnet 4.6 optimizer).
+- **Decision:** `make optimize-skill SUITE=<s>` + `scripts/optimize-skill.ts`, sharing
+  the episode runner/scorer with SkillEval via `scripts/skill-eval-lib.ts` so the
+  measured contract never forks. Splits: `fixtures/skill-tasks/train/*.json` (optimizer
+  sees these transcripts) vs `fixtures/skill-tasks/*.json` (held-out, never shown).
+  Acceptance gates, in order: (1) mechanical contamination check — gold tokens from ANY
+  task's answer asserts may not newly appear in the rewrite (judge-free, deterministic;
+  stricter than gbrain's LLM judge for this purpose); (2) train pass count must strictly
+  improve; (3) held-out must not regress. Accepted candidates land in
+  `agents/skills/candidates/` for human review — live skills are NEVER auto-modified.
+  Both optimizer and target run on the standing Bedrock Opus 4.8 config.
+- **Why (results):**
+  - cat30 analog (deficient-start recovery): an adversarially deficient query skill
+    (skip tools, no citations, estimate numbers, unlock freely) baselined 3/4 train,
+    3/5 held-out; the round-1 rewrite passed contamination, hit 4/4 train and 4/5
+    held-out — transfer to unseen tasks, loop validated. Candidate kept at
+    agents/skills/candidates/query-2026-06-12-cat30.md.
+  - Real-skill round (graph-query): baseline 2/3 train (tg-mentor detail-completeness
+    miss, same class as held-out g-gp); three clean rewrites all failed to improve
+    train and were rejected — the gate prevents churn without measured gains.
+  - First mild deficient skill passed 4/4 train untouched: Opus + RESOLVER carry the
+    contract even with a gutted skill — gbrain pins a CHEAP target model for exactly
+    this reason; choosing a standing cheaper target (e.g. Haiku via Bedrock) is the
+    open knob before committed bars.
+  - Found: `completeJson` max_tokens 512 truncated full-skill rewrites mid-JSON —
+    raised to 4096 in bedrock/anthropic providers (classify outputs unaffected;
+    request-shape test updated).
+- **Approved by:** human ("gogo", 2026-06-12).

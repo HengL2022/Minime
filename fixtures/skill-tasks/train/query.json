@@ -1,0 +1,40 @@
+[
+  {
+    "id": "tq-climbing",
+    "skill": "query.md",
+    "prompt": "What does my climbing log say about where my progression is at?",
+    "assert": {
+      "mustCall": ["minime_search"],
+      "mustCite": true,
+      "answerAnyOf": ["climb", "boulder", "grade"]
+    }
+  },
+  {
+    "id": "tq-spend-april",
+    "skill": "query.md",
+    "prompt": "What was my total spending in April 2026?",
+    "assert": {
+      "mustCall": ["minime_query_metric"],
+      "answerMatch": ["\\d"]
+    }
+  },
+  {
+    "id": "tq-gap-sailing",
+    "skill": "query.md",
+    "prompt": "What do I know about my sailing lessons?",
+    "assert": {
+      "mustCall": ["minime_search"],
+      "answerAnyOf": [
+        "\\bno\\b|\\bnot\\b|nothing|don'?t|couldn'?t|cannot|can'?t|unable|no record|didn'?t find"
+      ]
+    }
+  },
+  {
+    "id": "tq-health-discipline",
+    "skill": "query.md",
+    "prompt": "Show me my health data from last week.",
+    "assert": {
+      "mustNotCall": ["minime_unlock"]
+    }
+  }
+]

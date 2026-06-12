@@ -1,0 +1,19 @@
+[
+  {
+    "id": "tp-sam",
+    "skill": "person-brief.md",
+    "prompt": "Catching up with Sammy this weekend — brief me.",
+    "assert": {
+      "mustCall": ["minime_get_context"],
+      "answerAnyOf": ["climbing", "university", "best friend"]
+    }
+  },
+  {
+    "id": "tp-rafael",
+    "skill": "person-brief.md",
+    "prompt": "Brief me on Rafael before the climbing session tonight.",
+    "assert": {
+      "answerAnyOf": ["Boulder Movement", "climbing", "2025"]
+    }
+  }
+]

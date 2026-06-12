@@ -184,7 +184,7 @@ describe("request shapes", () => {
     expect(JSON.parse(raw).conflict).toBe(false);
     expect(calls[0]!.url).toContain("/v1/messages");
     expect(calls[0]!.body.model).toBe(config.anthropicModel);
-    expect(calls[0]!.body.max_tokens).toBe(512);
+    expect(calls[0]!.body.max_tokens).toBe(4096);
     (config as any).anthropicApiKey = prev;
   });
 });

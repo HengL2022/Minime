@@ -19,7 +19,8 @@ export function anthropicProvider(fetchFn?: FetchFn): LlmProvider {
     async completeJson(prompt: string): Promise<string> {
       const msg = await client.messages.create({
         model: config.anthropicModel,
-        max_tokens: 512,
+        // see bedrock.ts: completeJson consumers include the skill optimizer's full-file rewrites
+        max_tokens: 4096,
         messages: [{ role: "user", content: prompt }],
       });
       const block = msg.content.find((b) => b.type === "text");

@@ -1,0 +1,26 @@
+[
+  {
+    "id": "tc-thought",
+    "skill": "capture.md",
+    "prompt": "Remember this: the balcony herbs need repotting into bigger pots.",
+    "assert": {
+      "mustCall": ["minime_capture"]
+    }
+  },
+  {
+    "id": "tc-task",
+    "skill": "capture.md",
+    "prompt": "Add a task: book a dentist appointment for next month.",
+    "assert": {
+      "mustCall": ["minime_upsert_task"]
+    }
+  },
+  {
+    "id": "tc-journal",
+    "skill": "capture.md",
+    "prompt": "Journal: long day, but the morning meditation helped a lot.",
+    "assert": {
+      "mustCall": ["minime_journal"]
+    }
+  }
+]

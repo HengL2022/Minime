@@ -43,7 +43,9 @@ export function bedrockProvider(fetchFn?: FetchFn): LlmProvider {
     async completeJson(prompt: string): Promise<string> {
       const msg = await client.messages.create({
         model,
-        max_tokens: 512,
+        // classify outputs are tiny, but the skill optimizer returns a whole skill file
+        // in one JSON object — 512 truncated those mid-string (SkillOpt cat30, 2026-06-12)
+        max_tokens: 4096,
         messages: [{ role: "user", content: prompt }],
       });
       const block = msg.content.find((b) => b.type === "text");

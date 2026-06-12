@@ -1,0 +1,27 @@
+[
+  {
+    "id": "tg-neighbor",
+    "skill": "graph-query.md",
+    "prompt": "Who waters my plants when I'm away?",
+    "assert": {
+      "answerMatch": ["Nadia"]
+    }
+  },
+  {
+    "id": "tg-mentor",
+    "skill": "graph-query.md",
+    "prompt": "Who is my mentor and what do we usually talk about?",
+    "assert": {
+      "answerMatch": ["Priya"],
+      "answerAnyOf": ["career", "coffee", "CTO"]
+    }
+  },
+  {
+    "id": "tg-coworker",
+    "skill": "graph-query.md",
+    "prompt": "Which team does Wei Jie work on?",
+    "assert": {
+      "answerAnyOf": ["payments", "backend"]
+    }
+  }
+]
