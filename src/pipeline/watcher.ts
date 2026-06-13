@@ -1,7 +1,7 @@
 // Inbox pipeline (spec §10): new file in data/inbox/ → archive copy → inbox_items row →
 // classify → file the typed row (confidence ≥ 0.7) or queue for the evening review.
 
-import { copyFile, mkdir } from "node:fs/promises";
+import { copyFile, mkdir, readdir } from "node:fs/promises";
 import { basename, join } from "node:path";
 import chokidar from "chokidar";
 import {
@@ -13,6 +13,7 @@ import {
   insertJournal,
   insertReviewItem,
   logEvent,
+  pendingInboxItems,
   setInboxFiled,
   setInboxPending,
   upsertPage,
@@ -188,13 +189,47 @@ export async function processInboxFile(path: string): Promise<{ inboxId: string;
   return { inboxId, filed: false };
 }
 
-export function startWatcher(): { close: () => Promise<void> } {
+// Process inbox files left behind while the watcher was down: captured rows that were
+// never classified (the dir didn't exist yet when serve started), plus any file copied
+// straight into the inbox with no DB row. Already-reviewed pending rows (low confidence,
+// classifier_output set) are skipped so we don't re-queue them on every restart.
+async function drainStartup(inboxDir: string): Promise<void> {
+  const done = new Set<string>();
+  const tryProcess = async (path: string): Promise<void> => {
+    if (!path || done.has(path)) return;
+    done.add(path);
+    if (!(await Bun.file(path).exists())) return;
+    await processInboxFile(path).catch((err) => {
+      console.error(`[minime] inbox drain failed for ${basename(path)}: ${err?.message ?? err}`);
+    });
+  };
+  for (const row of await pendingInboxItems()) {
+    if (row.classifier_output == null) await tryProcess(row.raw_path);
+  }
+  let names: string[];
+  try {
+    names = await readdir(inboxDir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (name.startsWith(".")) continue;
+    const path = join(inboxDir, name);
+    if (done.has(path)) continue;
+    if (await findInboxByPath(path)) continue; // already tracked (filed, rejected, or drained above)
+    await tryProcess(path);
+  }
+}
+
+export async function startWatcher(): Promise<{ close: () => Promise<void> }> {
   const inboxDir = join(config.dataDir, "inbox");
+  await mkdir(inboxDir, { recursive: true }); // chokidar silently watches nothing if the dir is absent
+  await drainStartup(inboxDir);
   const watcher = chokidar.watch(inboxDir, {
     ignored: /(^|\/)\./,
     persistent: true,
     awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
-    ignoreInitial: false, // process files that arrived while we were down
+    ignoreInitial: true, // startup drain already handled pre-existing files
   });
   watcher.on("add", (path) => {
     processInboxFile(path).catch((err) => {

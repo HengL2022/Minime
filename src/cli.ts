@@ -96,7 +96,7 @@ async function main(): Promise<number> {
     }
     case "serve": {
       await migrate();
-      startWatcher();
+      await startWatcher();
       const cron = new Cron(config.dreamCron, () => {
         dream().catch((e) => console.error(`[minime] dream failed: ${e?.message ?? e}`));
       });

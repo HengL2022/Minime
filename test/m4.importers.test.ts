@@ -4,12 +4,13 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { insertInboxItem } from "../src/db/repo";
 import { importCalendar } from "../src/importers/calendar";
 import { importEmailMeta } from "../src/importers/email-meta";
 import { importHealth } from "../src/importers/health";
 import { type TxProfile, importTransactions, parseCsv } from "../src/importers/transactions";
 import { heuristicClassify } from "../src/pipeline/classify";
-import { processInboxFile } from "../src/pipeline/watcher";
+import { processInboxFile, startWatcher } from "../src/pipeline/watcher";
 import { config } from "../src/util/config";
 import { countEvents, resetDb, testSql as sql } from "./helpers";
 
@@ -177,5 +178,37 @@ describe("inbox e2e (watcher pipeline, classifier mocked)", () => {
       ).type,
     ).toBe("note");
     expect(heuristicClassify("???").type).toBe("unknown");
+  });
+});
+
+describe("inbox startup drain (watcher recovery)", () => {
+  test("startup creates the inbox dir and drains pending capture rows", async () => {
+    // Simulate a capture that landed before the watcher was running: file on disk + a
+    // pending inbox_items row that was never classified (the dir-didn't-exist bug).
+    const inbox = join(config.dataDir, "inbox");
+    await mkdir(inbox, { recursive: true });
+    const path = join(inbox, "drain-task.md");
+    await Bun.write(path, "todo: renew passport by 2026-09-01");
+    const { id } = await insertInboxItem({
+      rawPath: path,
+      mime: "text/markdown",
+      createdBy: "human",
+    });
+
+    const [before] = await sql`select status, classifier_output from inbox_items where id = ${id}`;
+    expect(before!.status).toBe("pending");
+    expect(before!.classifier_output).toBeNull();
+
+    const w = await startWatcher();
+    try {
+      const [item] =
+        await sql`select status, filed_table, filed_id from inbox_items where id = ${id}`;
+      expect(item!.status).toBe("filed");
+      expect(item!.filed_table).toBe("tasks");
+      const [task] = await sql`select title from tasks where id = ${item!.filed_id}`;
+      expect(task!.title).toContain("renew passport");
+    } finally {
+      await w.close();
+    }
   });
 });
