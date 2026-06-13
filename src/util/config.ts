@@ -1,8 +1,67 @@
-// All configuration comes from env with spec §6 defaults; .env loading is Bun-native.
+// All configuration comes from env with spec §6 defaults.
+//
+// Bun auto-loads .env, but only from the *process cwd*. When `serve` is launched from a
+// directory other than the repo root (e.g. an MCP host runs `bun run /path/Minime/src/cli.ts`
+// with its own cwd), that .env is never read — so RESTIC_*, BACKUP_CRON, provider keys, etc.
+// silently fall back to defaults and features like the 15-min db snapshot quietly disable.
+// loadRepoDotenv() closes that gap by reading the repo-root .env as a *fallback*: it never
+// overrides a var the caller already set, and is skipped under tests so the suite stays
+// hermetic (the dev repo has its own .env we must not leak into bun test).
+
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 function env(name: string, fallback: string): string {
   return process.env[name] ?? fallback;
 }
+
+// Parse a minimal KEY=VALUE .env (comments, blank lines, `export ` prefix, surrounding
+// quotes). Intentionally simple — not a full dotenv: no interpolation or multiline values,
+// none of which Minime's .env uses. Pure (no side effects) so it is unit-testable.
+export function parseDotenv(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const raw of text.split("\n")) {
+    let line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line.startsWith("export ")) line = line.slice(7).trim();
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    let val = line.slice(eq + 1).trim();
+    if (
+      val.length >= 2 &&
+      ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'")))
+    ) {
+      val = val.slice(1, -1);
+    }
+    out[key] = val;
+  }
+  return out;
+}
+
+// Fill only keys absent from `target` — a caller-provided var always wins. Pure given its
+// args (mutates `target` in place); unit-testable against a plain object.
+export function fillMissingEnv(parsed: Record<string, string>, target: NodeJS.ProcessEnv): void {
+  for (const [k, v] of Object.entries(parsed)) {
+    if (!(k in target)) target[k] = v;
+  }
+}
+
+function loadRepoDotenv(): void {
+  if (process.env.NODE_ENV === "test" || process.env.MINIME_SKIP_REPO_DOTENV === "1") return;
+  try {
+    // src/util/config.ts → repo root is two directories up.
+    const envPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", ".env");
+    if (!existsSync(envPath)) return;
+    fillMissingEnv(parseDotenv(readFileSync(envPath, "utf8")), process.env);
+  } catch {
+    // best-effort: a missing/unreadable/malformed .env must never block startup.
+  }
+}
+
+// Must run before the config object below reads process.env.
+loadRepoDotenv();
 
 export type ProviderName = "ollama" | "anthropic" | "openai" | "openrouter" | "bedrock";
 
