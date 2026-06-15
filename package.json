@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "description": "Local-first personal life database with agent access (MCP)",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "minime": "bun run src/cli.ts",
