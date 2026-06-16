@@ -807,8 +807,9 @@ export async function stateSnapshot(): Promise<any> {
         order by due`,
     sql`select id, what, to_whom, due from commitments where status = 'open' order by due nulls last`,
     sql`select id, question, review_at, choice from decisions
-        where (review_at is not null and review_at <= ${t}::date + 3 and reviewed_at is null)
-           or (choice is null)
+        where reviewed_at is null
+          and ( (review_at is not null and review_at <= ${t}::date + 3)
+                or choice is null )
         order by review_at nulls last`,
     sql`select count(*)::int as n from review_queue where status = 'open'`,
     metricAnomalies(),

@@ -107,4 +107,31 @@ describe("decision engine", () => {
       (logged.data as any).decision_id,
     );
   });
+
+  // Regression: an open decision (choice IS NULL) reviewed via minime_review_decision
+  // records actual_outcome + reviewed_at but never sets `choice`. reviewed_at must close
+  // the loop on its own — otherwise the `choice is null` branch re-surfaces it forever.
+  test("open decision reviewed without a choice drops off state (reviewed_at closes the loop)", async () => {
+    const logged = await call("minime_log_decision", {
+      question: "Meet Mia at violin class or go with Max?",
+      options: ["meet Mia", "go with Max"],
+    });
+    const decisionId = (logged.data as any).decision_id;
+
+    let state = await call("minime_state", {});
+    expect((state.data as any).decision_reviews_due.map((d: any) => d.id)).toContain(decisionId);
+
+    await call("minime_review_decision", {
+      decision_id: decisionId,
+      actual_outcome: "Went with Max; Mia was out sick",
+    });
+    const [d] = await sql`select reviewed_at, choice from decisions where id = ${decisionId}`;
+    expect(d!.reviewed_at).not.toBeNull();
+    expect(d!.choice).toBeNull(); // never set — the exact bug condition
+
+    state = await call("minime_state", {});
+    expect((state.data as any).decision_reviews_due.map((x: any) => x.id)).not.toContain(
+      decisionId,
+    );
+  });
 });
