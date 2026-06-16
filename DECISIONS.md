@@ -964,3 +964,28 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   (=07:05 SGT) now anchors to 2026-06-17 and includes tasks due through today.
 - **Approved by:** human (owner, 2026-06-17 — "Figure out why morning briefing date is wrong" →
   "Implement").
+
+## 2026-06-17 — Same UTC-slice date bug in two write tools (journal title, decision review_at)
+
+- **Context:** after fixing stateSnapshot (commit 37f95bf), swept the rest of the date code for the
+  same class. The evening review FIRES at 9pm SGT (=13:00 UTC, same calendar day → safe), and its
+  date READS go through the now-fixed minime_state. But the WRITE tools it uses to capture the
+  owner's reply had the same latent UTC-slice bug, which bites for late-night (00:00–08:00 SGT)
+  captures.
+- **Two instances fixed:**
+  - `src/mcp/tools/journal.ts:30` — entry title was `(at ?? new Date()).toISOString().slice(0,10)`.
+    Also used `new Date()` (untestable) instead of `now()`. → `Journal ${localDateStr(at ?? now())}`.
+  - `src/mcp/tools/decisions.ts:43` — `reviewAt` was `new Date(now()+Nd).toISOString().slice(0,10)`,
+    landing a day early in the pre-dawn-local window. → `localDateStr(new Date(now()+Nd))`.
+- **Deliberately NOT changed (verified correct/harmless):**
+  - `src/pipeline/dream.ts` (3am rollup job) — UTC windowing used consistently across from/to/week
+    bucketing for rollups; internally coherent, not a user-facing calendar day.
+  - `src/mcp/tools/agenda.ts` bucketing + `src/pipeline/dedup.ts` `dueStr` — operate on postgres.js
+    `date` columns returned as UTC-midnight, where toISOString().slice is correct (see 2026-06-16).
+  - `decisions.ts` `decided_at` / `repo.ts` insert use `now()` as a timestamptz instant (correct).
+- **Tests:** extended `test/m9.state-tz.test.ts` with a "write-tool date anchoring" block at the same
+  00:30-local clock — asserts decision.review_at (+ persisted row) is the local +Nd date, and the
+  journal chunk is titled with local today (not the UTC-yesterday slice). Verified RED with the
+  fixes stashed (got 2026-07-16 / "Journal 2026-06-16"), GREEN with them applied.
+- **Verified:** full suite 213 pass / 1 skip / 0 fail, tsc clean.
+- **Approved by:** human (owner, 2026-06-17 — "Check if Evening review has the same issue" → "Fix both").

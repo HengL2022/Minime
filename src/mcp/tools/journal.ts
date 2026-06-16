@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { insertJournal } from "../../db/repo";
 import { indexParent } from "../../search/index-parent";
+import { localDateStr, now } from "../../util/clock";
 import { envelope } from "../envelope";
 import type { ToolDef } from "./registry";
 
@@ -27,7 +28,10 @@ export const journalTool: ToolDef = {
       "journal",
       id,
       params.entry_md,
-      `Journal ${(at ?? new Date()).toISOString().slice(0, 10)}`,
+      // Local calendar day, not a UTC slice: toISOString() would title a
+      // pre-dawn-local entry with yesterday's date (local past midnight, UTC
+      // not yet rolled over). Mirror the `at` override when supplied.
+      `Journal ${localDateStr(at ?? now())}`,
       2,
     );
     return envelope({ journal_entry_id: id }, [{ type: "journal", id }]);

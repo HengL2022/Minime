@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { getDecision, insertDecision, reviewDecision } from "../../db/repo";
 import { indexParent } from "../../search/index-parent";
-import { now } from "../../util/clock";
+import { localDateStr, now } from "../../util/clock";
 import { ToolError, envelope } from "../envelope";
 import type { ToolDef } from "./registry";
 
@@ -40,7 +40,11 @@ export const logDecisionTool: ToolDef = {
   },
   handler: async (params, ctx) => {
     const days = params.review_in_days ?? 90;
-    const reviewAt = new Date(now().getTime() + days * 86_400_000).toISOString().slice(0, 10);
+    // Local calendar date N days out. Slicing a UTC instant (toISOString) would
+    // land on the previous day when queried in the pre-dawn local window (local
+    // past midnight, UTC not yet rolled over) — review dates must be the owner's
+    // calendar day, not UTC's. See DECISIONS.md (state/journal/decision TZ fixes).
+    const reviewAt = localDateStr(new Date(now().getTime() + days * 86_400_000));
     const { id } = await insertDecision({
       question: params.question,
       options: params.options,
