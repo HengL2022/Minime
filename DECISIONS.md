@@ -809,3 +809,39 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   (one-off in-place UPDATE, row backed up to `data/backups/` first). These are the owner's life
   data and stay in the DB; this engineering note stays in git only.
 - **Approved by:** human (owner, 2026-06-16 — "note the classifier mis-filing for a code fix").
+
+### 2026-06-16 — Follow-up: completion signals on the plain-`task` branch + close-existing consistency
+
+- **Trigger:** Same day, a capture "Check returned sequences & re-label the 5 plasmids correctly —
+  done" was classified as a plain `task` (not `decision_note`), so the split-mixed-captures fix above
+  never ran on it. It filed as `status=inbox` and was reported "✅ complete" to the owner while the DB
+  row was still open — a false-success that lost the accomplishment from "what moved today". (Real ID
+  was `437157a9`; an earlier message even cited a non-existent id `3127260c` — display state and DB
+  state had diverged.)
+- **Root cause:** completion-signal handling lived ONLY in the `decision_note` branch of
+  `fileRow`. The `task` branch ignored "— done" phrasing entirely, and a completion report that
+  matched an existing OPEN task was routed to the duplicate-review queue, leaving the original task
+  open forever.
+- **Fix (TDD, failing-first):** `src/pipeline/watcher.ts` `fileRow` `task` branch now computes
+  `done = completionSignal(text)` and: (1) if the capture matches an existing open task via
+  `findDuplicate`, a completion report CLOSES that canonical row (`upsertTask({id, status:'done'})`)
+  instead of queuing a duplicate — logged as `inbox:closed-existing-task`; non-completion re-mentions
+  still route to duplicate review unchanged; (2) otherwise a new task is inserted with
+  `status: done` when a completion signal is present, so it surfaces under "what moved today".
+- **Consistency mechanism (owner ask):** "when a message is shown labeled complete, it is
+  consistently marked complete in the DB." Closing the matching open row on a completion capture is
+  the durable half of this — there is now one canonical task row and its status follows the
+  completion signal, rather than a second open duplicate accumulating. (The `completed_at`-on-INSERT
+  latent bug was already fixed in the prior change.)
+- **Tests:** `test/m10.classify-guardrails.test.ts` — two new e2e (classifier-mocked) cases: a plain
+  `task:` capture with "— done" files as `done` with non-null `completed_at`; a completion capture
+  matching an existing open task CLOSES it (status done, completed_at stamped, no second row, no
+  stuck duplicate-review item). Full suite 199 pass / 0 fail; `tsc --noEmit` clean.
+- **Data remediation (this instance):** plasmid task `437157a9` set to `done` / `completed_at`
+  2026-06-16 via MCP; "Decide on Daniel sorting" `4bc25704` dropped (owner decided not to do it).
+- **Open follow-up (not code):** the *false-success report* itself — the assistant said "marked
+  complete" when the write landed as inbox — is an agent-side reporting discipline issue (verify the
+  written row's status before reporting done), not a watcher bug. Noted for the agent workflow, no
+  code change here.
+- **Approved by:** human (owner, 2026-06-16 — "Yes do it, also need a mechanism so that when a
+  message is shown labeled as complete, it is consistently marked as complete in the database").

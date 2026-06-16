@@ -72,12 +72,39 @@ async function fileRow(
       const duePast = rawDue !== null && rawDue < today;
       const due = duePast ? null : rawDue;
 
+      // Does the capture REPORT finished work ("...— done")? A completion signal means
+      // this should land as a done-task (and surface under the evening review's "what
+      // moved today"), not as an open inbox task. Without this, "X — done" used to file
+      // as status=inbox and silently vanish from the day review.
+      const done = completionSignal(text);
+
       // Dedup: the classifier has no memory of existing rows, so a re-mentioned task
       // (event reminded twice) would otherwise create a second row. If an open task
       // closely matches, queue this capture for review instead of inserting a duplicate.
       const open = await openTasksForDedup();
       const dup = findDuplicate(title, due, open);
       if (dup) {
+        // Consistency mechanism: a completion report that matches an existing OPEN task
+        // must CLOSE that task, not queue a duplicate for review. Otherwise "X — done"
+        // leaves the original "X" open forever and the completion is lost. Closing the
+        // canonical row (rather than spawning a second done row) keeps one source of truth.
+        if (done) {
+          await upsertTask({
+            id: dup.match.id,
+            title: dup.match.title,
+            status: "done",
+            createdBy: ACTOR,
+          });
+          await indexParent("task", dup.match.id, text, dup.match.title, 1);
+          await logEvent({
+            actor: ACTOR,
+            verb: "inbox:closed-existing-task",
+            entityType: "inbox_item",
+            entityId: inboxId,
+            payload: { task_id: dup.match.id, title: dup.match.title, score: dup.score },
+          });
+          return ["tasks", dup.match.id];
+        }
         await insertReviewItem("duplicate", {
           inbox_item_id: inboxId,
           candidate_title: title,
@@ -103,6 +130,7 @@ async function fileRow(
           ? `${text}\n\n[date guardrail: classifier proposed past due date ${rawDue} (today ${today}); dropped — set the real date at review]`
           : text,
         due,
+        status: done ? "done" : undefined,
         createdBy: ACTOR,
         source: "capture",
         derivedFrom: inboxId,

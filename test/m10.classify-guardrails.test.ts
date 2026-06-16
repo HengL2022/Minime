@@ -154,6 +154,60 @@ describe("split mixed captures (e2e, classifier mocked)", () => {
   });
 });
 
+describe("task-branch completion (e2e, classifier mocked)", () => {
+  test("a plain task capture that reports finished work is filed as DONE, not inbox", async () => {
+    const inbox = join(config.dataDir, "inbox");
+    await mkdir(inbox, { recursive: true });
+    const path = join(inbox, "task-done.md");
+    // heuristic classifier sees "task:" → type=task; the body says it's done, so it must
+    // be stamped done (else it stays open and vanishes from "what moved today").
+    await Bun.write(path, "task: check returned sequences & re-label the 5 plasmids correctly — done");
+
+    const result = await processInboxFile(path);
+    expect(result.filed).toBe(true);
+
+    const [item] = await sql`select filed_id from inbox_items where id = ${result.inboxId}`;
+    const [task] = await sql`select status, completed_at from tasks where id = ${item!.filed_id}`;
+    expect(task!.status).toBe("done");
+    expect(task!.completed_at).not.toBeNull();
+  });
+
+  test("a completion capture CLOSES a matching existing open task instead of duplicating it", async () => {
+    const inbox = join(config.dataDir, "inbox");
+    await mkdir(inbox, { recursive: true });
+
+    // first: an open task exists
+    const p1 = join(inbox, "freeze-open.md");
+    await Bun.write(p1, "task: freeze down all the cells before leaving");
+    const r1 = await processInboxFile(p1);
+    expect(r1.filed).toBe(true);
+    const [item1] = await sql`select filed_id from inbox_items where id = ${r1.inboxId}`;
+    const openId = item1!.filed_id;
+
+    // then: a completion report for the same task must CLOSE it, not queue a duplicate
+    const p2 = join(inbox, "freeze-done.md");
+    await Bun.write(p2, "task: freeze down all the cells before leaving — done");
+    const r2 = await processInboxFile(p2);
+
+    // the original task is now done
+    const [closed] = await sql`select status, completed_at from tasks where id = ${openId}`;
+    expect(closed!.status).toBe("done");
+    expect(closed!.completed_at).not.toBeNull();
+
+    // and we did NOT spawn a second open row for the same work
+    const [cnt] =
+      await sql`select count(*)::int as n from tasks where title ilike '%freeze down all the cells%'`;
+    expect(cnt!.n).toBe(1);
+
+    // nor leave it stuck in the duplicate review queue
+    const [dupq] = await sql`
+      select count(*)::int as n from review_queue
+      where kind = 'duplicate' and status = 'open'
+        and payload->>'inbox_item_id' = ${r2.inboxId}`;
+    expect(dupq!.n).toBe(0);
+  });
+});
+
 describe("watcher dedup (e2e, classifier mocked)", () => {
   test("a re-mentioned task is queued as duplicate, not inserted twice", async () => {
     const inbox = join(config.dataDir, "inbox");
