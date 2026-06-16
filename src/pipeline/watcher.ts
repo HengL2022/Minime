@@ -24,7 +24,13 @@ import {
 import { indexParent } from "../search/index-parent";
 import { now, todayStr } from "../util/clock";
 import { config } from "../util/config";
-import { type Classification, classify, completionSignal, completionTitle } from "./classify";
+import {
+  type Classification,
+  classify,
+  completionSignal,
+  completionTitle,
+  splitActionDecision,
+} from "./classify";
 import { findDuplicate } from "./dedup";
 
 const ACTOR = "agent:classifier";
@@ -124,8 +130,17 @@ async function fileRow(
         return "duplicate"; // queued as a duplicate; caller marks pending, no extra queue item
       }
 
+      // Split compound "do X and decide on Y" captures: peel the decision clause off so the
+      // task title is the ACTION only, and a companion decision row carries the open question.
+      // Otherwise the combined phrasing files as one umbrella task that no later single capture
+      // (the action-done report, or the decision) fully matches, so it never closes and
+      // double-reports in the morning brief (the FACS-and-Daniel bug). Only fires on a
+      // non-completion capture with a real action clause + explicit decision verb.
+      const split = done ? null : splitActionDecision(text);
+      const taskTitle = split ? split.action.slice(0, 200) : title;
+
       const { id } = await upsertTask({
-        title,
+        title: taskTitle,
         body: duePast
           ? `${text}\n\n[date guardrail: classifier proposed past due date ${rawDue} (today ${today}); dropped — set the real date at review]`
           : text,
@@ -135,7 +150,34 @@ async function fileRow(
         source: "capture",
         derivedFrom: inboxId,
       });
-      await indexParent("task", id, text, title, 1);
+      await indexParent("task", id, text, taskTitle, 1);
+      // Companion decision for the peeled-off clause. Best-effort: the action task is the
+      // primary row and must not fail if the decision can't be created.
+      if (split) {
+        try {
+          const { id: decId } = await insertDecision({
+            question: split.decision,
+            options: [],
+            choice: null,
+            reasoning: `${text}\n\n[split from task ${id}: decision portion of a compound action+decision capture]`,
+            createdBy: ACTOR,
+            source: "capture",
+            derivedFrom: inboxId,
+          });
+          await indexParent("decision", decId, split.decision, split.decision, 1);
+          await logEvent({
+            actor: ACTOR,
+            verb: "inbox:split-decision",
+            entityType: "inbox_item",
+            entityId: inboxId,
+            payload: { task_id: id, decision_id: decId, question: split.decision },
+          });
+        } catch (err) {
+          console.error(
+            `[minime] split decision failed for ${inboxId}: ${(err as Error)?.message ?? err}`,
+          );
+        }
+      }
       return ["tasks", id];
     }
     case "journal": {

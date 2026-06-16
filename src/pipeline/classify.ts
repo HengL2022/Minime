@@ -59,6 +59,38 @@ export function completionTitle(text: string): string {
   return base.slice(0, 120);
 }
 
+// Split a compound "do X AND decide on/whether Y" task capture into its two halves: an
+// ACTION (the task to do) and a DECISION (the open question to resolve). The FACS-and-Daniel
+// bug: a single capture like "Do FACS analysis ... and decide on Daniel sorting" files as ONE
+// umbrella task that no later single capture (the FACS-done report, or the Daniel decision)
+// fully matches, so it never closes and double-reports in the morning brief. Peeling the
+// decision clause into its own row at ingestion means each half closes independently.
+//
+// Conservative by design — only fires when ALL hold, so plain action tasks are untouched:
+//   - the text is NOT a completion report (a "...— done" capture is handled by the done-task
+//     path; splitting a finished item into an open decision would be wrong);
+//   - there is a real leading ACTION clause before the pivot (not a bare "decide on X");
+//   - the pivot is an explicit decision verb: "and decide on/whether/if/between ...".
+export function splitActionDecision(text: string): { action: string; decision: string } | null {
+  if (completionSignal(text)) return null;
+  const firstLine = text
+    .split("\n")[0]!
+    .replace(/^<!--.*?-->\s*/s, "")
+    .replace(/^(todo|task)[:\s]+/i, "")
+    .trim();
+  // pivot: "... and decide on/whether/if/between <rest>" (also "and decide to/about/...").
+  const m = firstLine.match(
+    /^(.*?\S)\s+and\s+(decide|determine)\s+(on|whether|if|between|about|to)\b\s*(.*)$/i,
+  );
+  if (!m) return null;
+  const action = m[1]!.trim();
+  const tail = m[4]!.trim();
+  // require a substantive action clause and that it isn't itself a decision verb
+  if (action.length < 3 || /^(decide|determine|decision)\b/i.test(action)) return null;
+  const decision = `Decide ${m[3]!.toLowerCase()} ${tail}`.replace(/\s+/g, " ").trim();
+  return { action, decision };
+}
+
 export function heuristicClassify(text: string): Classification {
   const t = text.trim();
   const lower = t.toLowerCase();

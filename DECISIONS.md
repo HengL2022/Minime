@@ -989,3 +989,43 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   fixes stashed (got 2026-07-16 / "Journal 2026-06-16"), GREEN with them applied.
 - **Verified:** full suite 213 pass / 1 skip / 0 fail, tsc clean.
 - **Approved by:** human (owner, 2026-06-17 — "Check if Evening review has the same issue" → "Fix both").
+
+## 2026-06-17 — Split compound "do X AND decide on Y" task captures (umbrella double-report fix)
+
+- **Trigger:** The morning brief double-reported completed work: an umbrella task "Do FACS
+  analysis for target-gene transduced cells and decide on Daniel sorting" (`0f980ad5`) stayed
+  `active` even though both halves had separately resolved — the FACS analysis was done
+  (`fe909fef`, transduction confirmed) and the Daniel sorting decision had been dropped
+  (`4bc25704`, decided NOT to sort). The combined row matched neither single later capture, so
+  nothing closed it and it kept surfacing.
+- **Root cause:** the two existing split paths only covered (a) `decision_note` captures that
+  ALSO report finished work → companion done-task, and (b) plain `task` completion reports →
+  close the matching open row. Neither handles a single `task` capture that bundles an ACTION
+  with a forward-looking DECISION ("do X **and decide on** Y"). It files as one umbrella task; a
+  later "FACS done" report doesn't title-match the whole umbrella (dedup misses), and the Daniel
+  decision was never a task at all — so the umbrella never closes and double-reports.
+- **Fix (TDD, failing-first):**
+  - `src/pipeline/classify.ts` — new pure helper `splitActionDecision(text)` returns
+    `{action, decision}` when a capture has a real leading action clause followed by an explicit
+    decision pivot (`and decide|determine on|whether|if|between|about|to ...`). Conservative:
+    returns null on completion reports (`completionSignal` true), on a bare "decide on X" with no
+    action, and on plain action tasks. Strips a leading `task:`/`todo:` prefix; normalises the
+    decision clause to "Decide <on|whether|...> <tail>".
+  - `src/pipeline/watcher.ts` `fileRow` `task` branch — when `splitActionDecision` fires (and the
+    capture is not a completion), the task title becomes the ACTION only and a companion
+    `decision` row is inserted from the same inbox item (open, no choice), logged as
+    `inbox:split-decision`. Best-effort: the action task is primary and must not fail if the
+    decision insert throws.
+- **Tests:** `test/m10.classify-guardrails.test.ts` — 4 unit (peel; strip prefix; null on plain
+  action; null on bare decision) + 2 e2e (classifier-mocked): a "do X and decide on Y" capture
+  yields a task titled with the action only AND a decision derived from the same inbox item; a
+  compound capture that REPORTS the action done spawns NO decision. Targeted RED verified by
+  forcing `splitActionDecision` to return null (the 2 unit + e2e split test fail; negative cases
+  stay green). Full suite 219 pass / 1 skip / 0 fail; tsc + biome clean.
+- **Data remediation (this instance, owner-approved "Yes"):** via MCP tools — closed umbrella
+  `0f980ad5` as `done` with a split-note body pointing at `fe909fef` (done) and `4bc25704`
+  (dropped); both outcome rows were already recorded. Also fixed the recurring "license"→"lysis"
+  buffer classifier typo across 3 task rows (`c42de8d9` title+body, `29161385` body, `95e8767b`
+  body). All writes read-back-verified.
+- **Approved by:** human (owner, 2026-06-17 — "implement the split-mixed-captures classifier fix
+  (TDD + commit + close-out email)" → "Yes").

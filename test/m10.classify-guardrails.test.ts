@@ -9,7 +9,12 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { buildPrompt, completionSignal, completionTitle } from "../src/pipeline/classify";
+import {
+  buildPrompt,
+  completionSignal,
+  completionTitle,
+  splitActionDecision,
+} from "../src/pipeline/classify";
 import { findDuplicate, titleSimilarity, tokens } from "../src/pipeline/dedup";
 import { processInboxFile } from "../src/pipeline/watcher";
 import { setNow, todayStr } from "../src/util/clock";
@@ -106,6 +111,73 @@ describe("split mixed captures — completion detection (unit)", () => {
   });
 });
 
+describe("split compound action+decision captures (unit)", () => {
+  test("splitActionDecision peels a decision clause off an action", () => {
+    const s = splitActionDecision(
+      "Do FACS analysis for target-gene transduced cells and decide on Daniel sorting",
+    );
+    expect(s).not.toBeNull();
+    expect(s!.action.toLowerCase()).toContain("facs");
+    expect(s!.action.toLowerCase()).not.toContain("decide");
+    expect(s!.decision.toLowerCase()).toContain("daniel sorting");
+    expect(s!.decision.toLowerCase()).toMatch(/^decide/);
+  });
+
+  test("splitActionDecision strips a leading task:/todo: prefix from the action", () => {
+    const s = splitActionDecision("task: Run the assay and decide whether to repeat it");
+    expect(s).not.toBeNull();
+    expect(s!.action.toLowerCase()).toBe("run the assay");
+    expect(s!.decision.toLowerCase()).toContain("whether to repeat");
+  });
+
+  test("splitActionDecision returns null for a plain action task", () => {
+    expect(splitActionDecision("Refresh the media of the Jurkat cells")).toBeNull();
+  });
+
+  test("splitActionDecision does not fire on a pure decision (no leading action)", () => {
+    expect(splitActionDecision("decide on Daniel sorting")).toBeNull();
+  });
+});
+
+describe("compound action+decision split (e2e, classifier mocked)", () => {
+  test("a 'do X and decide on Y' task splits into an action task + companion decision", async () => {
+    const inbox = join(config.dataDir, "inbox");
+    await mkdir(inbox, { recursive: true });
+    const path = join(inbox, "compound-task.md");
+    // The FACS-and-Daniel umbrella bug: a single combined task that no later single
+    // capture fully closes. The action half must file as a task (without the decision
+    // clause in its title) AND a companion decision must be created from the same item.
+    await Bun.write(
+      path,
+      "task: Do FACS analysis for target-gene transduced cells and decide on Daniel sorting",
+    );
+    const result = await processInboxFile(path);
+    expect(result.filed).toBe(true);
+
+    const [item] = await sql`select filed_id from inbox_items where id = ${result.inboxId}`;
+    const [task] = await sql`select title, status from tasks where id = ${item!.filed_id}`;
+    expect(task!.title.toLowerCase()).toContain("facs");
+    expect(task!.title.toLowerCase()).not.toContain("decide");
+
+    const [dec] =
+      await sql`select id, question from decisions where derived_from = ${result.inboxId}`;
+    expect(dec).toBeTruthy();
+    expect(dec!.question.toLowerCase()).toContain("daniel sorting");
+  });
+
+  test("a compound capture that REPORTS the action done does not spawn a decision", async () => {
+    const inbox = join(config.dataDir, "inbox");
+    await mkdir(inbox, { recursive: true });
+    const path = join(inbox, "compound-done.md");
+    await Bun.write(path, "task: Ran the FACS analysis and decided on Daniel sorting — done");
+    const result = await processInboxFile(path);
+    expect(result.filed).toBe(true);
+    const [dec] =
+      await sql`select count(*)::int as n from decisions where derived_from = ${result.inboxId}`;
+    expect(dec!.n).toBe(0);
+  });
+});
+
 describe("split mixed captures (e2e, classifier mocked)", () => {
   test("a decision capture that reports finished work ALSO yields a done-task", async () => {
     const inbox = join(config.dataDir, "inbox");
@@ -161,7 +233,10 @@ describe("task-branch completion (e2e, classifier mocked)", () => {
     const path = join(inbox, "task-done.md");
     // heuristic classifier sees "task:" → type=task; the body says it's done, so it must
     // be stamped done (else it stays open and vanishes from "what moved today").
-    await Bun.write(path, "task: check returned sequences & re-label the 5 plasmids correctly — done");
+    await Bun.write(
+      path,
+      "task: check returned sequences & re-label the 5 plasmids correctly — done",
+    );
 
     const result = await processInboxFile(path);
     expect(result.filed).toBe(true);
