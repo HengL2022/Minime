@@ -769,3 +769,32 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   written failing-first). Full suite 172 pass / 0 fail; `tsc` clean; biome clean.
 - **Approved by:** human (owner, 2026-06-16 — "implement it for real"; stoplist location chosen
   via "Local gitignored file").
+
+## 2026-06-16 — Classifier: completed-result captures mis-filed as open decisions (TODO, code fix)
+
+- **Context:** Owner captured a lab update that contained BOTH a finished result and a future
+  open question: *"FACS analysis done, results good, gene transduction works. Note: U87/U251
+  endogenously express IL-13R + EGFRvIII — okay for prelim but probably need knockout lines, need
+  to think further."* The classifier collapsed the whole capture into a **single open `decision`
+  row** (`7be013f0`) whose `reasoning` field carried the achievement ("FACS confirms transduction
+  works") while `choice` stayed null.
+- **Symptom:** The accomplishment became invisible to the evening review's "What moved today",
+  because `minime_state` sources that section from **tasks marked done + commitments closed**, not
+  from decision `reasoning` text. An open decision surfaces only under "decision reviews due" (the
+  pending-question bucket). Net effect: a real completed lab task produced no done-task/journal
+  row, so the day looked empty of lab work and the originating FACS/Daniel-sorting task was never
+  recorded as done.
+- **Decision (TODO — not yet implemented):** The extractor/classifier should split a mixed capture
+  into its constituent records rather than forcing one type: a finished action → a `task` set
+  `done` (or a `journal` entry), AND any forward-looking question → a `decision`. At minimum, a
+  capture describing completed work must yield a done-task or journal so it appears in "what moved
+  today". Candidate approaches: (a) allow the classifier to emit multiple typed rows per capture;
+  (b) detect completion-signal phrasing ("done", "confirmed", "works", "finished") and route to a
+  done-task even when a decision is also extracted. Needs TDD (failing-first) like the date-anchor
+  / dedup fixes (commit 144b0d2).
+- **Manual remediation applied (data, this instance):** Logged the FACS win as a done task
+  (`fe909fef`, due 2026-06-16) and "Decide on Daniel sorting" as an open task (`4bc25704`) via the
+  MCP tools; fleshed out decision `7be013f0` with 3 real options + criteria + review_at 2026-06-30
+  (one-off in-place UPDATE, row backed up to `data/backups/` first). These are the owner's life
+  data and stay in the DB; this engineering note stays in git only.
+- **Approved by:** human (owner, 2026-06-16 — "note the classifier mis-filing for a code fix").
