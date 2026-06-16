@@ -1,6 +1,7 @@
 // Inbox classifier: local Ollama with a strict-JSON prompt (I1 — never a cloud call).
 // In tests/CI (MINIME_MOCK_OLLAMA=1) a deterministic heuristic stands in.
 
+import { todayStr } from "../util/clock";
 import { config } from "../util/config";
 
 export interface Classification {
@@ -9,7 +10,14 @@ export interface Classification {
   fields: Record<string, any>;
 }
 
-const PROMPT = `You classify a short personal capture into exactly one type.
+// The classify prompt is built per-call so the model always knows the current date —
+// without an anchor it resolves relative phrases ("tomorrow", "next Friday") against its
+// training prior and emits a wrong (usually past) year. See buildPrompt + the watcher's
+// past-date guardrail, which together stop a bad year from silently entering the DB.
+export function buildPrompt(today: string): string {
+  return `You classify a short personal capture into exactly one type.
+Today's date is ${today} (YYYY-MM-DD). Resolve every relative date — "today", "tomorrow",
+"this/next Friday", "in two weeks" — against ${today}. Never output a due date in the past.
 Types: task (something to do), journal (reflection/diary), interaction (met/called/messaged a person),
 note (reference information), decision_note (a decision made or being weighed), unknown.
 Reply with ONLY a JSON object: {"type": "...", "confidence": 0.0-1.0, "fields": {...}}.
@@ -20,6 +28,7 @@ note -> {"title": string}; unknown -> {}.
 
 Text:
 `;
+}
 
 export function heuristicClassify(text: string): Classification {
   const t = text.trim();
@@ -67,7 +76,9 @@ export async function classify(text: string): Promise<Classification> {
   if (config.mockOllama) return heuristicClassify(text);
   try {
     const { classifyProvider } = await import("../llm");
-    const raw = await classifyProvider().completeJson(PROMPT + text.slice(0, 4000));
+    const raw = await classifyProvider().completeJson(
+      buildPrompt(todayStr()) + text.slice(0, 4000),
+    );
     const parsed = JSON.parse(raw);
     const type = ["task", "journal", "interaction", "note", "decision_note", "unknown"].includes(
       parsed.type,

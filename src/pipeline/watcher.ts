@@ -13,6 +13,7 @@ import {
   insertJournal,
   insertReviewItem,
   logEvent,
+  openTasksForDedup,
   pendingInboxItems,
   setInboxFiled,
   setInboxPending,
@@ -24,6 +25,7 @@ import { indexParent } from "../search/index-parent";
 import { now, todayStr } from "../util/clock";
 import { config } from "../util/config";
 import { type Classification, classify } from "./classify";
+import { findDuplicate } from "./dedup";
 
 const ACTOR = "agent:classifier";
 const CONFIDENCE_FLOOR = 0.7;
@@ -42,12 +44,14 @@ async function archiveCopy(path: string): Promise<string> {
   return dest;
 }
 
-// Insert the typed row for a classification; returns [table, id] or null when unfileable.
+// Insert the typed row for a classification. Returns [table, id] when filed,
+// "duplicate" when it matched an existing open task (the duplicate review item is queued
+// here, so the caller must NOT also queue an inbox_unfiled item), or null when unfileable.
 async function fileRow(
   c: Classification,
   text: string,
   inboxId: string,
-): Promise<[string, string] | null> {
+): Promise<[string, string] | "duplicate" | null> {
   const firstLine = text
     .split("\n")[0]!
     .replace(/^<!--.*?-->\s*/s, "")
@@ -55,18 +59,55 @@ async function fileRow(
     .slice(0, 200);
   switch (c.type) {
     case "task": {
+      const title = c.fields.title || firstLine;
+      // Date guardrail: accept a due date only if well-formed AND not in the past.
+      // A past date almost always means the classifier guessed a wrong year for a
+      // relative phrase ("tomorrow") despite the prompt anchor — store null instead of
+      // a corrupt date, and flag it so the owner can set the real date at review.
+      const rawDue =
+        typeof c.fields.due === "string" && /^\d{4}-\d{2}-\d{2}$/.test(c.fields.due)
+          ? c.fields.due
+          : null;
+      const today = todayStr();
+      const duePast = rawDue !== null && rawDue < today;
+      const due = duePast ? null : rawDue;
+
+      // Dedup: the classifier has no memory of existing rows, so a re-mentioned task
+      // (event reminded twice) would otherwise create a second row. If an open task
+      // closely matches, queue this capture for review instead of inserting a duplicate.
+      const open = await openTasksForDedup();
+      const dup = findDuplicate(title, due, open);
+      if (dup) {
+        await insertReviewItem("duplicate", {
+          inbox_item_id: inboxId,
+          candidate_title: title,
+          candidate_due: due,
+          existing_task_id: dup.match.id,
+          existing_title: dup.match.title,
+          score: Number(dup.score.toFixed(3)),
+          note: "Inbox capture looks like an existing open task; review before filing.",
+        });
+        await logEvent({
+          actor: ACTOR,
+          verb: "inbox:duplicate",
+          entityType: "inbox_item",
+          entityId: inboxId,
+          payload: { existing_task_id: dup.match.id, score: dup.score, title },
+        });
+        return "duplicate"; // queued as a duplicate; caller marks pending, no extra queue item
+      }
+
       const { id } = await upsertTask({
-        title: c.fields.title || firstLine,
-        body: text,
-        due:
-          typeof c.fields.due === "string" && /^\d{4}-\d{2}-\d{2}$/.test(c.fields.due)
-            ? c.fields.due
-            : null,
+        title,
+        body: duePast
+          ? `${text}\n\n[date guardrail: classifier proposed past due date ${rawDue} (today ${today}); dropped — set the real date at review]`
+          : text,
+        due,
         createdBy: ACTOR,
         source: "capture",
         derivedFrom: inboxId,
       });
-      await indexParent("task", id, text, c.fields.title || firstLine, 1);
+      await indexParent("task", id, text, title, 1);
       return ["tasks", id];
     }
     case "journal": {
@@ -157,6 +198,12 @@ export async function processInboxFile(path: string): Promise<{ inboxId: string;
   const c = await classify(text);
   if (c.confidence >= CONFIDENCE_FLOOR && c.type !== "unknown") {
     const filed = await fileRow(c, text, inboxId);
+    if (filed === "duplicate") {
+      // fileRow already queued a 'duplicate' review item; mark pending and stop here so
+      // we don't ALSO queue an inbox_unfiled item for the same capture.
+      await setInboxPending(inboxId, c);
+      return { inboxId, filed: false };
+    }
     if (filed) {
       await setInboxFiled(inboxId, filed[0], filed[1], c);
       await logEvent({

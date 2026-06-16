@@ -846,6 +846,20 @@ export async function tasksInRange(from: string, to: string): Promise<any[]> {
       order by due, title`;
 }
 
+// Dedup support for the inbox pipeline: find open (non-done/dropped) tasks whose
+// normalized title closely matches a candidate, so a re-mention of the same item is
+// routed to the review queue instead of silently inserting a second row. Normalization
+// strips punctuation/case/whitespace; we compare a trigram-ish containment both ways so
+// "Attend Mia's KiddieWinkie event" matches "Attend Mia KiddieWinkie Father's Day event".
+export async function openTasksForDedup(): Promise<
+  { id: string; title: string; due: string | null }[]
+> {
+  return sql`select id, title, due from tasks
+      where status in ('inbox','active','waiting')
+      order by created_at desc
+      limit 500` as any;
+}
+
 // Latest daily value vs trailing-28-day mean ± 2σ, from metric_values only (never raw tier-0).
 export async function metricAnomalies(): Promise<any[]> {
   const t = now();
