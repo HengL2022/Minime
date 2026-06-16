@@ -1029,3 +1029,38 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   body). All writes read-back-verified.
 - **Approved by:** human (owner, 2026-06-17 — "implement the split-mixed-captures classifier fix
   (TDD + commit + close-out email)" → "Yes").
+
+## 2026-06-17 — Morning brief STILL showed yesterday's date: localDateStr was process-TZ bound (incomplete 37f95bf fix)
+
+- **Trigger:** After 37f95bf the morning brief title was correct (Jun 17) but the *content*
+  (tasks_due, decision_reviews_due) was still anchored to Jun 16 — yesterday's items, and today's
+  actual events (Liz's appointment, Mia's Father's Day) were missing. Observed at 07:43 SGT
+  (= 23:43 UTC Jun 16).
+- **Root cause (two compounding):**
+  1. **Stale daemon.** The live MCP server (`mcp-only.ts`) and `serve` both started *before*
+     37f95bf landed, so they ran the old `${now()}::date` UTC cast.
+  2. **The 37f95bf fix was incomplete for this box.** It moved the day boundary into
+     `localDateStr()`, which used `Date`'s local getters (`getFullYear/getMonth/getDate`). Those
+     read the *process* timezone, which the JS runtime caches from `process.env.TZ` **at startup**.
+     The minime daemons run with system localtime = `Etc/UTC` and no `TZ` set; the repo `.env`
+     `TZ=Asia/Singapore` is loaded by `config.ts`'s dotenv fallback AFTER the runtime initializes,
+     too late to re-cache `Date`. So `localDateStr` computed the UTC day and drifted to yesterday
+     for the 7am SGT brief.
+- **Fix (TDD, failing-first):**
+  - `src/util/clock.ts` — `localDateStr(d)` now formats `d` via a module-level
+    `Intl.DateTimeFormat("en-CA", { timeZone: config.tz, ... })` (en-CA → YYYY-MM-DD), which is
+    independent of the process TZ. Anchors on the OWNER's configured tz (`config.tz`, default
+    `Asia/Singapore`) regardless of how/where the daemon was launched. Added `import { config }`.
+  - **Belt-and-braces deploy fix** so correctness no longer *depends* on this but the env is also
+    right: `TZ=Asia/Singapore` added to the systemd user unit
+    (`~/.config/systemd/user/minime.service`) and to the Hermes MCP server env
+    (`mcp_servers.minime.env.TZ` in `~/.hermes/config.yaml`, via `hermes config set`).
+- **Tests:** `test/m9.clock-tz.test.ts` — 2 tests: an instant that is Jun 17 in SGT but Jun 16 in
+  UTC resolves to `2026-06-17`; result matches an independent Intl computation in `config.tz`.
+  Targeted RED proven by running the OLD impl under a genuine UTC process (no TZ leak) →
+  `2026-06-16`; the new impl → `2026-06-17`. Full suite 221 pass / 1 skip / 0 fail; tsc + biome clean.
+- **Note:** `serve` daemon restarted under the new unit (TZ verified in `/proc/<pid>/environ`). The
+  MCP server (gateway child) picks up both the code fix and the new TZ env on its next gateway
+  restart — until then `minime_state` answers from the stale pre-fix process.
+- **Approved by:** human (owner, 2026-06-17 — "The morning briefing only title is today, but
+  content are still yesterday" → "Both" [restart now + durable code fix]).
