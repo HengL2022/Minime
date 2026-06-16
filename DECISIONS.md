@@ -939,3 +939,28 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   23:30-UTC clock — "+1" stays a full local day ahead of todayStr() (old UTC slice collapsed it
   onto today).
 - **Approved by:** human (owner, 2026-06-16 — "Look at that" → investigate + fix the failing test).
+
+## 2026-06-17 — Morning brief showed the wrong (previous) date: stateSnapshot UTC ::date cast
+
+- **Symptom:** the 7:00am Asia/Singapore morning brief was stamped with YESTERDAY's date, and
+  tasks due "today" were missing / looked dropped. Reported by owner.
+- **Root cause:** `stateSnapshot()` in `src/db/repo.ts` anchored "today" as `${now()}::date` —
+  the JS `now()` UTC instant cast to a date INSIDE Postgres. The DB session TZ is `Etc/UTC`
+  (verified: `show timezone`). 7am SGT = 23:00 UTC the PREVIOUS day, so `::date` truncated to
+  yesterday. Affected the `tasks_due` cutoff (`due <= ${t}::date`) and the decision-review window
+  (`review_at <= ${t}::date + 3`). Window of breakage: ~00:00–08:00 SGT daily — which includes
+  the 7am brief. Calendar block was unaffected (it uses timestamptz instant math, not ::date).
+  Same bug CLASS as the m8.agenda seed flake (UTC vs local calendar), different live instance.
+- **Fix:** compute the local calendar day in app code via `localDateStr(now())` and pass it as a
+  `YYYY-MM-DD` string param (`${today}::date`) for both the tasks and decisions queries. Correct
+  regardless of DB session TZ or time of day. One import + 2 query edits in `stateSnapshot`.
+- **Deliberately NOT changed:** the calendar query's `${t}::timestamptz` instant math (correct as
+  an instant), and `agenda.ts` bucketing (postgres.js returns `date` columns as UTC-midnight, so
+  its `toISOString().slice` is correct there — see 2026-06-16 entry).
+- **Tests:** new `test/m9.state-tz.test.ts` — faked clock at 00:30 local (UTC-boundary window),
+  asserts a task due local-today appears in `minime_state.tasks_due` (RED before fix: only the
+  past-due item showed; GREEN after). Plus a meta-assertion documenting why the window bites.
+- **Verified:** full suite 211 pass / 1 skip / 0 fail, tsc clean. Live probe at 23:05 UTC
+  (=07:05 SGT) now anchors to 2026-06-17 and includes tasks due through today.
+- **Approved by:** human (owner, 2026-06-17 — "Figure out why morning briefing date is wrong" →
+  "Implement").

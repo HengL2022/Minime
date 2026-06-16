@@ -4,7 +4,7 @@
 // Everything is parameterized; string-interpolated SQL is a review-blocker.
 
 import { cjkFold, isCjkStopToken } from "../util/cjk";
-import { now } from "../util/clock";
+import { localDateStr, now } from "../util/clock";
 import { config } from "../util/config";
 import { sql } from "./client";
 
@@ -946,6 +946,13 @@ export async function resolveReviewItem(
 
 export async function stateSnapshot(): Promise<any> {
   const t = now();
+  // Anchor "today" on the LOCAL calendar day, computed in app code. Casting the
+  // UTC instant inside Postgres (${t}::date) uses the DB session TZ (UTC here),
+  // which truncates to YESTERDAY whenever local time is past midnight but UTC
+  // hasn't rolled over yet — e.g. the 7am Asia/Singapore morning brief = 23:00
+  // UTC prior day. Passing a local YYYY-MM-DD string makes the day boundary
+  // correct regardless of DB session TZ or time of day. See DECISIONS.md.
+  const today = localDateStr(t);
   const [calendar, tasks, commitments, decisionsDue, openReview, anomalies] = await Promise.all([
     sql`select id, uid, starts_at, ends_at, title, location from calendar_events
         where starts_at >= ${t}::timestamptz - interval '1 hour'
@@ -953,12 +960,12 @@ export async function stateSnapshot(): Promise<any> {
           and tier <= 1
         order by starts_at`,
     sql`select id, title, status, due from tasks
-        where status in ('inbox','active','waiting') and due is not null and due <= ${t}::date
+        where status in ('inbox','active','waiting') and due is not null and due <= ${today}::date
         order by due`,
     sql`select id, what, to_whom, due from commitments where status = 'open' order by due nulls last`,
     sql`select id, question, review_at, choice from decisions
         where reviewed_at is null
-          and ( (review_at is not null and review_at <= ${t}::date + 3)
+          and ( (review_at is not null and review_at <= ${today}::date + 3)
                 or choice is null )
         order by review_at nulls last`,
     sql`select count(*)::int as n from review_queue where status = 'open'`,
