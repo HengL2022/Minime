@@ -784,14 +784,25 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   pending-question bucket). Net effect: a real completed lab task produced no done-task/journal
   row, so the day looked empty of lab work and the originating FACS/Daniel-sorting task was never
   recorded as done.
-- **Decision (TODO — not yet implemented):** The extractor/classifier should split a mixed capture
-  into its constituent records rather than forcing one type: a finished action → a `task` set
-  `done` (or a `journal` entry), AND any forward-looking question → a `decision`. At minimum, a
-  capture describing completed work must yield a done-task or journal so it appears in "what moved
-  today". Candidate approaches: (a) allow the classifier to emit multiple typed rows per capture;
-  (b) detect completion-signal phrasing ("done", "confirmed", "works", "finished") and route to a
-  done-task even when a decision is also extracted. Needs TDD (failing-first) like the date-anchor
-  / dedup fixes (commit 144b0d2).
+- **Decision (SHIPPED 2026-06-16, approach (b)):** Detect completion-signal phrasing and split
+  the capture. Implemented in `src/pipeline/classify.ts` (`completionSignal` — word-boundary regex
+  for done/finished/confirmed/works/succeeded/etc.; `completionTitle` — leading-clause extractor
+  stripping a `decision:`/`decided` prefix and cutting at the first `but`/`however`/`need to`/`note:`
+  pivot, capped 120 chars) and `src/pipeline/watcher.ts` `fileRow` `decision_note` branch: after the
+  decision is filed, when `completionSignal(text)` is true it ALSO emits a `done` task derived from
+  the same inbox item (best-effort — the decision is primary and never fails if the secondary task
+  errors), logging a `inbox:split-done-task` event. Now the accomplishment surfaces in "what moved
+  today" while the open question stays a decision. Chose (b) over (a) — multi-row classifier output —
+  because it needs no LLM-contract change, no prompt rework, and is fully deterministic/testable on
+  the mock path.
+- **Latent bug fixed in the same change:** `upsertTask`'s INSERT branch never set `completed_at`,
+  even for `status='done'` (only the UPDATE branch did). A freshly-inserted done-task therefore had
+  a null `completed_at`. INSERT now stamps `completed_at = now()` when status is `done`.
+- **Tests (TDD, failing-first like 144b0d2):** `test/m10.classify-guardrails.test.ts` — unit tests
+  for `completionSignal` (positive/negative) and `completionTitle`, plus two e2e (classifier-mocked)
+  cases: a mixed "decision + finished work" capture yields BOTH a decision and a `done` task (with
+  non-null `completed_at`, derived from the same inbox item); a plain forward-looking decision yields
+  NO done-task. Full suite 197 pass / 0 fail; `tsc --noEmit` clean.
 - **Manual remediation applied (data, this instance):** Logged the FACS win as a done task
   (`fe909fef`, due 2026-06-16) and "Decide on Daniel sorting" as an open task (`4bc25704`) via the
   MCP tools; fleshed out decision `7be013f0` with 3 real options + criteria + review_at 2026-06-30

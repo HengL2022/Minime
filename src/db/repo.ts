@@ -492,9 +492,10 @@ export async function upsertTask(
     return row as any;
   }
   const [row] = await sql`
-    insert into tasks (title, body, status, due, goal_id, created_by, source, derived_from, tier)
+    insert into tasks (title, body, status, due, goal_id, created_by, source, derived_from, tier, completed_at)
     values (${t.title}, ${t.body ?? null}, ${t.status ?? "inbox"}, ${t.due ?? null}, ${t.goalId ?? null},
-            ${t.createdBy ?? "human"}, ${t.source ?? "manual"}, ${t.derivedFrom ?? null}, ${t.tier ?? 1})
+            ${t.createdBy ?? "human"}, ${t.source ?? "manual"}, ${t.derivedFrom ?? null}, ${t.tier ?? 1},
+            ${t.status === "done" ? now() : null})
     returning id`;
   return row as any;
 }

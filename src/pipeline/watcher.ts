@@ -24,7 +24,7 @@ import {
 import { indexParent } from "../search/index-parent";
 import { now, todayStr } from "../util/clock";
 import { config } from "../util/config";
-import { type Classification, classify } from "./classify";
+import { type Classification, classify, completionSignal, completionTitle } from "./classify";
 import { findDuplicate } from "./dedup";
 
 const ACTOR = "agent:classifier";
@@ -148,6 +148,37 @@ async function fileRow(
         derivedFrom: inboxId,
       });
       await indexParent("decision", id, text, firstLine, 1);
+      // Split mixed captures: a decision that ALSO reports finished work ("FACS analysis
+      // done... but need to decide whether to use knockout lines") would otherwise bury
+      // the accomplishment in the decision's reasoning, where the evening review's "what
+      // moved today" (done tasks + closed commitments) can't see it. Emit a companion
+      // done-task for the achievement so it surfaces. Best-effort: the decision is the
+      // primary row and must not fail if the secondary task can't be created.
+      if (completionSignal(text)) {
+        const doneTitle = completionTitle(text) || firstLine;
+        try {
+          const { id: taskId } = await upsertTask({
+            title: doneTitle,
+            body: `${text}\n\n[split from decision ${id}: completed-work portion of a mixed capture]`,
+            status: "done",
+            createdBy: ACTOR,
+            source: "capture",
+            derivedFrom: inboxId,
+          });
+          await indexParent("task", taskId, text, doneTitle, 1);
+          await logEvent({
+            actor: ACTOR,
+            verb: "inbox:split-done-task",
+            entityType: "inbox_item",
+            entityId: inboxId,
+            payload: { decision_id: id, task_id: taskId, title: doneTitle },
+          });
+        } catch (err) {
+          console.error(
+            `[minime] split done-task failed for ${inboxId}: ${(err as Error)?.message ?? err}`,
+          );
+        }
+      }
       return ["decisions", id];
     }
     case "note": {

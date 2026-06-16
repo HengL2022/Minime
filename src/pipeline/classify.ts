@@ -30,6 +30,35 @@ Text:
 `;
 }
 
+// Completion-signal detection for the "split mixed captures" fix. A single capture often
+// bundles a FINISHED action with a forward-looking decision ("FACS analysis done... but
+// need to decide whether to use knockout lines"). The classifier files it as exactly one
+// type (usually decision_note), so the accomplishment never becomes a done-task and is
+// invisible to the evening review's "what moved today" (which sources done tasks +
+// closed commitments, not decision reasoning). When a capture carries a completion signal
+// we ALSO emit a done-task for the achievement — see watcher.fileRow. Word-boundary
+// matched so "workshop"/"undone" don't false-trigger.
+const COMPLETION_RE =
+  /\b(done|finished|completed?|confirmed|works|worked|working|succeeded|success(?:ful)?|achieved|shipped|resolved|fixed)\b/i;
+
+export function completionSignal(text: string): boolean {
+  return COMPLETION_RE.test(text);
+}
+
+// Build a concise done-task title from a mixed capture's text: take the leading clause up
+// to the first sentence/clause boundary (before the forward-looking "but/however/need to"
+// part), strip a leading "decision:"/"decided" prefix, and cap at 120 chars.
+export function completionTitle(text: string): string {
+  const firstLine = text
+    .split("\n")[0]!
+    .replace(/^<!--.*?-->\s*/s, "")
+    .trim();
+  // cut at the pivot into forward-looking territory, or the first sentence end
+  const clause = firstLine.split(/\s*(?:[.;]|\bbut\b|\bhowever\b|\bneed to\b|\bnote:)/i)[0]!.trim();
+  const base = (clause || firstLine).replace(/^(decision|decided)\b[:\s-]*/i, "").trim();
+  return base.slice(0, 120);
+}
+
 export function heuristicClassify(text: string): Classification {
   const t = text.trim();
   const lower = t.toLowerCase();

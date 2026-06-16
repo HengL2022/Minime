@@ -9,7 +9,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { buildPrompt } from "../src/pipeline/classify";
+import { buildPrompt, completionSignal, completionTitle } from "../src/pipeline/classify";
 import { findDuplicate, titleSimilarity, tokens } from "../src/pipeline/dedup";
 import { processInboxFile } from "../src/pipeline/watcher";
 import { setNow, todayStr } from "../src/util/clock";
@@ -81,6 +81,76 @@ describe("watcher date guardrail (e2e, classifier mocked)", () => {
     const [task] = await sql`select due, body from tasks where id = ${item!.filed_id}`;
     expect(task!.due).toBeNull(); // past date dropped, not stored
     expect(String(task!.body)).toContain("date guardrail"); // trail left for review
+  });
+});
+
+describe("split mixed captures — completion detection (unit)", () => {
+  test("completionSignal detects finished-work phrasing", () => {
+    expect(completionSignal("FACS analysis done, transduction works")).toBe(true);
+    expect(completionSignal("results confirmed, assay finished")).toBe(true);
+    expect(completionSignal("got it working; succeeded today")).toBe(true);
+  });
+
+  test("completionSignal is false for purely forward-looking text", () => {
+    expect(completionSignal("Should we use knockout lines? need to think further")).toBe(false);
+    expect(completionSignal("Deciding whether to order more reagents next week")).toBe(false);
+  });
+
+  test("completionTitle extracts a concise done-task title", () => {
+    const title = completionTitle(
+      "FACS analysis done, results good, gene transduction works. Note: need knockout lines, think further.",
+    );
+    expect(title.length).toBeGreaterThan(0);
+    expect(title.length).toBeLessThanOrEqual(120);
+    expect(title.toLowerCase()).toContain("facs");
+  });
+});
+
+describe("split mixed captures (e2e, classifier mocked)", () => {
+  test("a decision capture that reports finished work ALSO yields a done-task", async () => {
+    const inbox = join(config.dataDir, "inbox");
+    await mkdir(inbox, { recursive: true });
+    const path = join(inbox, "mixed-capture.md");
+    // heuristic classifier sees "decided"/"decision" → decision_note; the body also
+    // reports completed work, which must surface as a done-task (else it vanishes from
+    // the evening review's "what moved today").
+    await Bun.write(
+      path,
+      "decision: FACS analysis done and transduction works, but need to decide whether to use knockout lines",
+    );
+
+    const result = await processInboxFile(path);
+    expect(result.filed).toBe(true);
+
+    // the decision was filed
+    const [dec] = await sql`select count(*)::int as n from decisions`;
+    expect(dec!.n).toBeGreaterThan(0);
+
+    // AND a done-task was created for the accomplishment, derived from the same inbox item
+    const [doneTask] = await sql`
+      select id, status, completed_at from tasks
+      where derived_from = ${result.inboxId} and status = 'done'`;
+    expect(doneTask).toBeTruthy();
+    expect(doneTask!.status).toBe("done");
+    expect(doneTask!.completed_at).not.toBeNull(); // stamped so it shows under "moved today"
+  });
+
+  test("a plain forward-looking decision does NOT spawn a done-task", async () => {
+    const inbox = join(config.dataDir, "inbox");
+    await mkdir(inbox, { recursive: true });
+    const path = join(inbox, "plain-decision.md");
+    await Bun.write(
+      path,
+      "decision: should we switch the lysis buffer vendor or stay with the current one",
+    );
+
+    const result = await processInboxFile(path);
+    expect(result.filed).toBe(true);
+
+    const [doneTask] = await sql`
+      select count(*)::int as n from tasks
+      where derived_from = ${result.inboxId} and status = 'done'`;
+    expect(doneTask!.n).toBe(0);
   });
 });
 
