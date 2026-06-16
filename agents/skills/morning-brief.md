@@ -41,6 +41,4 @@ A brief, in this order:
 
 - No fluff, no motivational copy. Keep "Suggested focus" concrete and grounded —
   no generic advice.
-- Plain text, delivery-agnostic — no markdown tables (the brief may be sent to a
-  plain-text channel).
 - Do not expose secret values or internal implementation details.
