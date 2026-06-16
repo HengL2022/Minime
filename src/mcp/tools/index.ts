@@ -1,3 +1,4 @@
+import { agendaTool } from "./agenda";
 import { captureTool } from "./capture";
 import { getContextTool } from "./context";
 import { logDecisionTool, reviewDecisionTool } from "./decisions";
@@ -21,6 +22,7 @@ export const ALL_TOOLS: ToolDef[] = [
   logDecisionTool,
   reviewDecisionTool,
   upsertTaskTool,
+  agendaTool,
   logInteractionTool,
   reviewQueueTool,
   unlockTool,

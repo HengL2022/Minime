@@ -33,7 +33,7 @@ async function call(
 }
 
 describe("MCP server", () => {
-  test("exposes all 11 tools", async () => {
+  test("exposes all tools", async () => {
     const tools = await client.listTools();
     expect(tools.tools.map((t) => t.name).sort()).toEqual(ALL_TOOLS.map((t) => t.name).sort());
   });

@@ -834,6 +834,18 @@ export async function stateSnapshot(): Promise<any> {
   };
 }
 
+// Forward-looking agenda: tasks due within an inclusive [from, to] date range.
+// minime_state is today-anchored (due <= today) and CANNOT answer "what's due
+// tomorrow / this week"; this fills that gap. Includes inbox/active/waiting
+// (open work), excludes done/dropped. Ordered by due date then title.
+export async function tasksInRange(from: string, to: string): Promise<any[]> {
+  return sql`select id, title, status, due from tasks
+      where status in ('inbox','active','waiting')
+        and due is not null
+        and due >= ${from}::date and due <= ${to}::date
+      order by due, title`;
+}
+
 // Latest daily value vs trailing-28-day mean ± 2σ, from metric_values only (never raw tier-0).
 export async function metricAnomalies(): Promise<any[]> {
   const t = now();
