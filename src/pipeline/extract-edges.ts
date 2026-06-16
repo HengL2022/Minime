@@ -146,6 +146,24 @@ const ORG_ROLE = new RegExp(
   "giu",
 );
 
+// Fix A (2026-06-16): non-org stoplist — cities, generic nouns, and lab/therapy
+// concepts the extractor used to mis-type as orgs. Exact (case-folded) phrase match
+// only, so real multi-word orgs containing these words ("Goddard School") are unaffected.
+// See docs/known-issues/extractor-phantom-orgs.md.
+const NON_ORG_TERMS = new Set(
+  [
+    // cities / places
+    "wuhan", "beijing", "shanghai", "shenzhen", "guangzhou", "singapore", "huangpu",
+    "zhuhai", "guangdong",
+    // generic nouns
+    "school", "lab", "laboratory", "office", "home", "hospital", "clinic",
+    "university", "college", "company", "group", "team", "department",
+    // lab / therapy / assay concepts
+    "car-t", "cart", "crispr", "facs", "pcr", "elisa", "antibody", "plasmid",
+    "ldlr", "egfrviii", "il-13", "il13",
+  ].map((s) => s.toLowerCase()),
+);
+
 export interface DiscoveredPerson {
   name: string;
   relation: string | null;
@@ -184,19 +202,34 @@ function personsIn(sentence: string): DiscoveredPerson[] {
   return found;
 }
 
-function orgsIn(sentence: string, personNames: string[]): string[] {
+function orgsIn(sentence: string, personNames: string[], knownPersonNames: string[]): string[] {
   const cued = WORK_CUE.test(sentence);
   const out: string[] = [];
+  // Names to reject as orgs: people found in this sentence + all known people in
+  // the lexicon (so a bare first name like "Heng" is caught even when the only
+  // stored alias is the fuller "Heng Liu"). Fix A, 2026-06-16.
+  const blocked = new Set(
+    [...personNames, ...knownPersonNames].flatMap((n) => {
+      const lower = n.toLowerCase();
+      // also block the bare first token ("Heng Liu" → "heng") and the possessive form
+      return [lower, lower.split(/\s+/)[0]!];
+    }),
+  );
   const consider = (phrase: string, ok: boolean) => {
-    // "NTNU's Department of Marine Technology" → the possessor is the org
+    // "NTNU's Department of Marine Technology" → the possessor is the org;
+    // but a lone possessive ("Max's") collapses to the bare name, which is then
+    // caught by the person/stoplist guards below.
     const p = phrase
       .replace(/['’]s\s.*$/u, "")
+      .replace(/['’]s$/u, "")
       .replace(/[,.;:]+$/u, "")
       .trim();
     if (p.length < 3 || !ok) return;
     if (!/\p{Lu}/u.test(p)) return; // "11-week" and other digit-led phrases are not orgs
     const lower = p.toLowerCase();
     if (NAME_STOP.has(lower)) return;
+    if (NON_ORG_TERMS.has(lower)) return; // city / generic noun / concept — not an org
+    if (blocked.has(lower)) return; // the phrase IS a (known) person's name
     if (personNames.some((n) => n.toLowerCase() === lower || lower.includes(n.toLowerCase())))
       return;
     if (!out.some((o) => o.toLowerCase() === lower)) out.push(p);
@@ -282,6 +315,7 @@ export function extractFacts(
       const sentOrgs = orgsIn(
         sentence,
         persons.map((p) => p.name),
+        lexicon.people.flatMap((e) => e.names),
       );
       for (const [id] of knownIn(sentence, lexicon.orgs)) {
         const canonical = lexicon.orgs.find((e) => e.id === id)!.names[0]!;

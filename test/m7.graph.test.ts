@@ -84,6 +84,45 @@ describe("extractFacts (pure rules)", () => {
     expect(f.orgs).toEqual(["Havlyd AS"]);
   });
 
+  // --- Fix A: phantom-org prevention at ingestion (2026-06-16) ----------------
+  // The relation extractor used to mint phantom orgs from the owner's name,
+  // other people's names, places, generic nouns, and therapy/concept terms.
+  // See docs/known-issues/extractor-phantom-orgs.md.
+
+  test("a known person's name is never extracted as an org (bare first name)", () => {
+    // canonical-only lexicon (no convenient 'Heng' alias) — the real-world gap
+    const lex = { people: [{ id: "p1", names: ["Heng Liu"] }], orgs: [] };
+    const f = extractFacts("Chen Mengwei now works with Heng on the IDH trial.", lex);
+    expect(f.orgs).toEqual([]);
+  });
+
+  test("possessive of a known person is not an org", () => {
+    const lex = { people: [{ id: "p1", names: ["Max Z. Liu"] }], orgs: [] };
+    const f = extractFacts("My collaborator joined Max's group last week.", lex);
+    expect(f.orgs).toEqual([]);
+  });
+
+  test("cities are not orgs even with a work cue", () => {
+    const f = extractFacts("She works at Wuhan on the trial.", EMPTY);
+    expect(f.orgs).toEqual([]);
+  });
+
+  test("therapy types / concepts are not orgs", () => {
+    const f = extractFacts("The team works on CAR-T for glioma.", EMPTY);
+    expect(f.orgs).toEqual([]);
+  });
+
+  test("a bare generic noun ('School') is not an org by suffix alone", () => {
+    const f = extractFacts("Krystal works at School most afternoons.", EMPTY);
+    expect(f.orgs).toEqual([]);
+  });
+
+  test("a real multi-word org with a generic head word still extracts", () => {
+    // guard must be precise: 'School' alone is junk, 'Goddard School' is a real org
+    const f = extractFacts("I joined Goddard School AS in 2019 as a teacher.", EMPTY);
+    expect(f.orgs).toContain("Goddard School AS");
+  });
+
   test("known entities are reported as mentions", () => {
     const lex = {
       people: [{ id: "p1", names: ["Kjersti Lund"] }],
