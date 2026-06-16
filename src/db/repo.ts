@@ -774,6 +774,16 @@ export async function setInboxPending(id: string, classifierOutput: unknown): Pr
   await sql`update inbox_items set classifier_output = ${sql.json(classifierOutput as any)} where id = ${id}`;
 }
 
+// Mark an inbox row unfileable. Used for orphans whose raw_path no longer exists on this
+// host (e.g. rows synced from another machine — macOS /Users/... paths — whose source text
+// never landed here). Records the reason in classifier_output so the drop is auditable and
+// the row is never retried by drainStartup again.
+export async function setInboxRejected(id: string, reason: string): Promise<void> {
+  await sql`update inbox_items set status = 'rejected',
+            classifier_output = ${sql.json({ rejected: true, reason } as any)}
+            where id = ${id}`;
+}
+
 export async function insertReviewItem(kind: string, payload: unknown): Promise<{ id: string }> {
   const [row] = await sql`
     insert into review_queue (kind, payload) values (${kind}, ${sql.json(payload as any)}) returning id`;

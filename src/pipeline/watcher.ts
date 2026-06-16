@@ -16,6 +16,7 @@ import {
   pendingInboxItems,
   setInboxFiled,
   setInboxPending,
+  setInboxRejected,
   upsertPage,
   upsertTask,
 } from "../db/repo";
@@ -204,7 +205,26 @@ async function drainStartup(inboxDir: string): Promise<void> {
     });
   };
   for (const row of await pendingInboxItems()) {
-    if (row.classifier_output == null) await tryProcess(row.raw_path);
+    if (row.classifier_output == null) {
+      // A pending row that was never classified can only be drained if its source text
+      // still exists on THIS host. Rows synced from another machine (e.g. macOS
+      // /Users/... paths) point at files that never landed here — drainStartup used to
+      // skip them silently, so they sat pending forever and inflated the review queue.
+      // Mark such orphans rejected (audited) so they stop being retried on every restart.
+      if (await Bun.file(row.raw_path).exists()) {
+        await tryProcess(row.raw_path);
+      } else {
+        await setInboxRejected(row.id, `orphaned: raw_path missing on this host (${row.raw_path})`);
+        await logEvent({
+          actor: ACTOR,
+          verb: "inbox:orphaned",
+          entityType: "inbox_item",
+          entityId: row.id,
+          payload: { raw_path: row.raw_path },
+        }).catch(() => {});
+        console.error(`[minime] inbox orphan rejected: ${basename(row.raw_path)} (file missing)`);
+      }
+    }
   }
   let names: string[];
   try {

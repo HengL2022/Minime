@@ -211,4 +211,32 @@ describe("inbox startup drain (watcher recovery)", () => {
       await w.close();
     }
   });
+
+  test("orphaned pending rows (raw_path missing on this host) are rejected, not retried forever", async () => {
+    // A row synced from another machine: classifier_output IS NULL and raw_path points at a
+    // file that never existed here (e.g. macOS /Users/... path). drainStartup used to skip
+    // these silently, so they sat 'pending' forever and inflated the review queue.
+    const ghostPath = "/Users/someoneelse/.hermes/data/inbox/capture-ghost.md";
+    const { id } = await insertInboxItem({
+      rawPath: ghostPath,
+      mime: "text/markdown",
+      createdBy: "agent:mcp",
+    });
+    const [before] = await sql`select status, classifier_output from inbox_items where id = ${id}`;
+    expect(before!.status).toBe("pending");
+    expect(before!.classifier_output).toBeNull();
+
+    const w = await startWatcher();
+    try {
+      const [item] =
+        await sql`select status, classifier_output from inbox_items where id = ${id}`;
+      expect(item!.status).toBe("rejected");
+      expect(item!.classifier_output?.rejected).toBe(true);
+      const [ev] =
+        await sql`select count(*)::int as n from events where verb = 'inbox:orphaned' and entity_id = ${id}`;
+      expect(ev!.n).toBe(1);
+    } finally {
+      await w.close();
+    }
+  });
 });
