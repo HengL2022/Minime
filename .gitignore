@@ -6,6 +6,8 @@
 # owner data — files are the archive, but not in this repo (spec §5)
 data/*
 !data/**/.gitkeep
+# stoplist template is committed docs; the live non-org-terms.txt stays local (owner-domain)
+!data/non-org-terms.example.txt
 
 # runtime
 node_modules/
