@@ -257,6 +257,31 @@ My physiotherapist Solveig Dahl at Lade Fysio fixed my knee.`;
     expect(piotr.relation).toBe("old colleague");
   });
 
+  test("family-relation people never get a works_at edge (kids don't work at orgs)", async () => {
+    // A family narrative co-mentions a child, a work cue, and orgs in one paragraph —
+    // exactly the shape that minted phantom "Mia works_at Hehuang Pharma" edges. With the
+    // child stored as relation='daughter', extractAndLink must refuse any works_at edge.
+    const { ensurePerson, setPersonRelationIfNull } = await import("../src/db/repo");
+    const { id: miaId } = await ensurePerson("Mialin Tofteberg", "test", "capture");
+    await setPersonRelationIfNull(miaId, "daughter");
+
+    await extractAndLink(
+      "page",
+      pageId,
+      "Mialin Tofteberg joined her violin class; meanwhile work at Havlyd AS continued and she visited Lade Fysio.",
+    );
+
+    const work = await testSql`
+      select count(*)::int as n from edges
+      where rel = 'works_at' and src_type = 'person' and src_id = ${miaId}`;
+    expect(work[0]!.n).toBe(0);
+    // a normal mentions edge is still fine — the guard is works_at-specific
+    const mentions = await testSql`
+      select count(*)::int as n from edges
+      where rel = 'mentions' and dst_type = 'person' and dst_id = ${miaId}`;
+    expect(mentions[0]!.n).toBeGreaterThan(0);
+  });
+
   test("graph boost reaches orgs: entitiesNamedIn + oneHopNeighbors", async () => {
     const refs = await entitiesNamedIn("who works at Havlyd these days?");
     expect(refs.some((r) => r.type === "org")).toBe(true);

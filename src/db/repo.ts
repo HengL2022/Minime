@@ -288,6 +288,18 @@ export async function resolvePerson(name: string): Promise<any | null> {
   return rows[0] ?? null;
 }
 
+// Internal by-id lookup for the extractor's works_at guard. NOT tier-gated: the system
+// extractor (system:extract) needs the stored relation of a person it just resolved to
+// decide whether a works_at edge is legitimate. Returns only structural fields, never
+// tier-2 free text. Do not expose through MCP tools.
+export async function personById(
+  id: string,
+): Promise<{ id: string; canonical_name: string; relation: string | null } | null> {
+  const rows = await sql`
+    select id, canonical_name, relation from people where id = ${id} limit 1`;
+  return (rows[0] as any) ?? null;
+}
+
 export async function ensurePerson(
   name: string,
   createdBy: string,

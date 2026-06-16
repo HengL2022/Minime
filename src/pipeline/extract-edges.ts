@@ -20,6 +20,7 @@ import {
   insertEdge,
   parentTable,
   peopleByFirstName,
+  personById,
   resolveOrg,
   resolvePerson,
   setOrgCanonicalName,
@@ -327,6 +328,43 @@ function knownIn(text: string, entries: { id: string; names: string[] }[]): Map<
 
 const WORK_ROLES = new RegExp(`^(manager|boss|colleague|collaborator|${TITLES})$`, "iu");
 
+// Non-working family/household relations: a person stored with one of these can never
+// be the subject of a works_at edge. Family narratives co-mention a child + an org + a
+// work cue ("school", "therapy", "violin class") in one paragraph, and the paragraph-scope
+// / page-dominant-org inference would otherwise mint phantom edges like
+// "Mia works_at Hehuang Pharma". The guard lives at the DB-application stage (extractAndLink)
+// because only there do we know the person's STORED relation. See DECISIONS.md 2026-06-16.
+const NON_WORKING_RELATIONS = new Set([
+  "son",
+  "daughter",
+  "child",
+  "wife",
+  "husband",
+  "spouse",
+  "partner",
+  "mother",
+  "father",
+  "mom",
+  "dad",
+  "parent",
+  "brother",
+  "sister",
+  "sibling",
+  "grandmother",
+  "grandfather",
+  "grandparent",
+  "grandson",
+  "granddaughter",
+  "domestic_helper",
+  "nanny",
+  "babysitter",
+]);
+
+function isNonWorkingRelation(relation: string | null | undefined): boolean {
+  if (!relation) return false;
+  return NON_WORKING_RELATIONS.has(relation.trim().toLowerCase());
+}
+
 export function extractFacts(
   text: string,
   lexicon: { people: { id: string; names: string[] }[]; orgs: { id: string; names: string[] }[] },
@@ -555,6 +593,14 @@ export async function extractAndLink(
     const personId = personIds.get(w.person.toLowerCase()) ?? (await resolvePerson(w.person))?.id;
     const orgId = orgIds.get(w.org.toLowerCase()) ?? (await resolveOrg(w.org))?.id;
     if (!personId || !orgId) continue;
+    // Family/household relations can't "work at" an org. A child co-mentioned with a
+    // school/clinic + work cue used to get a phantom works_at edge from paragraph-scope
+    // / page-dominant inference; refuse it here where the stored relation is known.
+    const personRow = await personById(personId);
+    if (isNonWorkingRelation(personRow?.relation)) {
+      console.error(`extract:skip-works-at non-working relation=${personRow?.relation} person=${w.person} org=${w.org}`);
+      continue;
+    }
     if (await edgeExists("person", personId, "works_at", "org", orgId)) continue;
     await insertEdge({
       srcType: "person",

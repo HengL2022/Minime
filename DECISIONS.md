@@ -886,3 +886,31 @@ biome clean.
 
 **Approved by:** human (owner, 2026-06-16 — "implement the split-mixed-captures classifier fix"
 thread → approved retype + screen build, then "a" to apply both live fixes).
+
+## 2026-06-16 — Family-relation people never get works_at edges (+ live cleanup of 59)
+
+- **Context:** Verifying the recovered family graph through the MCP read path, `minime_get_context`
+  for Mia (daughter) / Max (son) returned bogus `works_at` edges — e.g. *Mia works_at Hehuang
+  Pharma*, *Max works_at Huashan Hospital*, *Liz works_at CAR-T*. Root cause: the zero-LLM edge
+  extractor's paragraph-scope (0.7) and page-dominant-org (0.6) inference pairs any person with an
+  org when a work cue ("school", "clinic", "violin class") co-occurs in the same paragraph. Family
+  narratives constantly do this, so children/spouse/helper got phantom employment. 59 such edges
+  existed live (Liz 19, Max 19, Mia 14, Pinky 7): 113-origin from the Mac dump + new ones minted by
+  today's re-index backfill. Not merge damage — pre-existing extractor noise, FK-clean.
+- **Decision:**
+  1. **Guard (code):** `extractAndLink` now refuses to insert a `works_at` edge when the resolved
+     person's STORED relation is a non-working family/household relation (son, daughter, child,
+     wife, husband, spouse, partner, mother, father, parent, sibling set, grandparent set,
+     domestic_helper, nanny, babysitter). The guard lives at the DB-application stage — not in the
+     pure `extractFacts` rules — because only there is the stored relation known. Logs
+     `extract:skip-works-at`. New repo helper `personById(id)` (NOT tier-gated: system extractor
+     reads only id/canonical_name/relation, never tier-2 free text; not exposed via MCP).
+  2. **Cleanup (live data):** deleted the 59 existing family `works_at` edges via the sanctioned
+     engineering path (graph-plumbing repair, not life-DB content), after a CSV backup to
+     /tmp/minime-edge-cleanup/. Verified 0 remain and Mia/Max read clean through `minime_get_context`.
+- **TDD:** RED→GREEN in test/m7.graph.test.ts ("family-relation people never get a works_at edge"):
+  a daughter co-mentioned with orgs + work cue gets zero works_at but keeps her mentions edge.
+  Full suite 208 pass / 1 skip / 1 fail; the single fail (m8.agenda future-dated task) is
+  PRE-EXISTING (fails identically on clean HEAD b19746e) and unrelated to this change.
+- **Approved by:** human (owner, 2026-06-16 — "Do 1 and 2": clean existing bogus edges + patch
+  the extractor).
