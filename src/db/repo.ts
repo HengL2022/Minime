@@ -350,6 +350,7 @@ export async function resolveOrg(name: string): Promise<any | null> {
     left join org_aliases a on a.org_id = o.id
     where (lower(o.canonical_name) = lower(${name}) or lower(a.alias) = lower(${name}))
       and o.tier <= ${allowed}
+      and o.retired_at is null
     limit 1`;
   return rows[0] ?? null;
 }
@@ -390,7 +391,133 @@ export async function allOrgsWithAliases(): Promise<{ id: string; names: string[
   return rows.map((r: any) => ({ id: r.id, names: r.names }));
 }
 
-// ---------------------------------------------------------------- writes (rows)
+// ---------------------------------------------------------------- entity retype / supersede
+//
+// Sanctioned, reversible repair for a mis-typed entity: the relation extractor sometimes
+// mints an `org` row for what is really a person (e.g. a boss first seen only inside a task
+// title — "Hai Yan"). There is no classifier path that retypes an existing wrong row, so
+// this is the one authorized place that converts org → person. It:
+//   1. reuses an existing person of the same name, else creates one (carrying org aliases),
+//   2. repoints every edge that referenced the org (src or dst) to the person, dropping
+//      self-referential edges and de-duping any edge that now collides,
+//   3. retires (does NOT delete) the org row and records the supersession pointer on the
+//      person, so the change is auditable and reversible from the backup.
+export async function retypeOrgToPerson(
+  orgId: string,
+  opts: { relation?: string | null; reason?: string } = {},
+): Promise<{ personId: string; orgId: string; created: boolean; edgesRepointed: number }> {
+  const [org] = await sql`select id, canonical_name from orgs where id = ${orgId}`;
+  if (!org) throw new Error(`org not found: ${orgId}`);
+  const name = org.canonical_name as string;
+
+  return sql.begin(async (tx) => {
+    // 1. resolve-or-create the person (no tier predicate here — admin repair path)
+    const [existingPerson] = await tx`
+      select p.id from people p
+      left join person_aliases a on a.person_id = p.id
+      where lower(p.canonical_name) = lower(${name}) or lower(a.alias) = lower(${name})
+      limit 1`;
+    let personId: string;
+    let created = false;
+    if (existingPerson) {
+      personId = existingPerson.id as string;
+    } else {
+      const [row] = await tx`
+        insert into people (canonical_name, created_by, source, supersedes_id)
+        values (${name}, 'agent:retype', 'retype', ${orgId}) returning id`;
+      personId = row!.id as string;
+      created = true;
+    }
+    if (opts.relation) {
+      await tx`update people set relation = coalesce(relation, ${opts.relation}) where id = ${personId}`;
+    }
+    if (!created) {
+      await tx`update people set supersedes_id = coalesce(supersedes_id, ${orgId}) where id = ${personId}`;
+    }
+
+    // 2. carry over the org's aliases (canonical + alias rows) to the person
+    await tx`insert into person_aliases (person_id, alias)
+             values (${personId}, ${name}) on conflict do nothing`;
+    await tx`insert into person_aliases (person_id, alias)
+             select ${personId}, a.alias from org_aliases a where a.org_id = ${orgId}
+             on conflict do nothing`;
+
+    // 3. repoint edges org→person on both sides
+    await tx`update edges set src_type = 'person', src_id = ${personId}
+             where src_type = 'org' and src_id = ${orgId}`;
+    await tx`update edges set dst_type = 'person', dst_id = ${personId}
+             where dst_type = 'org' and dst_id = ${orgId}`;
+    // drop self-referential edges created by the repoint (e.g. "X works_at X")
+    await tx`delete from edges where src_id = ${personId} and dst_id = ${personId}
+             and src_type = 'person' and dst_type = 'person'`;
+    // de-dupe edges that now collide (keep the oldest by created_at, then id)
+    await tx`
+      delete from edges e using edges k
+      where e.src_type = k.src_type and e.src_id = k.src_id and e.rel = k.rel
+        and e.dst_type = k.dst_type and e.dst_id = k.dst_id
+        and (e.created_at, e.id) > (k.created_at, k.id)
+        and (e.src_id = ${personId} or e.dst_id = ${personId})`;
+    const cntRows = await tx`
+      select count(*)::int n from edges where src_id = ${personId} or dst_id = ${personId}`;
+    const edgesRepointed = ((cntRows[0] as any)?.n ?? 0) as number;
+
+    // 4. retire (keep) the org row — never hard-delete
+    await tx`update orgs set retired_at = now(), retired_reason = ${opts.reason ?? "retyped to person"}
+             where id = ${orgId}`;
+
+    return { personId, orgId, created, edgesRepointed: edgesRepointed as number };
+  });
+}
+
+// Read-only DB-wide screen for the mis-typed-entity class. Flags (never auto-fixes):
+//   - org_should_be_person: an extractor-minted org whose name has no org cue and is
+//     referenced by a person-relation context (a 2-token capitalized personal name).
+//   - person_from_pronoun: a person row whose name is a bare pronoun (She/He/They/...).
+// Conservative by design: only `system:extract` rows are candidates, never human-confirmed.
+export async function detectMistypedEntities(): Promise<
+  {
+    kind: "org_should_be_person" | "person_from_pronoun";
+    type: "org" | "person";
+    id: string;
+    name: string;
+    edges: number;
+  }[]
+> {
+  const PRONOUNS = ["he", "she", "they", "him", "her", "them", "it", "we", "you", "i"];
+  // orgs that look like a personal name: 2–3 capitalized tokens ("First Last"), no corp/
+  // place suffix, extractor-minted and not retired. Single-token names are deliberately
+  // excluded — they are ambiguous brand-vs-surname (e.g. "Vazyme", "Fapon") and produce
+  // false positives on a review screen.
+  const orgs = await sql`
+    select o.id, o.canonical_name as name,
+           (select count(*)::int from edges e where e.src_id = o.id or e.dst_id = o.id) as edges
+    from orgs o
+    where o.created_by = 'system:extract' and o.retired_at is null
+      and o.canonical_name ~ '^[[:upper:]][[:alpha:]]+( [[:upper:]][[:alpha:]]+){1,2}$'
+      and o.canonical_name !~* '(inc|ltd|llc|corp|gmbh|company|university|institute|hospital|clinic|school|lab|biotech|tech|health|pharma|group|center|centre|systems|solutions|holdings|astar)'`;
+  const people = await sql`
+    select p.id, p.canonical_name as name,
+           (select count(*)::int from edges e where e.src_id = p.id or e.dst_id = p.id) as edges
+    from people p
+    where p.created_by = 'system:extract'
+      and lower(p.canonical_name) = any(${PRONOUNS})`;
+  return [
+    ...orgs.map((r: any) => ({
+      kind: "org_should_be_person" as const,
+      type: "org" as const,
+      id: r.id,
+      name: r.name,
+      edges: r.edges,
+    })),
+    ...people.map((r: any) => ({
+      kind: "person_from_pronoun" as const,
+      type: "person" as const,
+      id: r.id,
+      name: r.name,
+      edges: r.edges,
+    })),
+  ];
+}
 
 interface Std {
   createdBy?: string;

@@ -845,3 +845,44 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   code change here.
 - **Approved by:** human (owner, 2026-06-16 — "Yes do it, also need a mechanism so that when a
   message is shown labeled as complete, it is consistently marked as complete in the database").
+
+## 2026-06-16 — Sanctioned entity retype/supersede (org→person) + DB-wide mistype screen
+
+**Context:** The relation extractor mints an `org` row for entities that are really people
+when the name is first seen only inside a task title (e.g. "Hai Yan", the owner's boss).
+No classifier path retypes an existing wrong row, so this mistake class blocked work three
+times (Hai Yan; Liz dedup; today's org failure mode). `minime_capture` can only write
+notes/pages — it cannot retype/retire/merge an existing entity. A code-level fix was required.
+
+**Decision:**
+- Added `retypeOrgToPerson(orgId, {relation?, reason?})` in `src/db/repo.ts` — the one
+  authorized place that converts org→person. It resolves-or-creates the person (carrying the
+  org's aliases), repoints every edge (src+dst) to the person, drops self-referential edges,
+  de-dupes edges that collide after repoint (keep oldest), and **retires the org row**
+  (`retired_at`/`retired_reason`, `supersedes_id` pointer on the person) — never a hard delete,
+  so the action is auditable and reversible from a backup.
+- Migration `012_org_retire.sql` adds `retired_at`/`retired_reason` to `orgs`; `resolveOrg`
+  now ignores retired rows.
+- Added `detectMistypedEntities()` — a **read-only** DB-wide screen for the class
+  (`org_should_be_person`, `person_from_pronoun`). Conservative: only `system:extract` rows
+  are candidates (never human-confirmed), and org-name matching requires a **2–3-token
+  "First Last"** shape so single-token biotech brands ("Vazyme", "Fapon") are not false
+  positives. (The initial 1–3-token rule flagged Vazyme on the live screen; tightened + added
+  a regression test.)
+
+**TDD:** `test/m11.entity-retype.test.ts` — 9 tests (retype convert/repoint+dedup/merge-into-
+existing/reversible-retire/unknown-id; screen flags org_should_be_person + person_from_pronoun,
+ignores human-confirmed and single-token extractor orgs). Full suite 208 pass / 0 fail; tsc +
+biome clean.
+
+**Live cleanup (owner-approved 2026-06-16, "a"):** Backed up affected rows to
+`~/.hermes/cron/output/minime-backups/retype_<ts>.sql`, then:
+- "Hai Yan" org → person (relation: boss), 2 edges repointed, org retired.
+- "She" — a phantom person minted from a bare pronoun, with a junk `She works_at Vazyme`
+  edge. Dropped its 3 edges + alias and removed the row (kept the real source page
+  "Iris / Lew Kah Xin" + the email interaction it mentioned). Hard-delete (no people.retired_at
+  column) justified: content-free pronoun row, fully covered by the backup.
+- Post-fix screen returns empty.
+
+**Approved by:** human (owner, 2026-06-16 — "implement the split-mixed-captures classifier fix"
+thread → approved retype + screen build, then "a" to apply both live fixes).
