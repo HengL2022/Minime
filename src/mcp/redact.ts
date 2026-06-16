@@ -16,7 +16,24 @@ function luhnValid(digits: string): boolean {
   return sum % 10 === 0;
 }
 
+// Canonical UUIDs are server-generated identifiers, never secrets — but a v4 UUID's 12-hex
+// node segment is all digits ~0.35% of the time, and digit runs spanning its dashes can be
+// Luhn-valid, so the account/card rules below would mangle the occasional id into
+// [REDACTED:*]. That corrupted decision_id/person_id and broke the one-door contract where
+// agents re-pass returned ids (intermittent CI flake, 2026-06-15). Mask UUIDs out, redact
+// the gaps, restore. No real card/IBAN/account number is UUID-shaped, so the guarantee holds.
+const UUID = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi;
+
 export function redactString(s: string): string {
+  // split() with a capturing group interleaves the UUID matches at odd indices; redact only
+  // the even-index gaps between them so ids pass through byte-identical.
+  return s
+    .split(UUID)
+    .map((part, i) => (i % 2 === 1 ? part : redactSecrets(part)))
+    .join("");
+}
+
+function redactSecrets(s: string): string {
   let out = s;
 
   // IBAN: 2 letters + 2 digits + 11-30 alphanumerics

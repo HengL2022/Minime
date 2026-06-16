@@ -29,7 +29,7 @@ jobs:
       DATABASE_URL: postgres://minime:minime@localhost:5432/minime
       MINIME_MOCK_OLLAMA: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - name: create test + eval scratch DBs

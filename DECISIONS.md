@@ -709,3 +709,37 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   offline-verifiable.
 - **Approved by:** human (owner, 2026-06-13 — "guidance that acts like an interview…
   when the user installs this software").
+
+## 2026-06-15 — Redaction carves out canonical UUIDs (§8 guarantee refinement)
+
+- **Context:** Spec §8 says outbound redaction scrubs card/IBAN/account numbers from *every
+  string leaving the server*. `redactDeep` applied the account rule (`\b\d{9,}\b`) and the
+  Luhn card rule to all envelope strings — including server-generated v4 UUIDs.
+- **Decision:** `redactString` now masks canonical UUIDs
+  (`[0-9a-f]{8}-…-[0-9a-f]{12}`) before applying the secret rules and restores them after, so
+  ids pass through byte-identical. Secret-scrubbing for real content is unchanged.
+- **Why:** A v4 UUID's 12-hex node segment is all digits ~0.35% of the time (measured: 70 /
+  20000 `gen_random_uuid()`), and digit runs spanning its dashes can be Luhn-valid — so the
+  rules intermittently rewrote a returned `decision_id`/`person_id` to `[REDACTED:*]`. That
+  broke the one-door contract (agents re-pass returned ids): the corrupted id failed the
+  receiving tool's zod `uuid` check (`-32602`) or a `where id = <uuid>` lookup. Surfaced as an
+  intermittent macOS CI red (run 27526011073) but is platform-independent. No real card/IBAN/
+  account number is UUID-shaped, so the §8 guarantee is preserved. Regression: `test/redact.test.ts`.
+- **Approved by:** agent-proposed (pending human review).
+
+## 2026-06-15 — Setup wizard shows the generated restic password once
+
+- **Context:** `scripts/setup-env.sh` generates the restic backup password into a 0600 file and
+  documents that secrets "are never echoed." It printed only the file *path*, never the value —
+  so the only copy of the key that decrypts the cloud repo lived on the machine being backed up.
+- **Decision:** On first creation (inside the `[ ! -f "$PASSF" ]` guard), the wizard now prints
+  the password value once in a "shown ONCE — write it down" banner and pauses for an Enter
+  acknowledgement. It is never reprinted on re-runs (the file already exists), and entered
+  secrets (provider keys, B2/S3 keys) are still never echoed.
+- **Why:** A restic repo is client-side encrypted; lose the password and the offsite backup is
+  cryptographically unrecoverable. Storing the key only next to the data it protects defeats the
+  3-2-1 backup it is part of. Surfacing it once lets the owner record it independently (password
+  manager / paper) at the moment it is created. The file stays 0600 and uncommitted; this is a
+  setup-time display only — runtime never echoes it. Regression: `test/setup-env.test.ts`.
+- **Approved by:** human (owner, 2026-06-15 — "show the Restic password once… so they can write
+  it down").

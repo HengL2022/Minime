@@ -17,7 +17,7 @@ jobs:
         os: [ubuntu-22.04, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Runners ship Docker; test BOTH paths: native (apt/PGDG) and docker.
       # Unprivileged on purpose: exercises the lazy `sudo -n` resolution path.
       - name: install (native PG16 via PGDG, no ollama)
@@ -32,7 +32,7 @@ jobs:
   linux-docker:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: install (docker pg16) + real embed-model pull
         # Pull only the small model (~270MB) — same code path as the 4.7GB one.
         run: |
@@ -42,15 +42,16 @@ jobs:
   macos:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # macOS runners have brew but no Docker daemon -> exercises the brew-native branch.
       - name: install (brew-native PG17, no ollama)
         run: |
           bash scripts/install.sh --no-ollama --with-demo | tee out.log
           grep -q '^status: degraded$' out.log
-      # The m8 CJK FTS tests fail ONLY on this runner (pass on Linux CI and dev macs);
-      # the summary log hides the assertion detail. Dump the cluster facts + the exact
-      # failing queries so the next failure is diagnosable from the log alone.
+      # Retained guard: macOS 14 once dropped Han chars from the ts parser (fixed by the
+      # 010 hex-lexeme migration). NOTE: not every macOS failure is CJK — the 2026-06-15 red
+      # here was the UUID-redaction flake (redact.ts), platform-independent. The summary log
+      # hides bun's assertion detail, so dump the cluster facts + CJK probe to rule it in/out.
       - name: diagnose CJK FTS (on failure)
         if: failure()
         run: |

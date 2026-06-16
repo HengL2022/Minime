@@ -2,7 +2,10 @@
 # Guided, interactive .env setup: LLM provider credentials and backup storage. The
 # complement to scripts/install.sh, which is non-interactive by contract (AGENTS.md) —
 # run this first (or never: the local-Ollama defaults need no credentials at all).
-# Secrets go into .env (chmod 600, never committed — spec §12) and are never echoed.
+# Entered secrets (provider keys, B2/S3 keys) go into .env (chmod 600, never committed —
+# spec §12) and are never echoed. The one exception is the generated restic backup password:
+# it is shown on screen exactly once, at creation, so the owner can record the key that
+# decrypts off-machine cloud backups (losing it makes the backup unrecoverable).
 # Safe to re-run: existing .env is backed up, answers default to current values.
 # macOS bash-3.2 clean.
 set -uo pipefail
@@ -133,6 +136,19 @@ if [ "$BACKUP" = configured ]; then
     chmod 600 "$PASSF"
     echo "created restic password file: $PASSF"
     echo "BACK THIS FILE UP somewhere safe — without it, backups are unrecoverable."
+    echo
+    echo "  ============================================================"
+    echo "  RESTIC BACKUP PASSWORD — shown ONCE. Write it down NOW."
+    echo "  ============================================================"
+    echo
+    echo "      $(cat "$PASSF")"
+    echo
+    echo "  This password decrypts your cloud backup. Lose BOTH it and"
+    echo "  this machine and the backup is unrecoverable by anyone —"
+    echo "  including you. Store it in a password manager or on paper,"
+    echo "  kept separate from this machine. (Also saved to: $PASSF)"
+    printf '\nPress Enter once you have written it down... '
+    read -r _
   fi
   set_kv RESTIC_PASSWORD_FILE "$PASSF"
   if command -v restic >/dev/null 2>&1; then

@@ -32,8 +32,8 @@ async function runWizard(dir: string, answers: string[]) {
 describe("setup-env wizard", () => {
   test("local defaults + local backup dir: writes private .env and password file", async () => {
     const dir = freshDir();
-    // TZ default, stack=local ollama, backup=local path, dir default
-    const { code, out } = await runWizard(dir, ["", "1", "1", ""]);
+    // TZ default, stack=local ollama, backup=local path, dir default, ack the password prompt
+    const { code, out } = await runWizard(dir, ["", "1", "1", "", ""]);
     expect(code).toBe(0);
 
     const env = await Bun.file(join(dir, ".env")).text();
@@ -43,8 +43,12 @@ describe("setup-env wizard", () => {
 
     const pass = join(dir, "home", ".config", "minime", "restic.pass");
     expect(statSync(pass).mode & 0o777).toBe(0o600);
-    expect((await Bun.file(pass).text()).trim().length).toBeGreaterThanOrEqual(40);
+    const passVal = (await Bun.file(pass).text()).trim();
+    expect(passVal.length).toBeGreaterThanOrEqual(40);
     expect(out).toContain("BACK THIS FILE UP");
+    // the generated password is surfaced once so the owner can record it (write-it-down banner)
+    expect(out).toContain("shown ONCE");
+    expect(out).toContain(passVal);
   });
 
   test("cloud providers: sets routing keys without echoing secrets", async () => {
@@ -70,6 +74,32 @@ describe("setup-env wizard", () => {
     expect(env).toContain('BACKUP_CRON=""'); // backups skipped → frequent snapshots off
     expect(out).not.toContain("sk-or-fictional"); // secrets never echoed
     expect(out).toContain("--no-ollama"); // next-step hint matches the cloud choice
+  });
+
+  test("B2 backup: shows the restic password but not the entered B2 key", async () => {
+    const dir = freshDir();
+    // TZ default, stack=local ollama, backup=B2(2), bucket, B2_ACCOUNT_ID, B2_ACCOUNT_KEY, ack
+    const { code, out } = await runWizard(dir, [
+      "",
+      "1",
+      "2",
+      "minime-backup",
+      "fictional-id",
+      "fictional-b2-key",
+      "",
+    ]);
+    expect(code).toBe(0);
+
+    const env = await Bun.file(join(dir, ".env")).text();
+    expect(env).toContain("RESTIC_REPOSITORY=b2:minime-backup:restic");
+    expect(env).toContain("B2_ACCOUNT_KEY=fictional-b2-key"); // stored in .env...
+    expect(out).not.toContain("fictional-b2-key"); // ...but never echoed to the terminal
+
+    // the generated restic password IS surfaced once, for any configured destination
+    const pass = join(dir, "home", ".config", "minime", "restic.pass");
+    const passVal = (await Bun.file(pass).text()).trim();
+    expect(out).toContain("shown ONCE");
+    expect(out).toContain(passVal);
   });
 
   test("re-run backs up the previous .env and keeps values as defaults", async () => {
