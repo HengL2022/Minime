@@ -914,3 +914,28 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   PRE-EXISTING (fails identically on clean HEAD b19746e) and unrelated to this change.
 - **Approved by:** human (owner, 2026-06-16 — "Do 1 and 2": clean existing bogus edges + patch
   the extractor).
+
+## 2026-06-16 — Fix UTC/local date drift in test seed (flaky m8.agenda)
+
+- **Context:** `m8.agenda` test "surfaces a FUTURE-dated task" failed after ~16:00 SGT (UTC+8):
+  asking the agenda for [tomorrow, tomorrow] returned the +2 task ("Send promotion case draft to
+  Jordan") instead of the +1 task ("Water change for the aquarium"). Time-of-day dependent, so it
+  passed in the morning and failed in the evening — a latent flake, NOT caused by the works_at fix
+  (fails identically on clean HEAD b19746e).
+- **Root cause:** TWO different calendars. `todayStr()` (used by the test and the agenda tool's
+  default window) is LOCAL-TZ. The seed fixture's `dateStr = d.toISOString().slice(0,10)` is UTC.
+  Seed due-dates are built from `now() + N*day` (a wall-clock instant carrying a time-of-day), then
+  sliced in UTC — so after 16:00 SGT the UTC date is a day behind the local date and every relative
+  due-date lands one day early. Test asks local "tomorrow", seed stored it as local "today".
+- **Decision:** Added `localDateStr(d)` to `src/util/clock.ts` as the single source of truth for
+  local-calendar YYYY-MM-DD; `todayStr()` now delegates to it. Switched the seed's `dateStr` to
+  `localDateStr`. Now seed due-dates and the agenda window share one calendar.
+- **Deliberately NOT changed:** `agenda.ts` line 38 bucketing (`due.toISOString().slice(0,10)`) and
+  `addDays` (pure UTC date-only arithmetic). Verified empirically: postgres.js parses a `date`
+  column as UTC-midnight, so `toISOString().slice(0,10)` returns the correct stored day there;
+  `addDays` has no local component. Touching those would REINTRODUCE drift in negative-offset
+  zones. The bug was only the seed mixing a wall-clock instant with a UTC slice.
+- **Verified:** full suite 209 pass / 1 skip / 0 fail, tsc clean; re-checked with a forced
+  23:30-UTC clock — "+1" stays a full local day ahead of todayStr() (old UTC slice collapsed it
+  onto today).
+- **Approved by:** human (owner, 2026-06-16 — "Look at that" → investigate + fix the failing test).

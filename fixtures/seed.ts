@@ -20,12 +20,14 @@ import {
 } from "../src/db/repo";
 import { entityLinkPass } from "../src/pipeline/dream";
 import { drainEmbedBacklog, indexParent } from "../src/search/index-parent";
-import { now } from "../src/util/clock";
+import { localDateStr, now } from "../src/util/clock";
 
 const day = 86_400_000;
 const daysAgo = (n: number) => new Date(now().getTime() - n * day);
 const daysAhead = (n: number) => new Date(now().getTime() + n * day);
-const dateStr = (d: Date) => d.toISOString().slice(0, 10);
+// Local-calendar day, matching todayStr()/the agenda window. Using UTC here
+// (toISOString) shifted every relative due-date a day off after 16:00 in UTC+8.
+const dateStr = (d: Date) => localDateStr(d);
 
 // deterministic PRNG so transaction/health values are stable run-to-run
 function mulberry32(seed: number) {
