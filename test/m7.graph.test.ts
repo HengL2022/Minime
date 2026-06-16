@@ -11,7 +11,7 @@ import {
   resolvePerson,
   upsertPage,
 } from "../src/db/repo";
-import { extractAndLink, extractFacts } from "../src/pipeline/extract-edges";
+import { extractAndLink, extractFacts, parseNonOrgTerms } from "../src/pipeline/extract-edges";
 import { indexParent } from "../src/search/index-parent";
 import { resetDb, testSql } from "./helpers";
 
@@ -92,6 +92,57 @@ describe("extractFacts (pure rules)", () => {
     const f = extractFacts("Dinner with Kjersti Lund after her Polarconsult offsite.", lex);
     expect(f.mentions).toContainEqual({ type: "person", id: "p1" });
     expect(f.mentions).toContainEqual({ type: "org", id: "o1" });
+  });
+});
+
+// Ingestion-time prevention of phantom "org" nodes minted from the ORG_PREP rule
+// (at/for/with + Capitalized word). The same-sentence person check let bare first names
+// ("Heng" vs stored "Heng Liu") and people known only elsewhere slip through; cities and
+// lab/assay jargon ("Wuhan", "CAR-T") have no person to anchor them at all.
+describe("extractFacts org-poisoning guard", () => {
+  const lex = (...names: string[]) => ({
+    people: names.map((n, i) => ({ id: `p${i}`, names: [n] })),
+    orgs: [],
+  });
+
+  test("a known person's bare first name is not minted as an org", () => {
+    const f = extractFacts("Spent the afternoon working with Heng on the assay.", lex("Heng Liu"));
+    expect(f.orgs).toEqual([]);
+    expect(f.worksAt).toEqual([]);
+  });
+
+  test("a known person named only elsewhere is still blocked", () => {
+    const f = extractFacts("Worked through the grant budget with Liz again.", lex("Liz Park"));
+    expect(f.orgs).toEqual([]);
+  });
+
+  test("possessive of a known person ('Max's') is stripped, then blocked", () => {
+    const f = extractFacts("Spent the morning working with Max's draft.", lex("Max Brenner"));
+    expect(f.orgs).toEqual([]);
+  });
+
+  test("a stoplisted city/jargon token is not an org even with a work cue", () => {
+    const f = extractFacts("I worked at Wuhan for two years.", EMPTY, new Set(["wuhan"]));
+    expect(f.orgs).toEqual([]);
+    expect(f.worksAt).toEqual([]);
+  });
+
+  test("stoplist is exact-match: a real org containing the word still extracts", () => {
+    const stop = new Set(["school"]);
+    expect(extractFacts("I left my bag at School yesterday.", EMPTY, stop).orgs).toEqual([]);
+    expect(extractFacts("She works at Goddard School now.", EMPTY, stop).orgs).toEqual([
+      "Goddard School",
+    ]);
+  });
+
+  test("a legitimate single-word org via 'at' + cue is still extracted (no over-blocking)", () => {
+    const f = extractFacts("I work at Equinor now.", EMPTY, new Set(["wuhan"]));
+    expect(f.orgs).toEqual(["Equinor"]);
+  });
+
+  test("parseNonOrgTerms: comments and blank lines ignored, case-folded", () => {
+    const s = parseNonOrgTerms("# header\nWuhan\n\n  CAR-T  \npcr\n");
+    expect([...s].sort()).toEqual(["car-t", "pcr", "wuhan"]);
   });
 });
 

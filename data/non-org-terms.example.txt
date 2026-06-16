@@ -1,0 +1,20 @@
+# Non-org stoplist (template). Copy this file to `non-org-terms.txt` in the same directory
+# ($MINIME_DATA_DIR/, default <repo>/data) and add your own terms. The live file is
+# gitignored, so your domain terms never enter the repo.
+#
+# What this is for: capitalized words your notes use that LOOK like organizations but are
+# not — cities, generic nouns, lab/assay/therapy jargon. The deterministic extractor mints
+# an org from "at/for/with + Capitalized word"; terms listed here are never minted as orgs.
+#
+# Rules:
+#   - one term per line; blank lines and lines starting with '#' are ignored
+#   - matched case-insensitively and EXACT against the whole candidate phrase, so a listed
+#     word still extracts inside a longer real org name:
+#       "school" blocks a bare "School" but NOT "Goddard School"
+#   - you do NOT list people here — the person-name guard already blocks names (and bare
+#     first names) of everyone in your people lexicon, owner included.
+#
+# Examples (replace with your own):
+# springfield
+# downtown
+# atlas

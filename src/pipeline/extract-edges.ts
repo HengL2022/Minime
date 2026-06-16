@@ -6,6 +6,8 @@
 // a nightly backlog pass (dream step 2). Confidence: 0.85 same sentence, 0.7 same
 // paragraph, 0.6 page-dominant org.
 
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   type EntityRef,
   addAlias,
@@ -24,6 +26,7 @@ import {
   setPersonCanonicalName,
   setPersonRelationIfNull,
 } from "../db/repo";
+import { config } from "../util/config";
 
 const ACTOR = "system:extract";
 
@@ -184,21 +187,67 @@ function personsIn(sentence: string): DiscoveredPerson[] {
   return found;
 }
 
-function orgsIn(sentence: string, personNames: string[]): string[] {
+// Non-org stoplist. Capitalized words a person's notes use that look like orgs but aren't —
+// cities, generic nouns, lab/assay/therapy jargon ("Wuhan", "CAR-T") — carry no structural
+// signal separating them from real single-word orgs ("Equinor"), so they live in a local,
+// gitignored file ($MINIME_DATA_DIR/non-org-terms.txt), never committed (owner-domain data,
+// spec §5). Matched case-folded and EXACT, so a multi-word org that merely contains a listed
+// word ("Goddard School") still extracts. Pure; unit-tested.
+export function parseNonOrgTerms(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    out.add(line.toLowerCase());
+  }
+  return out;
+}
+
+// Missing/unreadable file = empty set (filter simply inactive); never blocks extraction.
+// Memoized — the extractor runs on every write plus the nightly backlog pass.
+const EMPTY_TERMS: ReadonlySet<string> = new Set();
+let nonOrgTermsCache: Set<string> | null = null;
+function loadNonOrgTerms(): Set<string> {
+  if (nonOrgTermsCache) return nonOrgTermsCache;
+  try {
+    const path = join(config.dataDir, "non-org-terms.txt");
+    nonOrgTermsCache = existsSync(path) ? parseNonOrgTerms(readFileSync(path, "utf8")) : new Set();
+  } catch {
+    nonOrgTermsCache = new Set();
+  }
+  return nonOrgTermsCache;
+}
+
+function orgsIn(
+  sentence: string,
+  personNames: string[],
+  knownPersonNames: string[],
+  nonOrgTerms: ReadonlySet<string>,
+): string[] {
+  // An org candidate that IS a person — the owner included, since they are in the people
+  // lexicon — is a phantom. Block by full name AND bare first token ("Heng Liu" → also
+  // "heng"): a bare first name is exactly what slips past the same-sentence person check.
+  const blocked = new Set(
+    [...personNames, ...knownPersonNames].flatMap((n) => {
+      const lower = n.toLowerCase();
+      return [lower, lower.split(/\s+/)[0]!];
+    }),
+  );
   const cued = WORK_CUE.test(sentence);
   const out: string[] = [];
   const consider = (phrase: string, ok: boolean) => {
-    // "NTNU's Department of Marine Technology" → the possessor is the org
     const p = phrase
-      .replace(/['’]s\s.*$/u, "")
-      .replace(/[,.;:]+$/u, "")
+      .replace(/['’]s\s.*$/u, "") // "NTNU's Department of Marine Technology" → "NTNU"
+      .replace(/[,.;:]+$/u, "") // trailing punctuation first, so "Max's." reduces cleanly
+      .replace(/['’]s$/u, "") // "Max's" → "Max", then caught by the person guard
       .trim();
     if (p.length < 3 || !ok) return;
     if (!/\p{Lu}/u.test(p)) return; // "11-week" and other digit-led phrases are not orgs
     const lower = p.toLowerCase();
     if (NAME_STOP.has(lower)) return;
-    if (personNames.some((n) => n.toLowerCase() === lower || lower.includes(n.toLowerCase())))
-      return;
+    if (nonOrgTerms.has(lower)) return; // city / generic noun / lab-or-assay concept
+    if (blocked.has(lower)) return; // candidate IS a known person (or their first name)
+    if (personNames.some((n) => lower.includes(n.toLowerCase()))) return; // org built around a name
     if (!out.some((o) => o.toLowerCase() === lower)) out.push(p);
   };
   for (const m of sentence.matchAll(ORG_PREP)) consider(m[1]!, cued || hasOrgSuffix(m[1]!));
@@ -232,11 +281,15 @@ const WORK_ROLES = new RegExp(`^(manager|boss|colleague|collaborator|${TITLES})$
 export function extractFacts(
   text: string,
   lexicon: { people: { id: string; names: string[] }[]; orgs: { id: string; names: string[] }[] },
+  nonOrgTerms: ReadonlySet<string> = EMPTY_TERMS,
 ): Facts {
   const paras = paragraphsOf(text);
   const whole = paras.join("\n");
   const knownPeople = knownIn(whole, lexicon.people);
   const knownOrgs = knownIn(whole, lexicon.orgs);
+  // Every known person's name (canonical + aliases) guards org extraction in every sentence,
+  // not just people named in the same sentence — that is the gap that minted phantom orgs.
+  const knownPersonNames = lexicon.people.flatMap((e) => e.names);
 
   const people: DiscoveredPerson[] = [];
   const worksAt: WorksAt[] = [];
@@ -282,6 +335,8 @@ export function extractFacts(
       const sentOrgs = orgsIn(
         sentence,
         persons.map((p) => p.name),
+        knownPersonNames,
+        nonOrgTerms,
       );
       for (const [id] of knownIn(sentence, lexicon.orgs)) {
         const canonical = lexicon.orgs.find((e) => e.id === id)!.names[0]!;
@@ -402,7 +457,7 @@ export async function extractAndLink(
   text: string,
 ): Promise<ExtractStats> {
   const lexicon = { people: await allPeopleWithAliases(), orgs: await allOrgsWithAliases() };
-  const facts = extractFacts(text, lexicon);
+  const facts = extractFacts(text, lexicon, loadNonOrgTerms());
   const stats: ExtractStats = { edges: 0, people: 0, orgs: 0 };
   const srcTable = parentTable(parentType).table;
 

@@ -743,3 +743,29 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   setup-time display only — runtime never echoes it. Regression: `test/setup-env.test.ts`.
 - **Approved by:** human (owner, 2026-06-15 — "show the Restic password once… so they can write
   it down").
+
+## 2026-06-16 — Extractor: ingestion-time guard against phantom "org" nodes
+
+- **Context:** The zero-LLM edge extractor's `ORG_PREP` rule mints an org from "at/for/with +
+  Capitalized word". Its person guard only excluded people named in the *same sentence*, so bare
+  first names (a note's "Heng" vs. the stored "Heng Liu"), people known only elsewhere, and
+  non-person capitalized words (cities, lab/assay jargon) became phantom orgs — one node had
+  accreted 206 spurious edges.
+- **Decision:** `orgsIn` now blocks any org candidate that (a) matches a known person by full
+  name *or bare first token* over the entire people lexicon — owner included, since the owner is
+  a people row, so no separate owner list is maintained; (b) is a trailing possessive once
+  stripped ("Max's" → "Max"); or (c) appears in a non-org stoplist. The stoplist is owner-domain
+  data (cities, lab/therapy concepts) with no structural signal separating it from real
+  single-word orgs ("Equinor"), so it lives in a **local, gitignored** file
+  `$MINIME_DATA_DIR/non-org-terms.txt` (a committed `.example.txt` documents the format),
+  matched case-folded and EXACT so a real org containing a listed word ("Goddard School") still
+  extracts. Missing file = empty set (filter inert), so the extractor never depends on it.
+- **Why:** Prevention at ingestion beats periodic cleanup. The person-name guard is
+  self-maintaining (grows with the lexicon); keeping the owner's bio terms out of committed
+  source honors I1/local-first and spec §5 (owner data is not in this repo). Bare-first-token
+  blocking can rarely shadow a real org that shares a contact's first name as a *single bare*
+  word; the multi-word/suffixed form still extracts, and the alternative (graph poisoning) is
+  worse. Regression: `test/m7.graph.test.ts` ("extractFacts org-poisoning guard", 7 tests,
+  written failing-first). Full suite 172 pass / 0 fail; `tsc` clean; biome clean.
+- **Approved by:** human (owner, 2026-06-16 — "implement it for real"; stoplist location chosen
+  via "Local gitignored file").
