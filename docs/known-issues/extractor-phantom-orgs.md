@@ -83,3 +83,26 @@ capture** until the code is fixed.
   maintenance pass), not left dangling.
 - Periodic audit: flag any `org` with `created_by='system:extract'` that has an unusually
   high edge count and no human confirmation — that pattern is what hid this for so long.
+
+## STATUS — Fix A shipped (2026-06-16, commit `6fa21f0`)
+
+Ingestion-time prevention landed in `src/pipeline/extract-edges.ts` (`orgsIn`):
+
+- **Person-name guard (covers blocklist items 1 & 2).** `orgsIn` now receives the full
+  lexicon of known people. Any org candidate that case-folds to a known person's name —
+  or their bare first token (`"Heng Liu"` → `heng`) — is rejected. This catches the
+  owner *and* every other person (Max, Liz) without a separate owner list.
+- **Possessive stripped** (`Max's` → `Max`) before the guard, so possessives collapse to
+  the person and never become an org.
+- **`NON_ORG_TERMS` stoplist** (item 3's cousin): cities, generic nouns, and lab/therapy
+  concepts (Wuhan, School, CAR-T, CRISPR, FACS…). Exact case-folded match only, so real
+  multi-word orgs that *contain* a generic word (`Goddard School`) still extract.
+
+TDD: 6 new tests in `test/m7.graph.test.ts` (RED→GREEN). Full suite 163 pass / 0 fail;
+`tsc` clean. Verified end-to-end against the live DB lexicon (31 people / 15 orgs): the
+poisoned sentence that previously minted 5 phantom orgs now yields **zero** orgs and edges.
+
+**Still open (not in Fix A):** org dedup-on-write fuzzy match (item 3, `Gentron`≈`Genetron`)
+and the low-confidence→review-queue path (item 4) — candidates for Fix B (dream-step safety
+net). Weekly Hermes watchdog (`minime_phantom_org_audit.sh`, job `e7ca6d9e6a5e`) remains as
+the third belt-and-suspenders layer.
