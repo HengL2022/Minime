@@ -1,0 +1,24 @@
+# Known-orgs allow-list (template). Copy this file to `known-orgs.txt` in the same
+# directory ($MINIME_DATA_DIR/, default <repo>/data) and add your own names. The live
+# file is gitignored, so your domain names never enter the repo.
+#
+# What this is for: names that are genuinely ORGANIZATIONS but happen to look exactly like
+# a personal name ("First Last"), so the mistyped-entity review screen
+# (detectMistypedEntities) would otherwise flag them as "org that should be a person".
+#
+# This list is ONLY needed for the irreducible cases the automatic signal can't catch:
+# the screen already excludes any org that >= 2 distinct people work_at (a real multi-
+# person workplace). A single-employee institution like "Johns Hopkins", though, is
+# structurally identical to a genuinely mistyped person ("Bert Vogelstein") — only a
+# human knows which is which. List the orgs here so they stop surfacing on the screen.
+#
+# Rules:
+#   - one name per line; blank lines and lines starting with '#' are ignored
+#   - matched case-insensitively and EXACT against the org's canonical name
+#       "johns hopkins" silences a flag on "Johns Hopkins" but not "Johns Hopkins Lab"
+#   - this does NOT create or modify any entity — it only suppresses the review flag
+#
+# Examples (replace with your own):
+# johns hopkins
+# morgan stanley
+# goldman sachs

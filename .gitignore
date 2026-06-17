@@ -8,6 +8,8 @@ data/*
 !data/**/.gitkeep
 # stoplist template is committed docs; the live non-org-terms.txt stays local (owner-domain)
 !data/non-org-terms.example.txt
+# known-orgs allow-list template is committed docs; live known-orgs.txt stays local
+!data/known-orgs.example.txt
 
 # runtime
 node_modules/

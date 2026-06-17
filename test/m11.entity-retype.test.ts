@@ -16,6 +16,7 @@ import {
   detectMistypedEntities,
   ensureOrg,
   ensurePerson,
+  parseKnownOrgs,
   resolveOrg,
   resolvePerson,
   retypeOrgToPerson,
@@ -148,5 +149,40 @@ describe("detectMistypedEntities (read-only screen)", () => {
     await ensureOrg("Fapon", "system:extract");
     const flags = await detectMistypedEntities();
     expect(flags.find((f) => f.name === "Fapon")).toBeUndefined();
+  });
+
+  test("does NOT flag a person-looking org that >= 2 distinct people work_at (workplace signal)", async () => {
+    // "Kiddie Winkie" looks like "First Last" but is a real multi-person workplace.
+    // An org that is the works_at destination of 2+ distinct people is never a person,
+    // so the screen excludes it automatically — no curation needed.
+    const { id: orgId } = await ensureOrg("Kiddie Winkie", "system:extract");
+    const { id: p1 } = await ensurePerson("Mia Liu", "system:extract");
+    const { id: p2 } = await ensurePerson("Noa Tan", "system:extract");
+    for (const pid of [p1, p2]) {
+      await sql`insert into edges (src_type,src_id,rel,dst_type,dst_id,extracted_by)
+        values ('person',${pid},'works_at','org',${orgId},'system:extract')`;
+    }
+    const flags = await detectMistypedEntities();
+    expect(flags.find((f) => f.id === orgId)).toBeUndefined();
+  });
+
+  test("STILL flags a person-looking org that only ONE person works_at (no over-suppression)", async () => {
+    // The workplace signal needs >= 2 distinct people; a single employee is structurally
+    // identical to a genuinely mistyped person ("Bert Vogelstein"), so it must still surface.
+    const { id: orgId } = await ensureOrg("Bert Vogelstein", "system:extract");
+    const { id: pid } = await ensurePerson("Heng Liu", "system:extract");
+    await sql`insert into edges (src_type,src_id,rel,dst_type,dst_id,extracted_by)
+      values ('person',${pid},'works_at','org',${orgId},'system:extract')`;
+    const flags = await detectMistypedEntities();
+    expect(flags.find((f) => f.id === orgId)?.kind).toBe("org_should_be_person");
+  });
+
+  test("parseKnownOrgs: comments/blanks ignored, case-folded exact names (allow-list)", () => {
+    // The irreducible semantic case — a single-employee institution ("Johns Hopkins") that
+    // IS an org but looks like a person — is silenced by the owner's known-orgs.txt allow-list.
+    const set = parseKnownOrgs("# header\n\nJohns Hopkins\n  Morgan Stanley  \n# trailing comment\n");
+    expect([...set].sort()).toEqual(["johns hopkins", "morgan stanley"]);
+    expect(set.has("johns hopkins")).toBe(true);
+    expect(set.has("Johns Hopkins".toLowerCase())).toBe(true);
   });
 });

@@ -3,6 +3,8 @@
 // content-read functions at all — they are reachable only via metric_agg() (I3).
 // Everything is parameterized; string-interpolated SQL is a review-blocker.
 
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { cjkFold, isCjkStopToken } from "../util/cjk";
 import { localDateStr, now } from "../util/clock";
 import { config } from "../util/config";
@@ -486,6 +488,17 @@ export async function retypeOrgToPerson(
 //     referenced by a person-relation context (a 2-token capitalized personal name).
 //   - person_from_pronoun: a person row whose name is a bare pronoun (She/He/They/...).
 // Conservative by design: only `system:extract` rows are candidates, never human-confirmed.
+//
+// Two false-positive filters keep real orgs that merely LOOK like a personal name
+// ("Kiddie Winkie", "Johns Hopkins") off the screen:
+//   1. workplace signal (automatic): an org that is the `works_at` destination of >= 2
+//      DISTINCT people is a real multi-person workplace — a person is never that. This
+//      excludes "Kiddie Winkie" (3 employees) with zero curation.
+//   2. owner allow-list (curated): names listed in $MINIME_DATA_DIR/known-orgs.txt are
+//      never flagged. For the irreducible semantic cases — a single-employee institution
+//      like "Johns Hopkins" is structurally identical to a mistyped person ("Bert
+//      Vogelstein"), so only a human can disambiguate. Mirrors the non-org-terms.txt
+//      convention used by the extractor. Matched case-folded and EXACT.
 export async function detectMistypedEntities(): Promise<
   {
     kind: "org_should_be_person" | "person_from_pronoun";
@@ -496,17 +509,25 @@ export async function detectMistypedEntities(): Promise<
   }[]
 > {
   const PRONOUNS = ["he", "she", "they", "him", "her", "them", "it", "we", "you", "i"];
+  const knownOrgs = loadKnownOrgs(); // owner allow-list, case-folded exact names
   // orgs that look like a personal name: 2–3 capitalized tokens ("First Last"), no corp/
   // place suffix, extractor-minted and not retired. Single-token names are deliberately
   // excluded — they are ambiguous brand-vs-surname (e.g. "Vazyme", "Fapon") and produce
-  // false positives on a review screen.
+  // false positives on a review screen. The `>= 2 distinct works_at people` workplace
+  // signal is applied below in JS (per-org distinct count) so the rule stays readable.
   const orgs = await sql`
     select o.id, o.canonical_name as name,
-           (select count(*)::int from edges e where e.src_id = o.id or e.dst_id = o.id) as edges
+           (select count(*)::int from edges e where e.src_id = o.id or e.dst_id = o.id) as edges,
+           (select count(distinct e.src_id)::int from edges e
+              where e.dst_id = o.id and e.dst_type = 'org'
+                and e.rel = 'works_at' and e.src_type = 'person') as employees
     from orgs o
     where o.created_by = 'system:extract' and o.retired_at is null
       and o.canonical_name ~ '^[[:upper:]][[:alpha:]]+( [[:upper:]][[:alpha:]]+){1,2}$'
       and o.canonical_name !~* '(inc|ltd|llc|corp|gmbh|company|university|institute|hospital|clinic|school|lab|biotech|tech|health|pharma|group|center|centre|systems|solutions|holdings|astar)'`;
+  const flaggedOrgs = orgs.filter(
+    (r: any) => r.employees < 2 && !knownOrgs.has(String(r.name).toLowerCase()),
+  );
   const people = await sql`
     select p.id, p.canonical_name as name,
            (select count(*)::int from edges e where e.src_id = p.id or e.dst_id = p.id) as edges
@@ -514,7 +535,7 @@ export async function detectMistypedEntities(): Promise<
     where p.created_by = 'system:extract'
       and lower(p.canonical_name) = any(${PRONOUNS})`;
   return [
-    ...orgs.map((r: any) => ({
+    ...flaggedOrgs.map((r: any) => ({
       kind: "org_should_be_person" as const,
       type: "org" as const,
       id: r.id,
@@ -529,6 +550,31 @@ export async function detectMistypedEntities(): Promise<
       edges: r.edges,
     })),
   ];
+}
+
+// Owner-editable allow-list of names that are genuinely orgs even though they look like a
+// personal name ("Johns Hopkins", "Morgan Stanley"). Loaded from
+// $MINIME_DATA_DIR/known-orgs.txt; missing/unreadable file = empty set (filter inactive).
+// Case-folded, EXACT match, '#' comments and blank lines ignored. Memoized.
+let knownOrgsCache: Set<string> | null = null;
+export function parseKnownOrgs(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    out.add(line.toLowerCase());
+  }
+  return out;
+}
+function loadKnownOrgs(): Set<string> {
+  if (knownOrgsCache) return knownOrgsCache;
+  try {
+    const path = join(config.dataDir, "known-orgs.txt");
+    knownOrgsCache = existsSync(path) ? parseKnownOrgs(readFileSync(path, "utf8")) : new Set();
+  } catch {
+    knownOrgsCache = new Set();
+  }
+  return knownOrgsCache;
 }
 
 interface Std {
