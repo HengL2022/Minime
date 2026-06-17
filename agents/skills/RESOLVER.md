@@ -20,6 +20,7 @@ inference as memory.
 | morning, "what's today look like" | `morning-brief.md` |
 | evening, "let's do the review", end-of-day reflection | `evening-review.md` |
 | "should I…", "help me decide", "what do I know that bears on this choice" | `decision-brief.md` |
+| "log this decision", "record this decision", "backfill decisions", "decision interview" | `decision-interview.md` |
 
 ## Tool cheat-sheet (full schemas come from the MCP server)
 

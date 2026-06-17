@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "corpus": "decisions-en",
+  "area": "decision-digest",
+  "note": "Provisional area: situation-shaped queries should retrieve the HyDE decision digest above raw decision rows.",
+  "entries": [
+    {
+      "id": "dd-1",
+      "query": "uncertain vendor support quality before annual billing commitment",
+      "bucket": "vendor-risk",
+      "relevant": ["When facing Use a short vendor trial before committing to annual billing"]
+    },
+    {
+      "id": "dd-2",
+      "query": "try planning ritual with one team before broad rollout",
+      "bucket": "rollout-risk",
+      "relevant": [
+        "When facing Pilot the async planning ritual with one team before rolling it out"
+      ]
+    },
+    {
+      "id": "dd-3",
+      "query": "wait for research interviews before workshop agenda",
+      "bucket": "timing",
+      "relevant": ["When facing Delay the workshop until the research interviews are complete"]
+    }
+  ]
+}

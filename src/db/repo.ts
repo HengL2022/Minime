@@ -15,6 +15,7 @@ export type ParentType =
   | "journal"
   | "interaction"
   | "decision"
+  | "decision_branch"
   | "task"
   | "goal"
   | "value"
@@ -29,6 +30,7 @@ const PARENTS: Record<ParentType, { table: string; titleCol: string }> = {
   journal: { table: "journal_entries", titleCol: "entry_md" },
   interaction: { table: "interactions", titleCol: "summary" },
   decision: { table: "decisions", titleCol: "question" },
+  decision_branch: { table: "decision_branches", titleCol: "label" },
   task: { table: "tasks", titleCol: "title" },
   goal: { table: "goals", titleCol: "statement" },
   value: { table: "values_items", titleCol: "statement" },
@@ -608,6 +610,26 @@ interface Std {
   tier?: number;
 }
 
+function decisionTier(tier?: number): 1 | 2 {
+  if (tier === undefined) return 1;
+  if (tier === 1 || tier === 2) return tier;
+  throw new Error("decision tier must be 1 or 2");
+}
+
+type DecisionTranscriptInput = {
+  questionKey: string;
+  prompt: string;
+  answer: string;
+  at?: Date | null;
+};
+
+type DecisionBranchInput = {
+  label: string;
+  status?: "chosen" | "rejected" | "considered";
+  note?: string | null;
+  wouldBeRightIf?: string | null;
+};
+
 export async function insertJournal(
   e: {
     entryMd: string;
@@ -632,19 +654,116 @@ export async function insertDecision(
     choice?: string | null;
     reasoning?: string | null;
     expectedOutcome?: string | null;
+    falsifier?: string | null;
+    stakes?: string | null;
+    reversibility?: string | null;
+    confidence?: number | null;
     reviewAt?: string | null;
     decidedAt?: Date | null;
+    transcript?: DecisionTranscriptInput[];
+    branches?: DecisionBranchInput[];
   } & Std,
-): Promise<{ id: string }> {
-  const [row] = await sql`
-    insert into decisions (question, options, criteria, choice, reasoning, expected_outcome,
-                           decided_at, review_at, created_by, source, derived_from, tier)
-    values (${d.question}, ${sql.json(d.options as any)}, ${d.criteria ? sql.json(d.criteria as any) : null},
-            ${d.choice ?? null}, ${d.reasoning ?? null}, ${d.expectedOutcome ?? null},
-            ${d.decidedAt ?? (d.choice ? now() : null)}, ${d.reviewAt ?? null},
-            ${d.createdBy ?? "human"}, ${d.source ?? "manual"}, ${d.derivedFrom ?? null}, ${d.tier ?? 1})
-    returning id`;
-  return row as any;
+): Promise<{ id: string; branchIds: string[] }> {
+  const branchIds: string[] = [];
+  const decisionId = crypto.randomUUID();
+  const tier = decisionTier(d.tier);
+  await sql.begin(async (tx) => {
+    await tx`
+      insert into decisions (id, question, options, criteria, choice, reasoning, expected_outcome,
+                             falsifier, stakes, reversibility, confidence,
+                             decided_at, review_at, created_by, source, derived_from, tier)
+      values (${decisionId}, ${d.question}, ${sql.json(d.options as any)}, ${d.criteria ? sql.json(d.criteria as any) : null},
+              ${d.choice ?? null}, ${d.reasoning ?? null}, ${d.expectedOutcome ?? null},
+              ${d.falsifier ?? null}, ${d.stakes ?? null}, ${d.reversibility ?? null},
+              ${d.confidence ?? null},
+              ${d.decidedAt ?? (d.choice ? now() : null)}, ${d.reviewAt ?? null},
+              ${d.createdBy ?? "human"}, ${d.source ?? "manual"}, ${d.derivedFrom ?? null}, ${tier})`;
+
+    await insertDecisionTranscriptRows(tx, decisionId, d.transcript ?? [], { ...d, tier });
+    branchIds.push(...(await insertDecisionBranchRows(tx, decisionId, { ...d, tier })));
+  });
+  return { id: decisionId, branchIds };
+}
+
+async function insertDecisionTranscriptRows(
+  tx: any,
+  decisionId: string,
+  transcript: DecisionTranscriptInput[],
+  std: Std,
+): Promise<void> {
+  for (let i = 0; i < transcript.length; i++) {
+    const turn = transcript[i]!;
+    await tx`
+      insert into decision_transcripts
+        (decision_id, ord, question_key, prompt, answer, at, created_by, source, derived_from, tier)
+      values (${decisionId}, ${i + 1}, ${turn.questionKey}, ${turn.prompt}, ${turn.answer},
+              ${turn.at ?? now()}, ${std.createdBy ?? "human"}, ${std.source ?? "manual"},
+              ${std.derivedFrom ?? null}, ${std.tier ?? 1})`;
+  }
+}
+
+async function insertDecisionBranchRows(
+  tx: any,
+  decisionId: string,
+  d: { options: unknown; choice?: string | null; branches?: DecisionBranchInput[] } & Std,
+): Promise<string[]> {
+  const ids: string[] = [];
+  const branches = decisionBranchesFrom(d.options, d.choice ?? null, d.branches);
+  for (const b of branches) {
+    const branchId = crypto.randomUUID();
+    await tx`
+      insert into decision_branches
+        (id, decision_id, label, status, note, would_be_right_if,
+         created_by, source, derived_from, tier)
+      values (${branchId}, ${decisionId}, ${b.label}, ${b.status}, ${b.note ?? null},
+              ${b.wouldBeRightIf ?? null}, ${d.createdBy ?? "human"}, ${d.source ?? "manual"},
+              ${d.derivedFrom ?? null}, ${d.tier ?? 1})`;
+    ids.push(branchId);
+    await tx`
+      insert into edges
+        (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by)
+      values ('decision', ${decisionId}, ${branchRel(b.status)}, 'decision_branch', ${branchId},
+              'decision_branches', ${branchId}, ${d.createdBy ?? "human"})`;
+  }
+  return ids;
+}
+
+function decisionBranchesFrom(
+  options: unknown,
+  choice: string | null,
+  explicit?: {
+    label: string;
+    status?: "chosen" | "rejected" | "considered";
+    note?: string | null;
+    wouldBeRightIf?: string | null;
+  }[],
+): {
+  label: string;
+  status: "chosen" | "rejected" | "considered";
+  note?: string | null;
+  wouldBeRightIf?: string | null;
+}[] {
+  if (explicit?.length) {
+    return explicit.map((b) => ({
+      label: b.label,
+      status: b.status ?? (choice && b.label === choice ? "chosen" : "considered"),
+      note: b.note ?? null,
+      wouldBeRightIf: b.wouldBeRightIf ?? null,
+    }));
+  }
+  if (!Array.isArray(options)) return [];
+  return options
+    .filter((o): o is string => typeof o === "string" && o.length > 0)
+    .map((label) => ({
+      label,
+      status: choice && label === choice ? ("chosen" as const) : ("considered" as const),
+    }));
+}
+
+function branchRel(status: "chosen" | "rejected" | "considered"): string {
+  if (status === "chosen") return "chose";
+  if (status === "rejected") return "rejected";
+  return "considered";
 }
 
 export async function getDecision(id: string, actor?: AccessActor): Promise<any | null> {
@@ -653,16 +772,46 @@ export async function getDecision(id: string, actor?: AccessActor): Promise<any 
   return rows[0] ?? null;
 }
 
+export async function getDecisionTranscript(id: string, actor?: AccessActor): Promise<any[]> {
+  const allowed = await allowedTier(actor);
+  return sql`
+    select id, decision_id, ord, question_key, prompt, answer, at, created_at, created_by, source, tier
+    from decision_transcripts
+    where decision_id = ${id} and tier <= ${allowed}
+    order by ord` as any;
+}
+
+export async function getDecisionBranches(id: string, actor?: AccessActor): Promise<any[]> {
+  const allowed = await allowedTier(actor);
+  return sql`
+    select id, decision_id, label, status, note, would_be_right_if, created_at, updated_at,
+           created_by, source, tier
+    from decision_branches
+    where decision_id = ${id} and tier <= ${allowed}
+    order by created_at, id` as any;
+}
+
+export async function decisionBranchesForIndex(id: string): Promise<any[]> {
+  return sql`
+    select id, decision_id, label, status, note, would_be_right_if, created_at, updated_at,
+           created_by, source, tier
+    from decision_branches
+    where decision_id = ${id}
+    order by created_at, id` as any;
+}
+
 export async function reviewDecision(
   id: string,
   actualOutcome: string,
   lesson: string | null,
   actor: string,
+  outcomeScore?: number | null,
 ): Promise<{ principleId: string | null }> {
   let principleId: string | null = null;
   await sql.begin(async (tx) => {
-    const [dec] =
-      await tx`update decisions set actual_outcome = ${actualOutcome}, reviewed_at = ${now()}
+    const [dec] = await tx`update decisions
+               set actual_outcome = ${actualOutcome}, reviewed_at = ${now()},
+                   outcome_score = coalesce(${outcomeScore ?? null}, outcome_score)
                            where id = ${id} returning id`;
     if (!dec) throw new Error("decision not found");
     if (lesson) {
@@ -840,8 +989,17 @@ export async function upsertPage(
     tier?: number;
   } & Std,
 ): Promise<{ id: string; changed: boolean }> {
-  const [existing] = await sql`select id, content_hash from pages where path = ${p.path}`;
+  const [existing] = await sql`select id, content_hash, tier from pages where path = ${p.path}`;
   if (existing && existing.content_hash === p.contentHash) {
+    const tier = p.tier ?? 1;
+    if (existing.tier !== tier) {
+      await sql`
+        update pages
+        set tier = ${tier}, status = 'active',
+            derived_from = coalesce(${p.derivedFrom ?? null}, derived_from)
+        where id = ${existing.id}`;
+      return { id: existing.id, changed: true };
+    }
     await sql`update pages set status = 'active' where id = ${existing.id}`;
     return { id: existing.id, changed: false };
   }
@@ -1405,4 +1563,83 @@ export async function notePageFreshness(
   const rows =
     await sql`select id, updated_at from pages where path = ${path} and status = 'active'`;
   return (rows[0] as any) ?? null;
+}
+
+// ---------------------------------------------------------------- decision digests (dream step)
+
+export interface DecisionDigestInput {
+  id: string;
+  question: string;
+  options: unknown;
+  criteria: unknown;
+  choice: string | null;
+  reasoning: string | null;
+  expected_outcome: string | null;
+  actual_outcome: string | null;
+  outcome_score: number | null;
+  falsifier: string | null;
+  stakes: string | null;
+  reversibility: string | null;
+  confidence: number | null;
+  tier: number;
+  updated_at: Date;
+  transcript: {
+    id: string;
+    question_key: string;
+    prompt: string;
+    answer: string;
+    tier: number;
+  }[];
+  branches: {
+    id: string;
+    label: string;
+    status: string;
+    note: string | null;
+    would_be_right_if: string | null;
+    tier: number;
+  }[];
+}
+
+export function decisionDigestPath(id: string): string {
+  return `derived/decisions/${id}.md`;
+}
+
+export async function decisionDigestInput(id: string): Promise<DecisionDigestInput | null> {
+  const rows = await sql`select * from decisions where id = ${id}`;
+  const d = rows[0] as any;
+  if (!d) return null;
+  const transcript = (await sql`
+    select id, question_key, prompt, answer, tier
+    from decision_transcripts
+    where decision_id = ${id}
+    order by ord`) as any[];
+  const branches = (await sql`
+    select id, label, status, note, would_be_right_if, tier
+    from decision_branches
+    where decision_id = ${id}
+    order by created_at, id`) as any[];
+  const tier = [d.tier, ...transcript.map((t) => t.tier), ...branches.map((b) => b.tier)].reduce(
+    (max, t) => Math.max(max, Number(t ?? 1)),
+    1,
+  );
+  d.tier = tier;
+  return { ...d, transcript, branches } as DecisionDigestInput;
+}
+
+export async function decisionDigestCandidates(): Promise<DecisionDigestInput[]> {
+  const rows = (await sql`
+    select d.id
+    from decisions d
+    left join pages pg on pg.path = ${"derived/decisions/"} || d.id::text || '.md'
+    where pg.id is null
+       or pg.status <> 'active'
+       or pg.body_md not like '%compiler: dream%'
+       or pg.updated_at < d.updated_at
+    order by d.updated_at desc`) as any[];
+  const out: DecisionDigestInput[] = [];
+  for (const r of rows) {
+    const input = await decisionDigestInput(r.id);
+    if (input) out.push(input);
+  }
+  return out;
 }

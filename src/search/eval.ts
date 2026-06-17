@@ -451,6 +451,27 @@ export interface Regression {
   provisional: boolean;
 }
 
+export interface MissingBaselineMeasurement {
+  area: string;
+  metric: string;
+  current: number;
+  lowerBetter?: boolean;
+}
+
+export function missingBaselineMeasurements(
+  current: Measurement[],
+  baseline: Map<string, BaselineLine>,
+): MissingBaselineMeasurement[] {
+  return current
+    .filter((cur) => !baseline.has(`${cur.area}::${cur.metric}`))
+    .map((cur) => ({
+      area: cur.area,
+      metric: cur.metric,
+      current: cur.value,
+      ...(cur.lowerBetter ? { lowerBetter: true } : {}),
+    }));
+}
+
 /** Compare current measurements against the baseline; return regressions beyond tolerance. */
 export function diffBaseline(
   current: Measurement[],
@@ -569,5 +590,5 @@ export function buildScorecard(input: ScorecardInput): string {
     }
     lines.push("");
   }
-  return `${lines.join("\n")}\n`;
+  return `${lines.join("\n").replace(/\n+$/u, "")}\n`;
 }

@@ -1,0 +1,71 @@
+[
+  {
+    "question": "Use a short vendor trial before committing to annual billing?",
+    "options": ["short vendor trial", "annual billing now"],
+    "choice": "short vendor trial",
+    "reasoning": "Unknown support quality makes annual billing risky.",
+    "expected_outcome": "Learn support quality before spending the annual budget",
+    "falsifier": "Annual discount is large enough and support references are strong",
+    "stakes": "Budget waste and switching cost",
+    "reversibility": "costly",
+    "confidence": 72,
+    "branches": [
+      {
+        "label": "short vendor trial",
+        "status": "chosen",
+        "note": "Buys evidence before commitment"
+      },
+      {
+        "label": "annual billing now",
+        "status": "rejected",
+        "would_be_right_if": "Annual discount is large enough and support references are strong"
+      }
+    ]
+  },
+  {
+    "question": "Pilot the async planning ritual with one team before rolling it out?",
+    "options": ["pilot with one team", "roll out to all teams"],
+    "choice": "pilot with one team",
+    "reasoning": "The ritual may create coordination overhead if imposed everywhere.",
+    "expected_outcome": "Find the template flaws before broad rollout",
+    "falsifier": "Every team has the same planning pain and wants the same template",
+    "stakes": "Team trust and meeting load",
+    "reversibility": "reversible",
+    "confidence": 68,
+    "branches": [
+      {
+        "label": "pilot with one team",
+        "status": "chosen",
+        "note": "Small blast radius"
+      },
+      {
+        "label": "roll out to all teams",
+        "status": "rejected",
+        "would_be_right_if": "Every team has the same planning pain and wants the same template"
+      }
+    ]
+  },
+  {
+    "question": "Delay the workshop until the research interviews are complete?",
+    "options": ["delay workshop", "run workshop now"],
+    "choice": "delay workshop",
+    "reasoning": "The workshop agenda depends on customer language from interviews.",
+    "expected_outcome": "A sharper workshop with fewer speculative exercises",
+    "falsifier": "Calendar momentum matters more than interview completeness",
+    "stakes": "Stakeholder attention and facilitation quality",
+    "reversibility": "costly",
+    "confidence": 80,
+    "branches": [
+      {
+        "label": "delay workshop",
+        "status": "chosen",
+        "note": "Better input quality"
+      },
+      {
+        "label": "run workshop now",
+        "status": "rejected",
+        "would_be_right_if": "Calendar momentum matters more than interview completeness"
+      }
+    ]
+  }
+]

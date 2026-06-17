@@ -26,6 +26,8 @@ describe("migrations", () => {
       "tasks",
       "commitments",
       "decisions",
+      "decision_transcripts",
+      "decision_branches",
       "journal_entries",
       "people",
       "person_aliases",
@@ -47,6 +49,166 @@ describe("migrations", () => {
     ]) {
       expect(tables).toContain(t);
     }
+  });
+});
+
+describe("decision interview schema", () => {
+  test("decision projection columns and branch/transcript tables exist", async () => {
+    const decisionCols = (
+      await sql`
+        select column_name from information_schema.columns
+        where table_schema = 'public' and table_name = 'decisions'`
+    ).map((r: any) => r.column_name);
+    for (const c of ["falsifier", "stakes", "reversibility", "confidence", "outcome_score"]) {
+      expect(decisionCols).toContain(c);
+    }
+
+    const transcriptCols = (
+      await sql`
+        select column_name from information_schema.columns
+        where table_schema = 'public' and table_name = 'decision_transcripts'`
+    ).map((r: any) => r.column_name);
+    for (const c of [
+      "id",
+      "decision_id",
+      "ord",
+      "question_key",
+      "prompt",
+      "answer",
+      "at",
+      "created_at",
+      "created_by",
+      "source",
+      "derived_from",
+      "tier",
+    ]) {
+      expect(transcriptCols).toContain(c);
+    }
+
+    const branchCols = (
+      await sql`
+        select column_name from information_schema.columns
+        where table_schema = 'public' and table_name = 'decision_branches'`
+    ).map((r: any) => r.column_name);
+    for (const c of [
+      "id",
+      "decision_id",
+      "label",
+      "status",
+      "note",
+      "would_be_right_if",
+      "created_at",
+      "updated_at",
+      "created_by",
+      "source",
+      "derived_from",
+      "supersedes_id",
+      "tier",
+    ]) {
+      expect(branchCols).toContain(c);
+    }
+  });
+
+  test("decision constraints reject invalid confidence, outcome score, and branch values", async () => {
+    await expectSqlReject(
+      sql`insert into decisions (question, options, tier)
+          values ('bad tier', ${sql.json(["yes"])}, 0)`,
+      /decisions_tier_check/,
+    );
+    await expectSqlReject(
+      sql`insert into decisions (question, options, confidence)
+          values ('bad confidence', ${sql.json(["yes"])}, 101)`,
+      /decisions_confidence_check/,
+    );
+    await expectSqlReject(
+      sql`insert into decisions (question, options, outcome_score)
+          values ('bad score', ${sql.json(["yes"])}, -1)`,
+      /decisions_outcome_score_check/,
+    );
+    await expectSqlReject(
+      sql`insert into decisions (question, options, reversibility)
+          values ('bad reversibility', ${sql.json(["yes"])}, 'forever-ish')`,
+      /decisions_reversibility_check/,
+    );
+    await expectSqlReject(
+      sql`insert into decision_branches (decision_id, label, status)
+          values (gen_random_uuid(), 'x', 'maybe')`,
+      /decision_branches_status_check/,
+    );
+  });
+
+  test("decision transcripts are append-only", async () => {
+    const [d] =
+      await sql`insert into decisions (question, options) values ('append-only?', ${sql.json([
+        "yes",
+      ])}) returning id`;
+    const [t] = await sql`
+      insert into decision_transcripts (decision_id, ord, question_key, prompt, answer)
+      values (${d!.id}, 1, 'fork', 'What were the options?', 'A or B')
+      returning id`;
+    await expectSqlReject(
+      sql`update decision_transcripts set answer = 'tampered' where id = ${t!.id}`,
+      /append-only/,
+    );
+    await expectSqlReject(sql`delete from decision_transcripts where id = ${t!.id}`, /append-only/);
+    await expectSqlReject(sql`truncate decision_transcripts`, /append-only/);
+  });
+
+  test("minime_app has tier policies for decision interview tables", async () => {
+    const grants = await sql`
+      select table_name, privilege_type
+      from information_schema.role_table_grants
+      where grantee = 'minime_app'
+        and table_name in ('decision_transcripts','decision_branches')`;
+    expect(
+      grants.some(
+        (g: any) => g.table_name === "decision_transcripts" && g.privilege_type === "SELECT",
+      ),
+    ).toBe(true);
+    expect(
+      grants.some(
+        (g: any) => g.table_name === "decision_transcripts" && g.privilege_type === "INSERT",
+      ),
+    ).toBe(true);
+    expect(
+      grants.some(
+        (g: any) => g.table_name === "decision_transcripts" && g.privilege_type === "UPDATE",
+      ),
+    ).toBe(false);
+    expect(
+      grants.some(
+        (g: any) => g.table_name === "decision_branches" && g.privilege_type === "UPDATE",
+      ),
+    ).toBe(true);
+
+    const policies = await sql`
+      select tablename, policyname
+      from pg_policies
+      where schemaname = 'public'
+        and tablename in ('decision_transcripts','decision_branches')`;
+    expect(
+      policies.filter((p: any) => p.tablename === "decision_transcripts").length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(
+      policies.filter((p: any) => p.tablename === "decision_branches").length,
+    ).toBeGreaterThanOrEqual(3);
+  });
+
+  test("minime_app can write tier-2 interview rows without a read unlock", async () => {
+    await sql`delete from session_unlocks`;
+    const decisionId = crypto.randomUUID();
+    await sql.begin(async (tx) => {
+      await tx`set local role minime_app`;
+      await tx`
+        insert into decisions (id, question, options, tier)
+        values (${decisionId}, 'app role tier-2 decision?', ${sql.json(["yes", "no"])}, 2)`;
+      await tx`
+        insert into decision_transcripts (decision_id, ord, question_key, prompt, answer, tier)
+        values (${decisionId}, 1, 'fork', 'Q', 'private answer', 2)`;
+      await tx`
+        insert into decision_branches (decision_id, label, status, tier)
+        values (${decisionId}, 'yes', 'chosen', 2)`;
+    });
   });
 });
 

@@ -15,6 +15,9 @@ export async function resetDb(): Promise<void> {
   const fns = [
     "set_updated_at",
     "events_append_only",
+    "decision_transcripts_append_only",
+    "touch_decision_from_transcript",
+    "sync_decision_branch_update",
     "edge_source_tier",
     "set_edge_tier",
     "app_allowed_tier",

@@ -2,7 +2,7 @@
 // audit (I8) and redaction (§8). The MCP server and the test harness both go through here,
 // so what we test is exactly what agents get.
 
-import type { ZodRawShape } from "zod";
+import { type ZodRawShape, z } from "zod";
 import { auditToolCall } from "../audit";
 import { type Envelope, ToolError } from "../envelope";
 import { redactDeep } from "../redact";
@@ -24,7 +24,8 @@ export type ToolResult =
 
 export async function invokeTool(tool: ToolDef, params: any, ctx: ToolCtx): Promise<ToolResult> {
   try {
-    const env = await tool.handler(params, ctx);
+    const parsed = z.object(tool.schema).parse(params);
+    const env = await tool.handler(parsed, ctx);
     const redacted = redactDeep(env);
     await auditToolCall({
       actor: ctx.actor,
@@ -34,7 +35,8 @@ export async function invokeTool(tool: ToolDef, params: any, ctx: ToolCtx): Prom
     });
     return { ok: true, envelope: redacted };
   } catch (err) {
-    const code = err instanceof ToolError ? err.code : "INTERNAL";
+    const code =
+      err instanceof ToolError ? err.code : err instanceof z.ZodError ? "BAD_INPUT" : "INTERNAL";
     const message = err instanceof Error ? err.message : String(err);
     await auditToolCall({
       actor: ctx.actor,

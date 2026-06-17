@@ -199,4 +199,83 @@ describe("tier-2 privacy hardening", () => {
     expect(bobText).not.toContain(pageText);
     expect(bobText).not.toContain(String(journal!.id));
   });
+
+  test("decision transcripts and branches stay hidden while tier-2 decision is locked", async () => {
+    await sql`delete from session_unlocks`;
+    const secretTranscript = "ZQX-TIER2-DECISION-TRANSCRIPT";
+    const secretBranch = "ZQX-TIER2-DECISION-BRANCH";
+    const logged = await invokeTool(
+      toolByName("minime_log_decision"),
+      {
+        question: "Private tier-2 decision?",
+        options: [secretBranch, "plain option"],
+        choice: secretBranch,
+        tier: 2,
+        transcript: [{ question_key: "fork", prompt: "Q", answer: secretTranscript }],
+        branches: [{ label: secretBranch, status: "chosen" }],
+      },
+      ctxAlice,
+    );
+    if (!logged.ok) throw new Error(logged.error.message);
+    const decisionId = (logged.envelope.data as any).decision_id;
+    const [branchChunks] = await sql`
+      select count(*)::int as n
+      from chunks c
+      join decision_branches b on b.id = c.parent_id
+      where c.parent_type = 'decision_branch' and b.decision_id = ${decisionId}`;
+    expect(branchChunks!.n).toBeGreaterThan(0);
+
+    const locked = await invokeTool(
+      toolByName("minime_get_context"),
+      { type: "decision", id: decisionId },
+      ctxBob,
+    );
+    expect(locked.ok).toBe(false);
+    expect(JSON.stringify(locked)).not.toContain(secretTranscript);
+    expect(JSON.stringify(locked)).not.toContain(secretBranch);
+
+    await invokeTool(toolByName("minime_unlock"), { minutes: 5 }, ctxAlice);
+    const unlocked = await invokeTool(
+      toolByName("minime_get_context"),
+      { type: "decision", id: decisionId },
+      ctxAlice,
+    );
+    expect(unlocked.ok).toBe(true);
+    expect(JSON.stringify(unlocked)).toContain(secretTranscript);
+    expect(JSON.stringify(unlocked)).toContain(secretBranch);
+  });
+
+  test("get_context hides mixed-tier decision branch graph edges while locked", async () => {
+    await sql`delete from session_unlocks`;
+    const secretBranch = "ZQX-MIXED-TIER-BRANCH";
+    const logged = await invokeTool(
+      toolByName("minime_log_decision"),
+      {
+        question: "Can the public decision reference a private branch?",
+        options: ["public branch", "private branch"],
+        choice: "public branch",
+        branches: [
+          { label: "public branch", status: "chosen" },
+          { label: secretBranch, status: "rejected" },
+        ],
+        tier: 1,
+      },
+      ctxAlice,
+    );
+    if (!logged.ok) throw new Error(logged.error.message);
+    const decisionId = (logged.envelope.data as any).decision_id;
+    const [branch] =
+      await sql`select id from decision_branches where decision_id = ${decisionId} and label = ${secretBranch}`;
+    await sql`update decision_branches set tier = 2 where id = ${branch!.id}`;
+
+    const locked = await invokeTool(
+      toolByName("minime_get_context"),
+      { type: "decision", id: decisionId },
+      ctxBob,
+    );
+    expect(locked.ok).toBe(true);
+    const text = JSON.stringify(locked);
+    expect(text).not.toContain(secretBranch);
+    expect(text).not.toContain(String(branch!.id));
+  });
 });

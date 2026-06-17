@@ -66,6 +66,7 @@ const DERIVED_PENALTY = 0.85;
 // content — boosted like GBrain's compiled-truth layer instead of penalized. ×1.5 starting
 // value. // eval-calibration pending
 const NOTES_BOOST = 1.5;
+const COMPILED_SOURCES = new Set(["dream:notes", "dream:decision-digest"]);
 
 // 1-based rank per candidate id, ordered by `key` descending. Each arm is already sorted in
 // repo (limit 50); we re-derive ranks here so the fusion math is self-contained and testable.
@@ -244,7 +245,7 @@ export async function hybridSearch(opts: {
     let score = base * recencyMult * graphMult * accessMult * title;
     const derived = m.derived_from !== null;
     // both stamps required: an imported/agent-written page can't claim the boost by source alone
-    if (m.source === "dream:notes" && m.created_by === "system:dream") score *= NOTES_BOOST;
+    if (COMPILED_SOURCES.has(m.source) && m.created_by === "system:dream") score *= NOTES_BOOST;
     else if (derived && !includeDerived) score *= DERIVED_PENALTY;
     return [{ c, m, score, derived }];
   });

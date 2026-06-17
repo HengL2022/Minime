@@ -3,6 +3,8 @@ import {
   type ParentType,
   allowedTier,
   edgesAround,
+  getDecisionBranches,
+  getDecisionTranscript,
   getRow,
   openItemsFor,
   parentMeta,
@@ -18,6 +20,7 @@ const TYPES = [
   "journal",
   "interaction",
   "decision",
+  "decision_branch",
   "task",
   "goal",
   "value",
@@ -104,6 +107,30 @@ export const getContextTool: ToolDef = {
       ctx.actor,
     );
 
+    let transcript: any[] = [];
+    let branches: any[] = [];
+    if (type === "decision") {
+      transcript = await getDecisionTranscript(row.id, ctx.actor);
+      branches = await getDecisionBranches(row.id, ctx.actor);
+      for (const t of transcript) {
+        sources.push({
+          type: "decision_transcript",
+          id: t.id,
+          updated_at: t.at,
+          created_by: t.created_by,
+        });
+      }
+      for (const b of branches) {
+        sources.push({
+          type: "decision_branch",
+          id: b.id,
+          title: b.label,
+          updated_at: b.updated_at,
+          created_by: b.created_by,
+        });
+      }
+    }
+
     let interactions: any[] = [];
     let openItems: { commitments: any[]; tasks: any[] } = { commitments: [], tasks: [] };
     if (type === "person") {
@@ -127,6 +154,8 @@ export const getContextTool: ToolDef = {
       {
         row,
         related,
+        transcript,
+        branches,
         interactions,
         open_commitments: openItems.commitments,
         open_tasks: openItems.tasks,

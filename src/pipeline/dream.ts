@@ -137,6 +137,11 @@ export async function dream(): Promise<Record<string, unknown>> {
     const { candidates, compiled, skipped } = await compileNotes();
     return { candidates, compiled, skipped };
   });
+  await step("2c_compile_decision_digests", async () => {
+    const { compileDecisionDigests } = await import("./decision-digest");
+    const { candidates, compiled, skipped } = await compileDecisionDigests();
+    return { candidates, compiled, skipped };
+  });
   await step("3_contradictions", () => contradictionScan());
   await step("4_stale", async () => {
     let flagged = 0;

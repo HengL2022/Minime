@@ -1064,3 +1064,29 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   restart — until then `minime_state` answers from the stale pre-fix process.
 - **Approved by:** human (owner, 2026-06-17 — "The morning briefing only title is today, but
   content are still yesterday" → "Both" [restart now + durable code fix]).
+
+## 2026-06-17 — Decision interview source layer + branch graph + retrieval digest
+
+- **Context:** Spec §7/§8/§13 M5 shipped a flat decision engine. The owner wanted the day-one
+  Critical Decision Method capture: six raw Q&A turns, prediction/confidence, falsifier, stakes,
+  reversibility, and review date, plus both retrieval-friendly digests and an explicit branch
+  graph for future similar situations.
+- **Decision:** Extend decisions with structured projection columns (`falsifier`, `stakes`,
+  `reversibility`, `confidence`, `outcome_score`); add append-only `decision_transcripts` as the
+  raw source of truth; add `decision_branches` plus `decision -> branch` graph edges
+  (`chose`/`rejected`/`considered`). Branch graph edges are tiered from the branch row, not from
+  the parent decision, so a tier-2 branch attached to a tier-1 decision cannot leak as a visible
+  edge while locked. Generate `dream:decision-digest` pages at
+  `derived/decisions/<id>.md` for HyDE-shaped retrieval; keep agents reading raw decision context
+  after retrieval. Decision-digest compilation is local heuristic-only in this iteration: no cloud
+  classify provider receives decision transcript/branch content. Digest tier is the max of the
+  decision, transcript, and branch source tiers, and archived digest markdown carries tier
+  frontmatter so `brainSync` cannot downgrade private digests. Confidence and outcome score are
+  0-100 integers for calibration. Full calibration reporting is deferred. Tests continue the
+  existing suite convention of direct SQL assertions as test scaffolding; application SQL remains
+  in `repo.ts` and migrations.
+- **Why:** Raw Q&A preserves reasoning texture that structured summaries flatten. Digest pages make
+  analogous situations easier to retrieve without turning the digest into the reasoning source.
+  Branch rows provide the requested decision-tree surface while avoiding a premature criteria
+  ontology.
+- **Approved by:** human (owner, 2026-06-17 — "PLEASE IMPLEMENT THIS PLAN").

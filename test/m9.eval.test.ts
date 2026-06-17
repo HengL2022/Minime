@@ -5,7 +5,7 @@
 //      (the same Regression[] that drives the runner's non-zero exit).
 
 import { beforeAll, describe, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { readdirSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,7 @@ import {
   diffBaseline,
   hitAtK,
   loadQrels,
+  missingBaselineMeasurements,
   mrr,
   ndcgAtK,
   precisionAtK,
@@ -174,15 +175,10 @@ describe("runQrels smoke test (3-doc inline corpus)", () => {
 
 describe("sealed qrels load and parse", () => {
   test("all committed qrels files parse with the required shape", () => {
-    const files = [
-      "retrieval-en.json",
-      "retrieval-zh.json",
-      "graph.json",
-      "identity.json",
-      "time.json",
-      "provenance.json",
-      "robustness.json",
-    ];
+    const files = readdirSync(join(import.meta.dir, "../fixtures/qrels"))
+      .filter((f) => f.endsWith(".json"))
+      .sort();
+    expect(files).toContain("decision-digest.json");
     for (const f of files) {
       const q = loadQrels(join(import.meta.dir, "../fixtures/qrels", f));
       expect(q.version).toBe(1);
@@ -234,6 +230,15 @@ describe("baseline regression detection", () => {
     const regs = diffBaseline(current, baseline);
     expect(regs).toHaveLength(1);
     expect(regs[0]!.provisional).toBe(true);
+  });
+
+  test("missing metric floors are reported when a baseline exists", () => {
+    const current: Measurement[] = [
+      { area: "retrieval-en", metric: "hit1", value: 0.92 },
+      { area: "retrieval-en", metric: "bucket:new-bucket:hit3", value: 1 },
+    ];
+    const gaps = missingBaselineMeasurements(current, baseline);
+    expect(gaps).toEqual([{ area: "retrieval-en", metric: "bucket:new-bucket:hit3", current: 1 }]);
   });
 
   test("baseline round-trips through serialize", () => {
@@ -292,5 +297,7 @@ describe("baseline regression detection", () => {
     expect(md).toContain("Baseline diff");
     expect(md).toContain("0.12"); // the regression delta is published
     expect(md).toContain("Misses (1/1)"); // bad numbers shown
+    expect(md.endsWith("\n")).toBe(true);
+    expect(md.endsWith("\n\n")).toBe(false);
   });
 });

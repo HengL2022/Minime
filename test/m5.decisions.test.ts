@@ -3,6 +3,7 @@
 // searchable principle linked back to the decision.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { insertDecision } from "../src/db/repo";
 import { toolByName } from "../src/mcp/tools";
 import { invokeTool } from "../src/mcp/tools/registry";
 import { dream } from "../src/pipeline/dream";
@@ -132,6 +133,234 @@ describe("decision engine", () => {
     state = await call("minime_state", {});
     expect((state.data as any).decision_reviews_due.map((x: any) => x.id)).not.toContain(
       decisionId,
+    );
+  });
+
+  test("full six-question interview round-trips through log and get_context", async () => {
+    const transcript = [
+      {
+        question_key: "fork",
+        prompt: "What were you actually choosing between — and what did you almost do instead?",
+        answer: "Choose CoreWeave now or wait for the next AWS quota window.",
+      },
+      {
+        question_key: "falsifier",
+        prompt: "What would have to be true for the option you rejected to be the right one?",
+        answer: "Waiting would be right if AWS can guarantee H100 capacity before July.",
+      },
+      {
+        question_key: "tension",
+        prompt: "Where's the tension — what's making this hard?",
+        answer: "CoreWeave is faster but adds vendor complexity.",
+      },
+      {
+        question_key: "prediction",
+        prompt: "What do you predict happens, and how sure are you?",
+        answer: "The prototype ships two weeks earlier; confidence 75.",
+      },
+      {
+        question_key: "stakes",
+        prompt: "What are the stakes, and how reversible is it?",
+        answer: "Medium stakes and costly to reverse after data migration.",
+      },
+      {
+        question_key: "review",
+        prompt: "When should we check whether you were right?",
+        answer: "Review on 2026-08-01.",
+      },
+    ];
+
+    const logged = await call("minime_log_decision", {
+      question: "Use CoreWeave for the prototype GPU run?",
+      options: ["use CoreWeave", "wait for AWS"],
+      choice: "use CoreWeave",
+      reasoning: "Capacity matters more than vendor simplicity this month.",
+      expected_outcome: "Prototype ships two weeks earlier",
+      falsifier: "AWS guarantees H100 capacity before July",
+      stakes: "Medium delivery risk; costly migration if wrong",
+      reversibility: "costly",
+      confidence: 75,
+      decided_at: "2026-06-10",
+      review_at: "2026-08-01",
+      transcript,
+      branches: [
+        {
+          label: "use CoreWeave",
+          status: "chosen",
+          note: "Fastest path to capacity",
+        },
+        {
+          label: "wait for AWS",
+          status: "rejected",
+          would_be_right_if: "AWS guarantees H100 capacity before July",
+        },
+      ],
+    });
+    const decisionId = (logged.data as any).decision_id;
+    expect((logged.data as any).review_at).toBe("2026-08-01");
+
+    const [decision] = await sql`
+      select falsifier, stakes, reversibility, confidence, decided_at::date as decided_at, review_at
+      from decisions where id = ${decisionId}`;
+    expect(decision!.falsifier).toBe("AWS guarantees H100 capacity before July");
+    expect(decision!.stakes).toContain("Medium delivery risk");
+    expect(decision!.reversibility).toBe("costly");
+    expect(decision!.confidence).toBe(75);
+    expect(new Date(decision!.decided_at).toISOString().slice(0, 10)).toBe("2026-06-10");
+    expect(new Date(decision!.review_at).toISOString().slice(0, 10)).toBe("2026-08-01");
+
+    const context = await call("minime_get_context", { type: "decision", id: decisionId });
+    const data = context.data as any;
+    expect(data.transcript.map((t: any) => t.question_key)).toEqual([
+      "fork",
+      "falsifier",
+      "tension",
+      "prediction",
+      "stakes",
+      "review",
+    ]);
+    expect(data.transcript[0].answer).toContain("CoreWeave");
+    expect(data.branches.map((b: any) => [b.label, b.status]).sort()).toEqual(
+      [
+        ["use CoreWeave", "chosen"],
+        ["wait for AWS", "rejected"],
+      ].sort(),
+    );
+
+    const [edgeCount] = await sql`
+      select count(*)::int as n from edges
+      where src_type = 'decision' and src_id = ${decisionId}
+        and dst_type = 'decision_branch'
+        and rel in ('chose','rejected')`;
+    expect(edgeCount!.n).toBe(2);
+  });
+
+  test("decision interview schema rejects invalid tool input", async () => {
+    const badConfidence = await invokeTool(
+      toolByName("minime_log_decision"),
+      {
+        question: "Bad confidence?",
+        options: ["yes"],
+        confidence: 150,
+      },
+      ctx,
+    );
+    expect(badConfidence.ok).toBe(false);
+
+    const badReversibility = await invokeTool(
+      toolByName("minime_log_decision"),
+      {
+        question: "Bad reversibility?",
+        options: ["yes"],
+        reversibility: "forever-ish",
+      },
+      ctx,
+    );
+    expect(badReversibility.ok).toBe(false);
+
+    const badQuestionKey = await invokeTool(
+      toolByName("minime_log_decision"),
+      {
+        question: "Bad question key?",
+        options: ["yes"],
+        transcript: [{ question_key: "oops", prompt: "Q", answer: "A" }],
+      },
+      ctx,
+    );
+    expect(badQuestionKey.ok).toBe(false);
+
+    const badDecidedAt = await invokeTool(
+      toolByName("minime_log_decision"),
+      {
+        question: "Bad decided_at?",
+        options: ["yes"],
+        decided_at: "not-a-date",
+      },
+      ctx,
+    );
+    expect(badDecidedAt.ok).toBe(false);
+    if (!badDecidedAt.ok) expect(badDecidedAt.error.code).toBe("BAD_INPUT");
+
+    const nonIsoDecidedAt = await invokeTool(
+      toolByName("minime_log_decision"),
+      {
+        question: "Non-ISO decided_at?",
+        options: ["yes"],
+        decided_at: "06/10/2026",
+      },
+      ctx,
+    );
+    expect(nonIsoDecidedAt.ok).toBe(false);
+    if (!nonIsoDecidedAt.ok) expect(nonIsoDecidedAt.error.code).toBe("BAD_INPUT");
+
+    const impossibleReviewAt = await invokeTool(
+      toolByName("minime_log_decision"),
+      {
+        question: "Impossible review_at?",
+        options: ["yes"],
+        review_at: "2026-99-99",
+      },
+      ctx,
+    );
+    expect(impossibleReviewAt.ok).toBe(false);
+    if (!impossibleReviewAt.ok) expect(impossibleReviewAt.error.code).toBe("BAD_INPUT");
+
+    const badBranch = await invokeTool(
+      toolByName("minime_log_decision"),
+      {
+        question: "Bad branch?",
+        options: ["yes"],
+        branches: [{ label: "yes", status: "maybe" }],
+      },
+      ctx,
+    );
+    expect(badBranch.ok).toBe(false);
+  });
+
+  test("repo rejects tier-0 decisions before writing projections", async () => {
+    await expect(
+      insertDecision({
+        question: "Can a decision be tier zero?",
+        options: ["no"],
+        tier: 0,
+      }),
+    ).rejects.toThrow(/decision tier must be 1 or 2/);
+    const [count] =
+      await sql`select count(*)::int as n from decisions where question = 'Can a decision be tier zero?'`;
+    expect(count!.n).toBe(0);
+  });
+
+  test("review stores outcome score and branch rows are searchable", async () => {
+    const logged = await call("minime_log_decision", {
+      question: "Switch analytics warehouse to DuckDB first?",
+      options: ["switch to DuckDB", "stay on Postgres"],
+      choice: "stay on Postgres",
+      branches: [
+        {
+          label: "switch to DuckDB",
+          status: "rejected",
+          would_be_right_if: "local laptop queries are the bottleneck",
+        },
+        { label: "stay on Postgres", status: "chosen", note: "Operational simplicity wins" },
+      ],
+    });
+    const decisionId = (logged.data as any).decision_id;
+
+    await call("minime_review_decision", {
+      decision_id: decisionId,
+      actual_outcome: "Postgres stayed boring and fast enough",
+      outcome_score: 80,
+    });
+    const [decision] = await sql`select outcome_score from decisions where id = ${decisionId}`;
+    expect(decision!.outcome_score).toBe(80);
+
+    const hits = await hybridSearch({
+      query: "local laptop queries bottleneck",
+      types: ["decision_branch"],
+      limit: 5,
+    });
+    expect(hits.some((h) => h.type === "decision_branch" && h.title === "switch to DuckDB")).toBe(
+      true,
     );
   });
 });
