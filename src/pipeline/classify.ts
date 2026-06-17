@@ -8,6 +8,12 @@ export interface Classification {
   type: "task" | "journal" | "interaction" | "note" | "decision_note" | "unknown";
   confidence: number;
   fields: Record<string, any>;
+  // One-line justification for the type/confidence call. Persisted in the
+  // inbox_unfiled review payload (via the stored classifier object) so a human
+  // reviewing a low-confidence capture sees WHY the model hesitated instead of
+  // having to reverse-engineer it. Best-effort: empty string when the model
+  // omits it or on the error path.
+  reason?: string;
 }
 
 // The classify prompt is built per-call so the model always knows the current date —
@@ -20,7 +26,9 @@ Today's date is ${today} (YYYY-MM-DD). Resolve every relative date — "today", 
 "this/next Friday", "in two weeks" — against ${today}. Never output a due date in the past.
 Types: task (something to do), journal (reflection/diary), interaction (met/called/messaged a person),
 note (reference information), decision_note (a decision made or being weighed), unknown.
-Reply with ONLY a JSON object: {"type": "...", "confidence": 0.0-1.0, "fields": {...}}.
+Reply with ONLY a JSON object: {"type": "...", "confidence": 0.0-1.0, "reason": "...", "fields": {...}}.
+"reason" is one short sentence (<=140 chars) justifying the type and confidence; when confidence is low,
+say what made it ambiguous (e.g. "could be task or interaction", "two intents in one capture", "unknown person").
 fields by type: task -> {"title": string, "due": "YYYY-MM-DD" | null};
 interaction -> {"person_name": string, "kind": "meeting"|"call"|"message"|"email"|"note"};
 journal -> {"mood": 1-5 | null}; decision_note -> {"question": string, "choice": string | null};
@@ -99,13 +107,15 @@ export function heuristicClassify(text: string): Classification {
     .replace(/^<!--.*?-->\s*/s, "")
     .trim();
 
-  if (t.length < 3 || !/[a-z]/i.test(t)) return { type: "unknown", confidence: 0.2, fields: {} };
-  if (lower.startsWith("unclear:")) return { type: "unknown", confidence: 0.3, fields: {} };
+  if (t.length < 3 || !/[a-z]/i.test(t))
+    return { type: "unknown", confidence: 0.2, fields: {}, reason: "too short or no letters" };
+  if (lower.startsWith("unclear:"))
+    return { type: "unknown", confidence: 0.3, fields: {}, reason: "explicitly marked unclear" };
 
   if (/^(todo|task)[:\s]/i.test(firstLine) || /\bremind me\b/i.test(lower)) {
     const title = firstLine.replace(/^(todo|task)[:\s]+/i, "").trim() || firstLine;
     const due = lower.match(/\bby (\d{4}-\d{2}-\d{2})\b/)?.[1] ?? null;
-    return { type: "task", confidence: 0.9, fields: { title, due } };
+    return { type: "task", confidence: 0.9, fields: { title, due }, reason: "explicit todo/task/remind-me prefix" };
   }
   if (/^(met|call(ed)? with|talked to|coffee with|lunch with)\b/i.test(firstLine)) {
     const m = firstLine.match(
@@ -116,6 +126,7 @@ export function heuristicClassify(text: string): Classification {
       type: "interaction",
       confidence: 0.85,
       fields: { person_name: m?.[1] ?? "Unknown", kind },
+      reason: "opens with a met/called/talked-to verb",
     };
   }
   if (/^(decided|decision[:\s])/i.test(firstLine)) {
@@ -123,14 +134,15 @@ export function heuristicClassify(text: string): Classification {
       type: "decision_note",
       confidence: 0.8,
       fields: { question: firstLine, choice: null },
+      reason: "opens with decided/decision",
     };
   }
   if (/\b(today|feeling|grateful|tired|mood)\b/i.test(lower) && /\b(i|my|me)\b/i.test(lower)) {
-    return { type: "journal", confidence: 0.8, fields: { mood: null } };
+    return { type: "journal", confidence: 0.8, fields: { mood: null }, reason: "first-person reflective language" };
   }
   if (t.length > 40)
-    return { type: "note", confidence: 0.75, fields: { title: firstLine.slice(0, 80) } };
-  return { type: "unknown", confidence: 0.4, fields: {} };
+    return { type: "note", confidence: 0.75, fields: { title: firstLine.slice(0, 80) }, reason: "long-form text, no task/interaction/journal cue" };
+  return { type: "unknown", confidence: 0.4, fields: {}, reason: "no matching heuristic cue" };
 }
 
 export async function classify(text: string): Promise<Classification> {
@@ -148,9 +160,11 @@ export async function classify(text: string): Promise<Classification> {
       : "unknown";
     const confidence =
       typeof parsed.confidence === "number" ? Math.max(0, Math.min(1, parsed.confidence)) : 0;
-    return { type, confidence, fields: parsed.fields ?? {} };
+    const reason =
+      typeof parsed.reason === "string" ? parsed.reason.trim().slice(0, 140) : "";
+    return { type, confidence, fields: parsed.fields ?? {}, reason };
   } catch {
     // provider down, key missing, or junk output: leave for the evening review, never guess
-    return { type: "unknown", confidence: 0, fields: {} };
+    return { type: "unknown", confidence: 0, fields: {}, reason: "classifier error or unparseable output" };
   }
 }
