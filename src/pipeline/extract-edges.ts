@@ -14,6 +14,7 @@ import {
   addOrgAlias,
   allOrgsWithAliases,
   allPeopleWithAliases,
+  deleteExtractedEdgesForSource,
   edgeExists,
   ensureOrg,
   ensurePerson,
@@ -347,31 +348,16 @@ function knownIn(text: string, entries: { id: string; names: string[] }[]): Map<
 
 const WORK_ROLES = new RegExp(`^(manager|boss|colleague|collaborator|${TITLES})$`, "iu");
 
-// Non-working family/household relations: a person stored with one of these can never
+// Non-working child/care relations: a person stored with one of these can never
 // be the subject of a works_at edge. Family narratives co-mention a child + an org + a
 // work cue ("school", "therapy", "violin class") in one paragraph, and the paragraph-scope
 // / page-dominant-org inference would otherwise mint phantom edges like
-// "Mia works_at Hehuang Pharma". The guard lives at the DB-application stage (extractAndLink)
-// because only there do we know the person's STORED relation. See DECISIONS.md 2026-06-16.
+// "Mia works_at Hehuang Pharma". Adult family roles (sister, father, spouse) are allowed:
+// real corpora often state where they work. See DECISIONS.md 2026-06-16.
 const NON_WORKING_RELATIONS = new Set([
   "son",
   "daughter",
   "child",
-  "wife",
-  "husband",
-  "spouse",
-  "partner",
-  "mother",
-  "father",
-  "mom",
-  "dad",
-  "parent",
-  "brother",
-  "sister",
-  "sibling",
-  "grandmother",
-  "grandfather",
-  "grandparent",
   "grandson",
   "granddaughter",
   "domestic_helper",
@@ -561,11 +547,13 @@ export async function extractAndLink(
   parentType: string,
   parentId: string,
   text: string,
+  opts: { replaceSourceEdges?: boolean } = {},
 ): Promise<ExtractStats> {
   const lexicon = { people: await allPeopleWithAliases(), orgs: await allOrgsWithAliases() };
   const facts = extractFacts(text, lexicon, loadNonOrgTerms());
   const stats: ExtractStats = { edges: 0, people: 0, orgs: 0 };
   const srcTable = parentTable(parentType).table;
+  if (opts.replaceSourceEdges) await deleteExtractedEdgesForSource(srcTable, parentId, ACTOR);
 
   const personIds = new Map<string, string>();
   for (const p of facts.people) {
@@ -617,7 +605,9 @@ export async function extractAndLink(
     // / page-dominant inference; refuse it here where the stored relation is known.
     const personRow = await personById(personId);
     if (isNonWorkingRelation(personRow?.relation)) {
-      console.error(`extract:skip-works-at non-working relation=${personRow?.relation} person=${w.person} org=${w.org}`);
+      console.error(
+        `extract:skip-works-at non-working relation=${personRow?.relation} person=${w.person} org=${w.org}`,
+      );
       continue;
     }
     if (await edgeExists("person", personId, "works_at", "org", orgId)) continue;

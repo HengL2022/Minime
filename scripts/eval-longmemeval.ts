@@ -229,9 +229,7 @@ async function main(): Promise<number> {
     const path = join(RESULTS_DIR, `${date}-${round}-longmemeval-s.md`);
     writeFileSync(
       path,
-      `# LongMemEval-s — Minime hybrid retrieval (session-level recall)\n\n` +
-        `Engine: RRF hybrid (qwen3-embedding-8b live), per-question haystack scoping, ` +
-        `top-10 parents.\nReference: gbrain reports 97.6% recall@5 on this dataset.\n\n${table}\n`,
+      `# LongMemEval-s — Minime hybrid retrieval (session-level recall)\n\nEngine: RRF hybrid (qwen3-embedding-8b live), per-question haystack scoping, top-10 parents.\nReference: gbrain reports 97.6% recall@5 on this dataset.\n\n${table}\n`,
     );
     console.error(`scorecard: ${path}`);
   }

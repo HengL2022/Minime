@@ -228,8 +228,7 @@ describe("inbox startup drain (watcher recovery)", () => {
 
     const w = await startWatcher();
     try {
-      const [item] =
-        await sql`select status, classifier_output from inbox_items where id = ${id}`;
+      const [item] = await sql`select status, classifier_output from inbox_items where id = ${id}`;
       expect(item!.status).toBe("rejected");
       expect(item!.classifier_output?.rejected).toBe(true);
       const [ev] =

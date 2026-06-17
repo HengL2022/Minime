@@ -180,7 +180,9 @@ describe("detectMistypedEntities (read-only screen)", () => {
   test("parseKnownOrgs: comments/blanks ignored, case-folded exact names (allow-list)", () => {
     // The irreducible semantic case — a single-employee institution ("Johns Hopkins") that
     // IS an org but looks like a person — is silenced by the owner's known-orgs.txt allow-list.
-    const set = parseKnownOrgs("# header\n\nJohns Hopkins\n  Morgan Stanley  \n# trailing comment\n");
+    const set = parseKnownOrgs(
+      "# header\n\nJohns Hopkins\n  Morgan Stanley  \n# trailing comment\n",
+    );
     expect([...set].sort()).toEqual(["johns hopkins", "morgan stanley"]);
     expect(set.has("johns hopkins")).toBe(true);
     expect(set.has("Johns Hopkins".toLowerCase())).toBe(true);

@@ -26,20 +26,26 @@ export const agendaTool: ToolDef = {
       .regex(/^\d{4}-\d{2}-\d{2}$/)
       .optional(),
   },
-  handler: async (params) => {
+  handler: async (params, ctx) => {
     const from = params.from ?? todayStr();
     // default window: a 7-day look-ahead from `from`
     const to = params.to ?? addDays(from, 7);
-    const tasks = await tasksInRange(from, to);
+    const tasks = await tasksInRange(from, to, ctx.actor);
 
     // group by due date for a clean day-by-day agenda
     const by_day: Record<string, { id: string; title: string; status: string }[]> = {};
     for (const t of tasks) {
-      const day = t.due instanceof Date ? t.due.toISOString().slice(0, 10) : String(t.due).slice(0, 10);
-      (by_day[day] ??= []).push({ id: t.id, title: t.title, status: t.status });
+      const day =
+        t.due instanceof Date ? t.due.toISOString().slice(0, 10) : String(t.due).slice(0, 10);
+      if (!by_day[day]) by_day[day] = [];
+      by_day[day].push({ id: t.id, title: t.title, status: t.status });
     }
 
-    const sources: SourceRef[] = tasks.map((t: any) => ({ type: "task", id: t.id, title: t.title }));
+    const sources: SourceRef[] = tasks.map((t: any) => ({
+      type: "task",
+      id: t.id,
+      title: t.title,
+    }));
     return envelope({ from, to, count: tasks.length, by_day, tasks }, sources);
   },
 };

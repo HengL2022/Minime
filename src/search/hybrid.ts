@@ -150,6 +150,7 @@ export async function hybridSearch(opts: {
   types?: string[] | null;
   limit?: number;
   includeDerived?: boolean;
+  actor?: string | null;
   /** optional scope: restrict candidates to these parent row ids (e.g. a benchmark haystack) */
   scopeParentIds?: string[] | null;
   /** cut the result list at the rerank-score cliff (only meaningful with the reranker on) */
@@ -165,11 +166,11 @@ export async function hybridSearch(opts: {
   // candidates = top-50 cosine ∪ top-50 fts (each already tier-filtered in repo)
   let vec: Candidate[] = [];
   try {
-    vec = await vectorCandidates(await embedQuery(query), types, scope);
+    vec = await vectorCandidates(await embedQuery(query), types, scope, opts.actor);
   } catch {
     // embeddings unavailable (e.g. Ollama down): degrade to FTS-only
   }
-  const fts = await ftsCandidates(query, types, scope);
+  const fts = await ftsCandidates(query, types, scope, opts.actor);
 
   // RRF ranks come from each arm's OWN ordering (before the union erases per-arm position).
   const vecRank = armRanks(vec, (c) => c.cosine);
@@ -197,18 +198,19 @@ export async function hybridSearch(opts: {
   }
   const meta = new Map<string, ParentMeta>();
   for (const [type, ids] of idsByType) {
-    for (const [id, m] of await parentMeta(type, [...new Set(ids)])) {
+    for (const [id, m] of await parentMeta(type, [...new Set(ids)], opts.actor)) {
       meta.set(`${type}:${id}`, m);
     }
   }
 
   // graph boost: parent within 1 edge hop of an entity literally named in the query
-  const boosted = await oneHopNeighbors(await entitiesNamedIn(query));
+  const boosted = await oneHopNeighbors(await entitiesNamedIn(query, opts.actor), opts.actor);
 
   // access boost: parents the owner's agents drilled into recently (audit log, ids only)
   const access = await accessCounts(
     [...new Set(candidates.map((c) => c.parent_id))],
     ACCESS_WINDOW_DAYS,
+    opts.actor,
   );
 
   // RRF score per candidate, then max-normalize so the blend lives on a [0,1] scale.

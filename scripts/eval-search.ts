@@ -10,6 +10,7 @@
 // EVAL_DATABASE_URL must point at a throwaway database — the runner DROPs all tables in it.
 
 import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type AreaReport,
@@ -150,10 +151,20 @@ async function main(): Promise<number> {
   const regressions = diffBaseline(current, baseline).filter(
     (r) => !(mode === "live" && r.metric === "latency_p95_ms"),
   );
+  const violations = reports.flatMap((r) => r.violations);
 
   // Scorecard (committed in docs/benchmarks/) — ALL numbers, misses included.
-  mkdirSync(RESULTS_DIR, { recursive: true });
-  const scorecardPath = join(RESULTS_DIR, `${todayStr()}-${round}-minimebench.md`);
+  // Failed gates write to tmp by default so routine verification doesn't dirty the tree.
+  // Set MINIME_EVAL_PUBLISH_FAILURES=1 when intentionally capturing a failing scorecard.
+  const publishFailure = process.env.MINIME_EVAL_PUBLISH_FAILURES === "1";
+  const scorecardDir =
+    regressions.length === 0 && violations.length === 0
+      ? RESULTS_DIR
+      : publishFailure
+        ? RESULTS_DIR
+        : join(tmpdir(), "minime-benchmarks");
+  mkdirSync(scorecardDir, { recursive: true });
+  const scorecardPath = join(scorecardDir, `${todayStr()}-${round}-minimebench.md`);
   writeFileSync(
     scorecardPath,
     buildScorecard({ date: todayStr(), round, mode, reports, regressions, baselineExisted }),
@@ -169,7 +180,6 @@ async function main(): Promise<number> {
   console.log(`\n${areaTable(reports)}\n`);
   console.error(`scorecard: ${scorecardPath}`);
 
-  const violations = reports.flatMap((r) => r.violations);
   if (violations.length) {
     console.error(`ROBUSTNESS VIOLATIONS (${violations.length}):`);
     for (const v of violations) console.error(`  - ${v}`);

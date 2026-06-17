@@ -46,9 +46,16 @@ export function parentTable(type: string): { table: string; titleCol: string } {
 
 // ---------------------------------------------------------------- tiers & audit
 
-export async function allowedTier(): Promise<1 | 2> {
-  const rows = await sql`
-    select 1 from session_unlocks where scope = 'tier2' and expires_at > ${now()} limit 1`;
+export type AccessActor = string | null | undefined;
+
+export async function allowedTier(actor?: AccessActor): Promise<1 | 2> {
+  const rows = actor
+    ? await sql`
+        select 1 from session_unlocks
+        where scope = 'tier2' and granted_via = ${actor} and expires_at > ${now()}
+        limit 1`
+    : await sql`
+        select 1 from session_unlocks where scope = 'tier2' and expires_at > ${now()} limit 1`;
   return rows.length > 0 ? 2 : 1;
 }
 
@@ -148,8 +155,9 @@ export async function ftsCandidates(
   query: string,
   types: string[] | null,
   parentIds: string[] | null = null, // optional scope: restrict to these parent rows
+  actor?: AccessActor,
 ): Promise<Candidate[]> {
-  const allowed = await allowedTier();
+  const allowed = await allowedTier(actor);
   // OR the query words: plainto_tsquery ANDs every term, so a natural-language question
   // matched nothing whenever one contentful word was absent from a chunk — on a 100-question
   // retrieval eval, 70% of queries got zero fts candidates, silencing the 0.30 fts weight in
@@ -178,8 +186,9 @@ export async function vectorCandidates(
   embedding: number[],
   types: string[] | null,
   parentIds: string[] | null = null, // optional scope: restrict to these parent rows
+  actor?: AccessActor,
 ): Promise<Candidate[]> {
-  const allowed = await allowedTier();
+  const allowed = await allowedTier(actor);
   const vec = JSON.stringify(embedding);
   return sql`
     select c.id, c.parent_type, c.parent_id, c.ord, c.text,
@@ -205,9 +214,10 @@ export interface ParentMeta {
 export async function parentMeta(
   type: ParentType,
   ids: string[],
+  actor?: AccessActor,
 ): Promise<Map<string, ParentMeta>> {
   if (ids.length === 0) return new Map();
-  const allowed = await allowedTier();
+  const allowed = await allowedTier(actor);
   const { table, titleCol } = parentTable(type);
   // table/titleCol come from the fixed PARENTS map above, never from user input.
   const rows = await sql`
@@ -224,34 +234,43 @@ export interface EntityRef {
   id: string;
 }
 
-export async function entitiesNamedIn(query: string): Promise<EntityRef[]> {
+export async function entitiesNamedIn(query: string, actor?: AccessActor): Promise<EntityRef[]> {
+  const allowed = await allowedTier(actor);
   const q = query.toLowerCase();
   const people = await sql`
     select distinct p.id from people p
     left join person_aliases a on a.person_id = p.id
-    where ${q} like '%' || lower(p.canonical_name) || '%'
-       or (a.alias is not null and ${q} like '%' || lower(a.alias) || '%')`;
+    where (${q} like '%' || lower(p.canonical_name) || '%'
+       or (a.alias is not null and ${q} like '%' || lower(a.alias) || '%'))
+      and p.tier <= ${allowed}`;
   const orgs = await sql`
     select distinct o.id from orgs o
     left join org_aliases a on a.org_id = o.id
-    where ${q} like '%' || lower(o.canonical_name) || '%'
-       or (a.alias is not null and ${q} like '%' || lower(a.alias) || '%')`;
+    where (${q} like '%' || lower(o.canonical_name) || '%'
+       or (a.alias is not null and ${q} like '%' || lower(a.alias) || '%'))
+      and o.tier <= ${allowed}`;
   return [
     ...people.map((r: any) => ({ type: "person" as const, id: r.id })),
     ...orgs.map((r: any) => ({ type: "org" as const, id: r.id })),
   ];
 }
 
-export async function oneHopNeighbors(refs: EntityRef[]): Promise<Set<string>> {
+export async function oneHopNeighbors(
+  refs: EntityRef[],
+  actor?: AccessActor,
+): Promise<Set<string>> {
   if (refs.length === 0) return new Set();
+  const allowed = await allowedTier(actor);
   const set = new Set<string>();
   for (const type of ["person", "org"] as const) {
     const ids = refs.filter((r) => r.type === type).map((r) => r.id);
     if (ids.length === 0) continue;
     const rows = await sql`
       select src_type as t, src_id as i from edges where dst_type = ${type} and dst_id = any(${ids})
+        and tier <= ${allowed}
       union
-      select dst_type as t, dst_id as i from edges where src_type = ${type} and src_id = any(${ids})`;
+      select dst_type as t, dst_id as i from edges where src_type = ${type} and src_id = any(${ids})
+        and tier <= ${allowed}`;
     for (const r of rows as any[]) set.add(`${r.t}:${r.i}`);
     for (const id of ids) set.add(`${type}:${id}`);
   }
@@ -264,7 +283,11 @@ export async function oneHopNeighbors(refs: EntityRef[]): Promise<Set<string>> {
 // counts: a dossier's ~20 related rows ride along in the envelope without being asked
 // for (invariant-review 2026-06-12). Read off the append-only audit log (I8): ids only,
 // never content. The partial index in 011_access_index.sql covers this scan.
-export async function accessCounts(ids: string[], sinceDays: number): Promise<Map<string, number>> {
+export async function accessCounts(
+  ids: string[],
+  sinceDays: number,
+  actor?: AccessActor,
+): Promise<Map<string, number>> {
   if (ids.length === 0) return new Map();
   const since = new Date(now().getTime() - sinceDays * 86_400_000);
   const rows = await sql`
@@ -272,6 +295,7 @@ export async function accessCounts(ids: string[], sinceDays: number): Promise<Ma
     from events
     where verb = 'tool:minime_get_context'
       and at >= ${since}
+      and (${!actor} or actor = ${actor ?? ""})
       and payload->'returned_ids'->>0 = any(${ids})
     group by 1`;
   return new Map(rows.map((r: any) => [r.id as string, r.n as number]));
@@ -279,8 +303,8 @@ export async function accessCounts(ids: string[], sinceDays: number): Promise<Ma
 
 // ---------------------------------------------------------------- people
 
-export async function resolvePerson(name: string): Promise<any | null> {
-  const allowed = await allowedTier();
+export async function resolvePerson(name: string, actor?: AccessActor): Promise<any | null> {
+  const allowed = await allowedTier(actor);
   const rows = await sql`
     select distinct p.* from people p
     left join person_aliases a on a.person_id = p.id
@@ -357,8 +381,8 @@ export async function peopleByFirstName(first: string): Promise<{ id: string }[]
 
 // ---------------------------------------------------------------- orgs
 
-export async function resolveOrg(name: string): Promise<any | null> {
-  const allowed = await allowedTier();
+export async function resolveOrg(name: string, actor?: AccessActor): Promise<any | null> {
+  const allowed = await allowedTier(actor);
   const rows = await sql`
     select distinct o.* from orgs o
     left join org_aliases a on a.org_id = o.id
@@ -623,8 +647,8 @@ export async function insertDecision(
   return row as any;
 }
 
-export async function getDecision(id: string): Promise<any | null> {
-  const allowed = await allowedTier();
+export async function getDecision(id: string, actor?: AccessActor): Promise<any | null> {
+  const allowed = await allowedTier(actor);
   const rows = await sql`select * from decisions where id = ${id} and tier <= ${allowed}`;
   return rows[0] ?? null;
 }
@@ -781,6 +805,18 @@ export async function insertEdge(e: {
             ${e.sourceTable ?? null}, ${e.sourceId ?? null}, ${e.extractedBy ?? "human"}, ${e.confidence ?? 1.0})`;
 }
 
+export async function deleteExtractedEdgesForSource(
+  sourceTable: string,
+  sourceId: string,
+  extractedBy: string,
+): Promise<number> {
+  const rows = await sql`
+    delete from edges
+    where source_table = ${sourceTable} and source_id = ${sourceId} and extracted_by = ${extractedBy}
+    returning id`;
+  return rows.length;
+}
+
 export async function edgeExists(
   srcType: string,
   srcId: string,
@@ -833,8 +869,8 @@ export async function softDeletePagesNotIn(paths: string[]): Promise<string[]> {
   return rows.map((r: any) => r.id);
 }
 
-export async function listActivePages(): Promise<any[]> {
-  const allowed = await allowedTier();
+export async function listActivePages(actor?: AccessActor): Promise<any[]> {
+  const allowed = await allowedTier(actor);
   return sql`select id, path, title, content_hash, tier from pages
              where status = 'active' and tier <= ${allowed}`;
 }
@@ -990,7 +1026,7 @@ export async function resolveReviewItem(
 
 // ---------------------------------------------------------------- state snapshot
 
-export async function stateSnapshot(): Promise<any> {
+export async function stateSnapshot(actor?: AccessActor): Promise<any> {
   const t = now();
   // Anchor "today" on the LOCAL calendar day, computed in app code. Casting the
   // UTC instant inside Postgres (${t}::date) uses the DB session TZ (UTC here),
@@ -999,18 +1035,23 @@ export async function stateSnapshot(): Promise<any> {
   // UTC prior day. Passing a local YYYY-MM-DD string makes the day boundary
   // correct regardless of DB session TZ or time of day. See DECISIONS.md.
   const today = localDateStr(t);
+  const allowed = await allowedTier(actor);
   const [calendar, tasks, commitments, decisionsDue, openReview, anomalies] = await Promise.all([
     sql`select id, uid, starts_at, ends_at, title, location from calendar_events
         where starts_at >= ${t}::timestamptz - interval '1 hour'
           and starts_at < ${t}::timestamptz + interval '2 days'
-          and tier <= 1
+          and tier <= ${allowed}
         order by starts_at`,
     sql`select id, title, status, due from tasks
         where status in ('inbox','active','waiting') and due is not null and due <= ${today}::date
+          and tier <= ${allowed}
         order by due`,
-    sql`select id, what, to_whom, due from commitments where status = 'open' order by due nulls last`,
+    sql`select id, what, to_whom, due from commitments
+        where status = 'open' and tier <= ${allowed}
+        order by due nulls last`,
     sql`select id, question, review_at, choice from decisions
         where reviewed_at is null
+          and tier <= ${allowed}
           and ( (review_at is not null and review_at <= ${today}::date + 3)
                 or choice is null )
         order by review_at nulls last`,
@@ -1031,11 +1072,13 @@ export async function stateSnapshot(): Promise<any> {
 // minime_state is today-anchored (due <= today) and CANNOT answer "what's due
 // tomorrow / this week"; this fills that gap. Includes inbox/active/waiting
 // (open work), excludes done/dropped. Ordered by due date then title.
-export async function tasksInRange(from: string, to: string): Promise<any[]> {
+export async function tasksInRange(from: string, to: string, actor?: AccessActor): Promise<any[]> {
+  const allowed = await allowedTier(actor);
   return sql`select id, title, status, due from tasks
       where status in ('inbox','active','waiting')
         and due is not null
         and due >= ${from}::date and due <= ${to}::date
+        and tier <= ${allowed}
       order by due, title`;
 }
 
@@ -1143,22 +1186,37 @@ export async function upsertMetricValue(
 
 // ---------------------------------------------------------------- context
 
-export async function getRow(type: ParentType, id: string): Promise<any | null> {
-  const allowed = await allowedTier();
+export async function getRow(
+  type: ParentType,
+  id: string,
+  actor?: AccessActor,
+): Promise<any | null> {
+  const allowed = await allowedTier(actor);
   const { table } = parentTable(type);
   const rows = await sql`select * from ${sql(table)} where id = ${id} and tier <= ${allowed}`;
   return rows[0] ?? null;
 }
 
-export async function edgesAround(type: string, id: string, limit = 20): Promise<any[]> {
+export async function edgesAround(
+  type: string,
+  id: string,
+  limit = 20,
+  actor?: AccessActor,
+): Promise<any[]> {
+  const allowed = await allowedTier(actor);
   return sql`
     select * from edges
-    where (src_type = ${type} and src_id = ${id}) or (dst_type = ${type} and dst_id = ${id})
+    where ((src_type = ${type} and src_id = ${id}) or (dst_type = ${type} and dst_id = ${id}))
+      and tier <= ${allowed}
     order by created_at desc limit ${limit}`;
 }
 
-export async function recentInteractionsFor(personId: string, limit = 20): Promise<any[]> {
-  const allowed = await allowedTier();
+export async function recentInteractionsFor(
+  personId: string,
+  limit = 20,
+  actor?: AccessActor,
+): Promise<any[]> {
+  const allowed = await allowedTier(actor);
   return sql`select id, kind, summary, occurred_at, created_by from interactions
              where person_id = ${personId} and tier <= ${allowed}
              order by occurred_at desc limit ${limit}`;
@@ -1166,13 +1224,16 @@ export async function recentInteractionsFor(personId: string, limit = 20): Promi
 
 export async function openItemsFor(
   personName: string,
+  actor?: AccessActor,
 ): Promise<{ commitments: any[]; tasks: any[] }> {
+  const allowed = await allowedTier(actor);
   const commitments = await sql`
     select id, what, to_whom, due, status from commitments
-    where status = 'open' and lower(to_whom) = lower(${personName})`;
+    where status = 'open' and lower(to_whom) = lower(${personName}) and tier <= ${allowed}`;
   const tasks = await sql`
     select id, title, status, due from tasks
-    where status in ('inbox','active','waiting') and title ilike '%' || ${personName} || '%'`;
+    where status in ('inbox','active','waiting') and title ilike '%' || ${personName} || '%'
+      and tier <= ${allowed}`;
   return { commitments, tasks };
 }
 

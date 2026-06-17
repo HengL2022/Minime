@@ -13,12 +13,13 @@ export const searchTool: ToolDef = {
     limit: z.number().int().min(1).max(50).optional(),
     include_derived: z.boolean().optional(),
   },
-  handler: async (params) => {
+  handler: async (params, ctx) => {
     const hits = await hybridSearch({
       query: params.query,
       types: params.types ?? null,
       limit: params.limit ?? 10,
       includeDerived: params.include_derived ?? false,
+      actor: ctx.actor,
     });
     const newest = hits.length
       ? hits.reduce<Date | null>(

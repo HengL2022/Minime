@@ -23,9 +23,9 @@ export async function indexParent(
   // typed-edge extraction is per-write (self-wiring graph); best-effort like embeddings —
   // the dream backlog pass catches anything missed here
   const { extractAndLink } = await import("../pipeline/extract-edges");
-  await extractAndLink(parentType, parentId, [title, md].filter(Boolean).join("\n\n")).catch(
-    () => {},
-  );
+  await extractAndLink(parentType, parentId, [title, md].filter(Boolean).join("\n\n"), {
+    replaceSourceEdges: true,
+  }).catch(() => {});
   await drainEmbedBacklog(64).catch(() => {});
   return chunks.length;
 }

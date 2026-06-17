@@ -26,11 +26,11 @@ process.env.EMBED_PROVIDER = "ollama";
 process.env.CLASSIFY_PROVIDER = "ollama";
 // the rerank stage must never fire in tests (live HTTP + order changes); rerank tests
 // inject their own config and fetch
-delete process.env.RERANK_URL;
+Reflect.deleteProperty(process.env, "RERANK_URL");
 // backup()/dbSnapshot() must never invoke real restic/pg_dump in tests (I1, offline). The
 // owner's .env (bun auto-loads it) sets these; clear them so the unconfigured path fires.
-delete process.env.RESTIC_REPOSITORY;
-delete process.env.RESTIC_PASSWORD_FILE;
+Reflect.deleteProperty(process.env, "RESTIC_REPOSITORY");
+Reflect.deleteProperty(process.env, "RESTIC_PASSWORD_FILE");
 process.env.MINIME_DATA_DIR = mkdtempSync(join(tmpdir(), "minime-test-"));
 
 // Close the postgres pool after the whole run, or open sockets keep bun alive forever.

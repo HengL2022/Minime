@@ -12,7 +12,14 @@ export async function resetDb(): Promise<void> {
   for (const t of tables) {
     await sql.unsafe(`drop table if exists "${t.tablename}" cascade`);
   }
-  const fns = ["set_updated_at", "events_append_only", "app_allowed_tier", "metric_agg"];
+  const fns = [
+    "set_updated_at",
+    "events_append_only",
+    "edge_source_tier",
+    "set_edge_tier",
+    "app_allowed_tier",
+    "metric_agg",
+  ];
   for (const f of fns) {
     await sql.unsafe(`drop function if exists ${f} cascade`);
   }

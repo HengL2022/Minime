@@ -256,6 +256,48 @@ My physiotherapist Solveig Dahl at Lade Fysio fixed my knee.`;
     expect((await testSql`select count(*)::int as n from people`)[0]!.n).toBe(people[0]!.n);
   });
 
+  test("re-indexing replaces stale extracted edges for that source row", async () => {
+    const { id } = await upsertPage({
+      path: "test/reindex-probe.md",
+      title: "Reindex probe",
+      bodyMd: "My physiotherapist Mara Sol at North Clinic helped my knee.",
+      contentHash: "hash-m7-reindex-a",
+      source: "test",
+    });
+    await indexParent(
+      "page",
+      id,
+      "My physiotherapist Mara Sol at North Clinic helped my knee.",
+      "Reindex probe",
+      1,
+    );
+    const oldPerson = await resolvePerson("Mara Sol");
+    const oldOrg = await resolveOrg("North Clinic");
+    expect(oldPerson).not.toBeNull();
+    expect(oldOrg).not.toBeNull();
+
+    await indexParent(
+      "page",
+      id,
+      "My dentist Oskar Li at South Clinic checked a molar.",
+      "Reindex probe",
+      1,
+    );
+
+    const oldEdges = await testSql`
+      select count(*)::int as n from edges
+      where source_table = 'pages' and source_id = ${id}
+        and (src_id = ${oldPerson.id} or dst_id = ${oldPerson.id} or dst_id = ${oldOrg.id})`;
+    expect(oldEdges[0]!.n).toBe(0);
+    const newPerson = await resolvePerson("Oskar Li");
+    const newOrg = await resolveOrg("South Clinic");
+    const newEdges = await testSql`
+      select count(*)::int as n from edges
+      where source_table = 'pages' and source_id = ${id}
+        and rel = 'works_at' and src_id = ${newPerson.id} and dst_id = ${newOrg.id}`;
+    expect(newEdges[0]!.n).toBe(1);
+  });
+
   test("short name later upgraded by fuller form, not forked", async () => {
     await extractAndLink("page", pageId, "Piotr — work friend, board games on Thursdays.");
     const piotr = await resolvePerson("Piotr");
@@ -296,6 +338,22 @@ My physiotherapist Solveig Dahl at Lade Fysio fixed my knee.`;
       select count(*)::int as n from edges
       where rel = 'mentions' and dst_type = 'person' and dst_id = ${miaId}`;
     expect(mentions[0]!.n).toBeGreaterThan(0);
+  });
+
+  test("adult family relations can still have employers", async () => {
+    const { ensurePerson, setPersonRelationIfNull } = await import("../src/db/repo");
+    const { id: meeraId } = await ensurePerson("Meera", "test", "capture");
+    await setPersonRelationIfNull(meeraId, "sister");
+
+    await extractAndLink("page", pageId, "Meera — my younger sister, data scientist at RBC.");
+
+    const rbc = await resolveOrg("RBC");
+    expect(rbc).not.toBeNull();
+    const work = await testSql`
+      select count(*)::int as n from edges
+      where rel = 'works_at' and src_type = 'person' and src_id = ${meeraId}
+        and dst_type = 'org' and dst_id = ${rbc.id}`;
+    expect(work[0]!.n).toBe(1);
   });
 
   test("graph boost reaches orgs: entitiesNamedIn + oneHopNeighbors", async () => {

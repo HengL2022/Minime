@@ -79,7 +79,7 @@ export const reviewDecisionTool: ToolDef = {
     lesson: z.string().optional(),
   },
   handler: async (params, ctx) => {
-    const existing = await getDecision(params.decision_id);
+    const existing = await getDecision(params.decision_id, ctx.actor);
     if (!existing) throw new ToolError("NOT_FOUND", `decision ${params.decision_id} not found`);
     const { principleId } = await reviewDecision(
       params.decision_id,

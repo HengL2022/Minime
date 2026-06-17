@@ -27,7 +27,7 @@ const TYPES = [
   "commitment",
 ] as const;
 
-async function resolveEdgeTitles(edges: any[]): Promise<any[]> {
+async function resolveEdgeTitles(edges: any[], actor: string): Promise<any[]> {
   const byType = new Map<string, Set<string>>();
   for (const e of edges) {
     for (const [t, i] of [
@@ -41,7 +41,7 @@ async function resolveEdgeTitles(edges: any[]): Promise<any[]> {
   const titles = new Map<string, string>();
   for (const [t, ids] of byType) {
     try {
-      for (const [id, m] of await parentMeta(t as ParentType, [...ids]))
+      for (const [id, m] of await parentMeta(t as ParentType, [...ids], actor))
         titles.set(`${t}:${id}`, m.title);
     } catch {
       // edge endpoints may reference types without content tables; leave untitled
@@ -65,7 +65,7 @@ export const getContextTool: ToolDef = {
     id: z.string().uuid().optional(),
     person_name: z.string().optional(),
   },
-  handler: async (params) => {
+  handler: async (params, ctx) => {
     const gaps: string[] = [];
     const sources: SourceRef[] = [];
     let type: ParentType;
@@ -73,15 +73,15 @@ export const getContextTool: ToolDef = {
 
     if (params.person_name) {
       type = "person";
-      row = await resolvePerson(params.person_name);
+      row = await resolvePerson(params.person_name, ctx.actor);
       if (!row) {
         type = "org";
-        row = await resolveOrg(params.person_name);
+        row = await resolveOrg(params.person_name, ctx.actor);
       }
       if (!row) throw new ToolError("NOT_FOUND", "no person or org matching that name");
     } else if (params.type && params.id) {
       type = params.type;
-      row = await getRow(type, params.id);
+      row = await getRow(type, params.id, ctx.actor);
       if (!row)
         throw new ToolError(
           "NOT_FOUND",
@@ -99,13 +99,16 @@ export const getContextTool: ToolDef = {
       derived: row.derived_from !== null,
     });
 
-    const related = await resolveEdgeTitles(await edgesAround(type, row.id, 20));
+    const related = await resolveEdgeTitles(
+      await edgesAround(type, row.id, 20, ctx.actor),
+      ctx.actor,
+    );
 
     let interactions: any[] = [];
     let openItems: { commitments: any[]; tasks: any[] } = { commitments: [], tasks: [] };
     if (type === "person") {
-      interactions = await recentInteractionsFor(row.id, 20);
-      if (interactions.length === 0 && (await allowedTier()) < 2) {
+      interactions = await recentInteractionsFor(row.id, 20, ctx.actor);
+      if (interactions.length === 0 && (await allowedTier(ctx.actor)) < 2) {
         gaps.push("interactions are tier 2 — locked; call minime_unlock to read them");
       }
       for (const i of interactions) {
@@ -116,7 +119,7 @@ export const getContextTool: ToolDef = {
           created_by: i.created_by,
         });
       }
-      openItems = await openItemsFor(row.canonical_name);
+      openItems = await openItemsFor(row.canonical_name, ctx.actor);
     }
 
     const newest = type === "person" ? (row.last_contact_at ?? row.updated_at) : row.updated_at;

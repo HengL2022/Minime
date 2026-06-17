@@ -115,7 +115,12 @@ export function heuristicClassify(text: string): Classification {
   if (/^(todo|task)[:\s]/i.test(firstLine) || /\bremind me\b/i.test(lower)) {
     const title = firstLine.replace(/^(todo|task)[:\s]+/i, "").trim() || firstLine;
     const due = lower.match(/\bby (\d{4}-\d{2}-\d{2})\b/)?.[1] ?? null;
-    return { type: "task", confidence: 0.9, fields: { title, due }, reason: "explicit todo/task/remind-me prefix" };
+    return {
+      type: "task",
+      confidence: 0.9,
+      fields: { title, due },
+      reason: "explicit todo/task/remind-me prefix",
+    };
   }
   if (/^(met|call(ed)? with|talked to|coffee with|lunch with)\b/i.test(firstLine)) {
     const m = firstLine.match(
@@ -138,10 +143,20 @@ export function heuristicClassify(text: string): Classification {
     };
   }
   if (/\b(today|feeling|grateful|tired|mood)\b/i.test(lower) && /\b(i|my|me)\b/i.test(lower)) {
-    return { type: "journal", confidence: 0.8, fields: { mood: null }, reason: "first-person reflective language" };
+    return {
+      type: "journal",
+      confidence: 0.8,
+      fields: { mood: null },
+      reason: "first-person reflective language",
+    };
   }
   if (t.length > 40)
-    return { type: "note", confidence: 0.75, fields: { title: firstLine.slice(0, 80) }, reason: "long-form text, no task/interaction/journal cue" };
+    return {
+      type: "note",
+      confidence: 0.75,
+      fields: { title: firstLine.slice(0, 80) },
+      reason: "long-form text, no task/interaction/journal cue",
+    };
   return { type: "unknown", confidence: 0.4, fields: {}, reason: "no matching heuristic cue" };
 }
 
@@ -160,11 +175,15 @@ export async function classify(text: string): Promise<Classification> {
       : "unknown";
     const confidence =
       typeof parsed.confidence === "number" ? Math.max(0, Math.min(1, parsed.confidence)) : 0;
-    const reason =
-      typeof parsed.reason === "string" ? parsed.reason.trim().slice(0, 140) : "";
+    const reason = typeof parsed.reason === "string" ? parsed.reason.trim().slice(0, 140) : "";
     return { type, confidence, fields: parsed.fields ?? {}, reason };
   } catch {
     // provider down, key missing, or junk output: leave for the evening review, never guess
-    return { type: "unknown", confidence: 0, fields: {}, reason: "classifier error or unparseable output" };
+    return {
+      type: "unknown",
+      confidence: 0,
+      fields: {},
+      reason: "classifier error or unparseable output",
+    };
   }
 }
