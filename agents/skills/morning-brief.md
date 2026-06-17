@@ -39,6 +39,12 @@ A brief, in this order:
 
 ## Answer rules
 
+- **Timestamps are UTC.** Every datetime Minime returns (calendar times, task
+  `due`, `created_at`, review timestamps, the trailing `Z` in ISO strings) is
+  UTC. Before stating any clock time or time-of-day word ("this morning",
+  "tonight"), convert to the owner's local timezone (resolve it from owner
+  context; do not hardcode). A `08:42Z` time is 16:42 for a UTC+8 owner. When
+  the owner's timezone is unknown, state times in UTC explicitly.
 - No fluff, no motivational copy. Keep "Suggested focus" concrete and grounded —
   no generic advice.
 - Do not expose secret values or internal implementation details.

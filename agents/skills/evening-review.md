@@ -45,6 +45,14 @@ Run as a short conversation, not a form — write as you go:
 
 ## Answer rules
 
+- **Timestamps are UTC.** Every datetime Minime returns (capture/`created_at`
+  times, `occurred_at`, review timestamps, the trailing `Z` in ISO strings) is
+  UTC. Before describing *when* something happened — especially time-of-day words
+  like "this morning / afternoon / evening" — convert to the owner's local
+  timezone (resolve it from owner context; do not hardcode). A capture stamped
+  `08:42Z` is 16:42 (afternoon) for a UTC+8 owner, not morning. When unsure of
+  the owner's timezone, state the time in UTC explicitly rather than guessing a
+  time-of-day label.
 - Confirm each write with the returned ID, one line each.
 - Never invent content the owner did not say; quote their words in `entry_md`.
 - Writes are allowed without unlock (tier-2 writes are fine); do not request an
