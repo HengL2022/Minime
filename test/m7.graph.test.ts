@@ -123,6 +123,22 @@ describe("extractFacts (pure rules)", () => {
     expect(f.orgs).toContain("Goddard School AS");
   });
 
+  test("a pronoun is never minted as a person (source guard for the 'She' bug)", () => {
+    // The relation extractor used to mint a person row named "She"/"They"/"It" from
+    // role+pronoun constructs, then attach phantom works_at edges from unrelated
+    // sentences onto that one blob. validName() now rejects pronoun-led candidates at
+    // the source, so detectMistypedEntities() never has to clean them up after the fact.
+    for (const text of [
+      "Vet: She handled the appointment.",
+      "My sister She works at the lab.",
+      "Doctor They reviewed the scans.",
+      "Therapist It is great with the kids.",
+    ]) {
+      const f = extractFacts(text, EMPTY);
+      expect(f.people).toEqual([]);
+    }
+  });
+
   test("known entities are reported as mentions", () => {
     const lex = {
       people: [{ id: "p1", names: ["Kjersti Lund"] }],

@@ -49,6 +49,24 @@ const NAME = String.raw`(?:Dr\.?\s+)?\p{Lu}[\p{L}'’-]+(?:\s+\p{Lu}[\p{L}'’-]
 const ORGPH = String.raw`(?:\p{Lu}|\d)[\p{L}\d&.’'-]*(?:\s+(?:(?:\p{Lu}|\d)[\p{L}\d&.’'-]*|AS|A\/S))*`;
 const LEGAL_SUFFIX = /\s+(AS|A\/S|ASA|AB|ApS|Oy|Inc\.?|Ltd\.?|LLC|GmbH)$/u;
 const NAME_STOP = new Set(["the", "my", "our", "we", "i", "norwegian", "norway"]);
+// Pronouns are never a person's name. The relation extractor used to mint person rows
+// like "She" (then attach phantom works_at edges from unrelated sentences to one blob),
+// which only detectMistypedEntities() caught after the fact. Reject them at the source.
+// Same list as detectMistypedEntities() so the source guard and the review screen agree.
+const PRONOUNS = new Set([
+  "he",
+  "she",
+  "they",
+  "him",
+  "her",
+  "them",
+  "it",
+  "we",
+  "you",
+  "i",
+  "me",
+  "us",
+]);
 const SENTINEL = "․"; // protects honorific dots from the sentence splitter
 
 function hasOrgSuffix(phrase: string): boolean {
@@ -215,6 +233,7 @@ export interface Facts {
 function validName(name: string): boolean {
   const first = name.split(/\s+/)[0]!.toLowerCase();
   if (NAME_STOP.has(first)) return false;
+  if (PRONOUNS.has(first)) return false; // "She", "They", "It" … never a person name
   if (new RegExp(`^(${ROLES}|${TITLES})$`, "iu").test(name)) return false;
   return name.length >= 2;
 }
