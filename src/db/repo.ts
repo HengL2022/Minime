@@ -1184,7 +1184,7 @@ export async function resolveReviewItem(
 
 // ---------------------------------------------------------------- state snapshot
 
-export async function stateSnapshot(actor?: AccessActor): Promise<any> {
+export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Promise<any> {
   const t = now();
   // Anchor "today" on the LOCAL calendar day, computed in app code. Casting the
   // UTC instant inside Postgres (${t}::date) uses the DB session TZ (UTC here),
@@ -1192,7 +1192,7 @@ export async function stateSnapshot(actor?: AccessActor): Promise<any> {
   // hasn't rolled over yet — e.g. the 7am Asia/Singapore morning brief = 23:00
   // UTC prior day. Passing a local YYYY-MM-DD string makes the day boundary
   // correct regardless of DB session TZ or time of day. See DECISIONS.md.
-  const today = localDateStr(t);
+  const today = localDateStr(t, timeZone);
   const allowed = await allowedTier(actor);
   const [calendar, tasks, commitments, decisionsDue, openReview, anomalies] = await Promise.all([
     sql`select id, uid, starts_at, ends_at, title, location from calendar_events

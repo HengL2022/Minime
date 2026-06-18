@@ -27,7 +27,7 @@ export const agendaTool: ToolDef = {
       .optional(),
   },
   handler: async (params, ctx) => {
-    const from = params.from ?? todayStr();
+    const from = params.from ?? todayStr(ctx.timeZone);
     // default window: a 7-day look-ahead from `from`
     const to = params.to ?? addDays(from, 7);
     const tasks = await tasksInRange(from, to, ctx.actor);

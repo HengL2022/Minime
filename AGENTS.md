@@ -105,11 +105,23 @@ watcher + nightly maintenance cron). Use **absolute paths** outside the repo.
   { "command": "bun", "args": ["run", "<ABS_REPO_PATH>/src/cli.ts", "serve"] }
   ```
 
-11 tools: `minime_search`, `minime_get_context`, `minime_state`, `minime_query_metric`,
+13 tools: `minime_search`, `minime_get_context`, `minime_state`, `minime_query_metric`,
 `minime_capture`, `minime_journal`, `minime_log_decision`, `minime_review_decision`,
-`minime_upsert_task`, `minime_log_interaction`, `minime_unlock`. Numbers come only from
-`minime_query_metric`; tier-2 reads (journal, interactions, email metadata) need
-`minime_unlock`; tier-0 (transactions, health) is never readable — aggregates only.
+`minime_upsert_task`, `minime_agenda`, `minime_log_interaction`, `minime_review_queue`,
+`minime_unlock`. Numbers come only from `minime_query_metric`; tier-2 reads (journal,
+interactions, email metadata, private decisions) need `minime_unlock`; tier-0
+(transactions, health) is never readable — aggregates only.
+
+Before using Minime MCP tools, agent harnesses should read
+`agents/skills/RESOLVER.md`, then read the specific skill file it routes to. The resolver is
+the map for what to use: query, graph-query, person-brief, capture, review-triage,
+morning-brief, evening-review, decision-brief, and decision-interview. For decision work,
+use `agents/skills/decision-brief.md` to retrieve past context before choosing, and
+`agents/skills/decision-interview.md` to log the six-question raw transcript plus structured
+decision fields. All tools accept optional `time_zone` (IANA name, e.g.
+`America/Los_Angeles`) when the harness knows the owner's current timezone; Minime stores
+canonical timestamps but interprets "today" and date-only inputs in that timezone and renders
+timestamp outputs with that timezone's offset.
 
 ## After install
 
@@ -120,8 +132,8 @@ bun run src/cli.ts audit --since 7d # what left the box, to which client
 bun run src/cli.ts import:calendar export.ics       # and the other importers
 ```
 
-Agent workflow prompts (morning brief, evening review, decision brief) live in
-`agents/skills/*.md`. Project conventions for agents *working on the code* are in
+Agent workflow prompts live in `agents/skills/*.md`; start with `agents/skills/RESOLVER.md`
+and let it route to the right skill. Project conventions for agents *working on the code* are in
 `CLAUDE.md`; the spec is `minime-build-plan.md`. After installing, point the owner at
 `docs/GUIDE.md` (the human-facing usage guide) and offer two interactive first-run steps —
 both run in *their* terminal, not yours: `make onboard` (the seeding interview: values,

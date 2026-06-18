@@ -6,6 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { buildServer } from "../src/mcp/server";
 import { ALL_TOOLS } from "../src/mcp/tools";
+import { setNow } from "../src/util/clock";
 import { countEvents, resetAndSeed, testSql as sql } from "./helpers";
 
 let client: Client;
@@ -163,5 +164,18 @@ describe("MCP server", () => {
     const res = await call("minime_get_context", {});
     expect(res.isError).toBe(true);
     expect(res.parsed.error.code).toBe("BAD_INPUT");
+  });
+
+  test("MCP responses render timestamps in the caller timezone", async () => {
+    setNow(new Date("2026-06-17T01:00:00.000Z"));
+    try {
+      const res = await call("minime_unlock", {
+        minutes: 5,
+        time_zone: "America/Los_Angeles",
+      });
+      expect(res.parsed.data.expires_at).toBe("2026-06-16T18:05:00.000-07:00");
+    } finally {
+      setNow(null);
+    }
   });
 });

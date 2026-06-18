@@ -31,7 +31,7 @@ export const journalTool: ToolDef = {
       // Local calendar day, not a UTC slice: toISOString() would title a
       // pre-dawn-local entry with yesterday's date (local past midnight, UTC
       // not yet rolled over). Mirror the `at` override when supplied.
-      `Journal ${localDateStr(at ?? now())}`,
+      `Journal ${localDateStr(at ?? now(), ctx.timeZone)}`,
       2,
     );
     return envelope({ journal_entry_id: id }, [{ type: "journal", id }]);

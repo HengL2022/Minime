@@ -17,6 +17,17 @@ Docker/brew/apt, Ollama + models), migrates, verifies, and prints how to registe
 server. Add `--with-demo` for a fictional dataset to explore. Full contract — flags,
 degraded modes, machine-parsable output for coding agents — in [AGENTS.md](AGENTS.md).
 
+**Agent orientation after install:** before using Minime MCP tools, an AI harness should read
+[agents/skills/RESOLVER.md](agents/skills/RESOLVER.md), then read the specific skill file it
+routes to. The resolver is the agent-facing map for what to use: query, graph-query,
+person-brief, capture, review-triage, morning-brief, evening-review, decision-brief, and
+decision-interview. For decisions, use [decision-brief](agents/skills/decision-brief.md) to
+retrieve past context before choosing, and [decision-interview](agents/skills/decision-interview.md)
+to log the six-question raw transcript plus structured fields. If the harness knows the
+owner's current IANA timezone, include `time_zone` on MCP calls; Minime stores canonical
+timestamps but interprets "today" and date-only inputs in that timezone and renders timestamp
+outputs with that timezone's offset.
+
 **Have an AI agent install it for you** — paste this into Claude Code (or any agent with
 shell access):
 
@@ -55,7 +66,7 @@ After install (optional): install `restic` + set `RESTIC_REPOSITORY`/`RESTIC_PAS
 for backups; run `bun run src/cli.ts serve` under launchd/systemd for resident mode; load
 the `agents/skills/` prompts into your agent — `RESOLVER.md` routes requests to the right
 skill (query, graph-query, person-brief, capture, review-triage, morning-brief,
-evening-review, decision-brief).
+evening-review, decision-brief, decision-interview).
 
 ## Daily use
 
@@ -93,9 +104,9 @@ the unlock gate). Confirmation-gated install, backs up `~/.claude/settings.json`
 - **Files are the archive, rows are the state, Postgres is the index.** Prose lives as
   markdown in `data/brain/` (its own git repo); structured state lives as rows; everything is
   chunked, embedded (local Ollama) and hybrid-searchable.
-- **One door.** Agents only reach data through the `minime` MCP server — 11 tools, every call
-  audited to an append-only `events` table, every output redacted (card/IBAN/account numbers)
-  and wrapped in an envelope carrying sources, staleness and gaps.
+- **One door.** Agents only reach data through the `minime` MCP server; every call is audited
+  to an append-only `events` table, every output is redacted (card/IBAN/account numbers) and
+  wrapped in an envelope carrying sources, staleness and gaps.
 - **Tiers.** 0 = never leaves the DB (transactions, health) — aggregates only via whitelisted
   SQL in `metric_defs.agg_sql`. 1 = agent-readable default. 2 = journal/interactions/email
   metadata — reads require a time-boxed `minime_unlock`, writes are always allowed.

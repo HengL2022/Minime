@@ -6,7 +6,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { toolByName } from "../src/mcp/tools";
 import { invokeTool } from "../src/mcp/tools/registry";
-import { setNow, todayStr } from "../src/util/clock";
+import { localDateStr, setNow, todayStr } from "../src/util/clock";
 import { resetAndSeed } from "./helpers";
 
 const ctx = { actor: "agent:test-harness" };
@@ -61,6 +61,13 @@ describe("minime_agenda (forward-looking task lookup)", () => {
     expect(titles).toContain("Book Tokyo accommodation near Shinjuku"); // +5 active
     expect(titles).not.toContain("Buy Kai's birthday microscope"); // +12, out of window
     expect(titles).not.toContain("Draft tech talk proposal"); // +20, out of window
+  });
+
+  test("default window anchors to the caller timezone when provided", async () => {
+    const instant = new Date("2026-06-17T01:00:00.000Z");
+    setNow(instant);
+    const agenda = await call("minime_agenda", { time_zone: "America/Los_Angeles" });
+    expect((agenda.data as any).from).toBe(localDateStr(instant, "America/Los_Angeles"));
   });
 
   test("explicit wide range includes inbox-status tasks and excludes done/dropped", async () => {

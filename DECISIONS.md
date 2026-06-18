@@ -1090,3 +1090,21 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   Branch rows provide the requested decision-tree surface while avoiding a premature criteria
   ontology.
 - **Approved by:** human (owner, 2026-06-17 — "PLEASE IMPLEMENT THIS PLAN").
+
+## 2026-06-18 — MCP calls accept caller timezone for user-local time semantics
+
+- **Context:** Follows up the 2026-06-17 timezone fixes. `config.tz` made Minime independent of
+  the server/process timezone, but a remote agent harness can still serve an owner whose current
+  timezone differs from the machine's configured default.
+- **Decision:** Add optional `time_zone`/`timezone` common MCP parameters. Tool handlers receive
+  the resolved IANA timezone in `ToolCtx`. Date-only defaults such as `minime_state` "today",
+  `minime_agenda`'s default range, journal day titles, and decision `review_in_days` use that
+  timezone when supplied. Date-only `decided_at` is stored as noon in the caller timezone; ISO
+  datetimes without an explicit offset are interpreted as caller-local wall time; ISO datetimes
+  with `Z` or `+/-HH:MM` keep their explicit instant. MCP JSON responses render timestamp fields
+  with the caller timezone offset, while date-only fields like `due` and `review_at` remain
+  `YYYY-MM-DD`.
+- **Why:** The DB should keep canonical instants, but agents reason in the owner's calendar. Moving
+  conversion to the MCP boundary prevents "today" and visible timestamps from drifting when the
+  server is in UTC/Singapore and the owner is elsewhere.
+- **Approved by:** human (owner, 2026-06-18 — requested user-time-based MCP behavior).

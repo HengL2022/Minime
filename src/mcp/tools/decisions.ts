@@ -6,7 +6,8 @@ import {
   reviewDecision,
 } from "../../db/repo";
 import { indexParent } from "../../search/index-parent";
-import { localDateStr, now } from "../../util/clock";
+import { localDateStr, localDateTimeToUtc, now } from "../../util/clock";
+import { config } from "../../util/config";
 import { ToolError, envelope } from "../envelope";
 import type { ToolDef } from "./registry";
 
@@ -24,6 +25,8 @@ const BRANCH_STATUS = ["chosen", "rejected", "considered"] as const;
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 const ISO_DATETIME =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})?$/;
+const ISO_DATETIME_PARTS =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(Z|[+-]\d{2}:\d{2})?$/;
 
 function validDateOnly(value: string): boolean {
   if (!DATE_ONLY.test(value)) return false;
@@ -76,13 +79,31 @@ function branchMd(question: string, b: any): string {
     .join("\n\n");
 }
 
-function parseDecisionDate(value?: string): Date | null {
+function parseDecisionDate(value?: string, timeZone = config.tz): Date | null {
   if (!value) return null;
   if (!DATE_ONLY.test(value) && !ISO_DATETIME.test(value)) {
     throw new ToolError("BAD_INPUT", "invalid decided_at");
   }
   if (!validDateOnly(value.slice(0, 10))) throw new ToolError("BAD_INPUT", "invalid decided_at");
-  const d = DATE_ONLY.test(value) ? new Date(`${value}T12:00:00`) : new Date(value);
+  if (DATE_ONLY.test(value)) {
+    const [year, month, day] = value.split("-").map(Number);
+    return localDateTimeToUtc(year!, month!, day!, 12, 0, 0, 0, timeZone);
+  }
+  const m = ISO_DATETIME_PARTS.exec(value);
+  if (!m) throw new ToolError("BAD_INPUT", "invalid decided_at");
+  const [, year, month, day, hour, minute, second, fraction, offset] = m;
+  const d = offset
+    ? new Date(value)
+    : localDateTimeToUtc(
+        Number(year),
+        Number(month),
+        Number(day),
+        Number(hour),
+        Number(minute),
+        Number(second ?? 0),
+        Number((fraction ?? "0").padEnd(3, "0").slice(0, 3)),
+        timeZone,
+      );
   if (Number.isNaN(d.getTime())) throw new ToolError("BAD_INPUT", "invalid decided_at");
   return d;
 }
@@ -147,7 +168,7 @@ export const logDecisionTool: ToolDef = {
     // past midnight, UTC not yet rolled over) — review dates must be the owner's
     // calendar day, not UTC's. See DECISIONS.md (state/journal/decision TZ fixes).
     const reviewAt =
-      params.review_at ?? localDateStr(new Date(now().getTime() + days * 86_400_000));
+      params.review_at ?? localDateStr(new Date(now().getTime() + days * 86_400_000), ctx.timeZone);
     const { id } = await insertDecision({
       question: params.question,
       options: params.options,
@@ -159,7 +180,7 @@ export const logDecisionTool: ToolDef = {
       stakes: params.stakes ?? null,
       reversibility: params.reversibility ?? null,
       confidence: params.confidence ?? null,
-      decidedAt: parseDecisionDate(params.decided_at),
+      decidedAt: parseDecisionDate(params.decided_at, ctx.timeZone),
       reviewAt,
       tier: params.tier ?? 1,
       transcript: params.transcript?.map((t: any) => ({

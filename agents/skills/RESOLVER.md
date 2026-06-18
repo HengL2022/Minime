@@ -6,7 +6,9 @@ question, then `capture` files the follow-up thought).
 
 Universal rules, regardless of skill: numbers only via `minime_query_metric` (I6); cite source
 IDs for every claim; surface the envelope's `gaps`/`staleness` verbatim; never present
-inference as memory.
+inference as memory. If you know the owner's current IANA timezone, pass it as `time_zone`
+on MCP calls so "today", date-only inputs, and timestamp outputs follow the owner rather
+than the server process.
 
 ## Routing
 

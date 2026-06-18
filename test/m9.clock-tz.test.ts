@@ -7,7 +7,7 @@
 // with an explicit timeZone makes the boundary correct regardless of process TZ.
 
 import { describe, expect, test } from "bun:test";
-import { localDateStr } from "../src/util/clock";
+import { localDateStr, localDateTimeToUtc } from "../src/util/clock";
 import { config } from "../src/util/config";
 
 describe("localDateStr honors config.tz independent of process TZ", () => {
@@ -28,5 +28,11 @@ describe("localDateStr honors config.tz independent of process TZ", () => {
       day: "2-digit",
     }).format(instant); // en-CA → YYYY-MM-DD
     expect(localDateStr(instant)).toBe(expected);
+  });
+
+  test("date-only local noon converts through the caller timezone, not the server timezone", () => {
+    const noonLosAngeles = localDateTimeToUtc(2026, 6, 10, 12, 0, 0, 0, "America/Los_Angeles");
+    expect(noonLosAngeles.toISOString()).toBe("2026-06-10T19:00:00.000Z");
+    expect(localDateStr(noonLosAngeles, "America/Los_Angeles")).toBe("2026-06-10");
   });
 });

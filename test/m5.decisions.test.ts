@@ -235,6 +235,19 @@ describe("decision engine", () => {
     expect(edgeCount!.n).toBe(2);
   });
 
+  test("date-only decided_at stores local noon in the caller timezone", async () => {
+    const logged = await call("minime_log_decision", {
+      question: "Backfill a Los Angeles decision?",
+      options: ["yes", "no"],
+      choice: "yes",
+      decided_at: "2026-06-10",
+      time_zone: "America/Los_Angeles",
+    });
+    const [decision] =
+      await sql`select decided_at from decisions where id = ${(logged.data as any).decision_id}`;
+    expect(decision!.decided_at.toISOString()).toBe("2026-06-10T19:00:00.000Z");
+  });
+
   test("decision interview schema rejects invalid tool input", async () => {
     const badConfidence = await invokeTool(
       toolByName("minime_log_decision"),

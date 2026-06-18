@@ -8,7 +8,7 @@ export const stateTool: ToolDef = {
     "Snapshot of now: today/tomorrow calendar, due tasks, open commitments, decision reviews due, review-queue count, metric anomalies (from rollups only).",
   schema: {},
   handler: async (_params, ctx) => {
-    const s = await stateSnapshot(ctx.actor);
+    const s = await stateSnapshot(ctx.actor, ctx.timeZone);
     const sources: SourceRef[] = [
       ...s.calendar.map((c: any) => ({ type: "calendar_event", id: c.id, title: c.title })),
       ...s.tasks_due.map((t: any) => ({ type: "task", id: t.id, title: t.title })),
