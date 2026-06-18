@@ -1194,7 +1194,7 @@ export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Pro
   // correct regardless of DB session TZ or time of day. See DECISIONS.md.
   const today = localDateStr(t, timeZone);
   const allowed = await allowedTier(actor);
-  const [calendar, tasks, commitments, decisionsDue, openReview, anomalies] = await Promise.all([
+  const [calendar, tasks, commitments, decisionsDue, openReview, anomalies, movedToday] = await Promise.all([
     sql`select id, uid, starts_at, ends_at, title, location from calendar_events
         where starts_at >= ${t}::timestamptz - interval '1 hour'
           and starts_at < ${t}::timestamptz + interval '2 days'
@@ -1215,10 +1215,20 @@ export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Pro
         order by review_at nulls last`,
     sql`select count(*)::int as n from review_queue where status = 'open'`,
     metricAnomalies(),
+    // What MOVED today: tasks closed (done/dropped) on the owner's LOCAL calendar
+    // day. minime_state otherwise reports only OPEN work, so same-day completions
+    // were structurally invisible to the evening review's "what moved today".
+    // Compare the local-date of updated_at (cast in the owner's TZ) to local today.
+    sql`select id, title, status, updated_at from tasks
+        where status in ('done','dropped')
+          and (updated_at at time zone ${timeZone ?? "UTC"})::date = ${today}::date
+          and tier <= ${allowed}
+        order by updated_at`,
   ]);
   return {
     calendar,
     tasks_due: tasks,
+    moved_today: movedToday,
     commitments_open: commitments,
     decision_reviews_due: decisionsDue,
     review_queue_open: openReview[0]?.n ?? 0,

@@ -6,8 +6,9 @@ reflection prompts, then (B) when the owner replies, capture what they say.
 
 ## A. Gather and deliver
 
-1. `minime_state` — tasks due, open commitments, decision reviews due,
-   review-queue count, metric anomalies. Usually the main call.
+1. `minime_state` — tasks due, **tasks moved (closed) today** (`moved_today`:
+   tasks marked done/dropped on the owner's local day), open commitments,
+   decision reviews due, review-queue count, metric anomalies. Usually the main call.
 2. `minime_get_context(person_name=<owner>)` — owner context (goals, active
    projects, routines). Use the owner name from the database, not a hardcoded one.
 3. `minime_search` — surface active threads from the day not captured by state.
@@ -21,7 +22,10 @@ reflection prompts, then (B) when the owner replies, capture what they say.
 Then deliver a short review, in this order. Omit any empty section:
 
 1. **Quick check-in** — one or two lines framing the day.
-2. **What moved today** — tasks done, commitments made/closed, anything captured.
+2. **What moved today** — tasks closed today (from `moved_today` — done *and*
+   dropped, with their close times converted to local), commitments made/closed,
+   anything captured. This is the credit-where-due section: surface every
+   completion, never leave a real day's work invisible.
 3. **Still open** — tasks due/overdue, open commitments, decisions awaiting a choice.
 4. **Tomorrow setup** — what's on the calendar and the 1–3 things worth teeing up.
 5. **Reflection prompt** — 2–4 short questions (not an essay), grounded in the
