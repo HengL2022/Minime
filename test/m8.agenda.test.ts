@@ -66,8 +66,16 @@ describe("minime_agenda (forward-looking task lookup)", () => {
   test("default window anchors to the caller timezone when provided", async () => {
     const instant = new Date("2026-06-17T01:00:00.000Z");
     setNow(instant);
-    const agenda = await call("minime_agenda", { time_zone: "America/Los_Angeles" });
-    expect((agenda.data as any).from).toBe(localDateStr(instant, "America/Los_Angeles"));
+    try {
+      const agenda = await call("minime_agenda", { time_zone: "America/Los_Angeles" });
+      expect((agenda.data as any).from).toBe(localDateStr(instant, "America/Los_Angeles"));
+    } finally {
+      // Restore the real-now anchor the seed was built against. Without this the frozen
+      // 2026-06-17 clock leaks into later tests, shifting their date windows off the seed's
+      // future-dated tasks (+12/+20) and making them pass/fail depending on the calendar
+      // date the suite runs — which is what broke the install workflow's `bun test` gate.
+      setNow(new Date());
+    }
   });
 
   test("explicit wide range includes inbox-status tasks and excludes done/dropped", async () => {
