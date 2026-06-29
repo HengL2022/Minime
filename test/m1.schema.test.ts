@@ -154,6 +154,27 @@ describe("decision interview schema", () => {
     await expectSqlReject(sql`truncate decision_transcripts`, /append-only/);
   });
 
+  test("interactions_subject_xor: rejects BOTH person+org, tolerates a single subject or none", async () => {
+    const [p] = await sql`insert into people (canonical_name) values ('XOR Probe Person') returning id`;
+    const [o] = await sql`insert into orgs (canonical_name) values ('XOR Probe Org') returning id`;
+    // both subjects set → ambiguous → rejected
+    await expectSqlReject(
+      sql`insert into interactions (person_id, org_id, kind, summary, occurred_at)
+          values (${p!.id}, ${o!.id}, 'note', 'both set', now())`,
+      /interactions_subject_xor/,
+    );
+    // person-only, org-only, and subjectless (legacy note) all allowed (<= 1)
+    const [r1] = await sql`insert into interactions (person_id, kind, summary, occurred_at)
+                           values (${p!.id}, 'note', 'person only', now()) returning id`;
+    expect(r1!.id).toBeString();
+    const [r2] = await sql`insert into interactions (org_id, kind, summary, occurred_at)
+                           values (${o!.id}, 'note', 'org only', now()) returning id`;
+    expect(r2!.id).toBeString();
+    const [r3] = await sql`insert into interactions (kind, summary, occurred_at)
+                           values ('note', 'subjectless legacy', now()) returning id`;
+    expect(r3!.id).toBeString();
+  });
+
   test("minime_app has tier policies for decision interview tables", async () => {
     const grants = await sql`
       select table_name, privilege_type
