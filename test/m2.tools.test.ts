@@ -132,6 +132,33 @@ describe("MCP server", () => {
     expect(p!.last_contact_at).not.toBeNull();
   });
 
+  test("minime_log_interaction with subject_type='org' attaches to an org, not a phantom person", async () => {
+    const before = await sql`select count(*)::int n from people where lower(canonical_name) = 'vazyme'`;
+    const r = await call("minime_log_interaction", {
+      person_name: "Vazyme",
+      kind: "email",
+      summary: "Quote request for lysis buffer.",
+      subject_type: "org",
+    });
+    // org-keyed: envelope carries org_id, no person_id, and NO phantom person was minted
+    expect(r.parsed.data.org_id).toBeString();
+    expect(r.parsed.data.person_id).toBeUndefined();
+    const after = await sql`select count(*)::int n from people where lower(canonical_name) = 'vazyme'`;
+    expect(after[0]!.n).toBe(before[0]!.n); // no phantom person created
+    // interaction row is org-keyed and satisfies the XOR
+    const [row] =
+      await sql`select person_id, org_id from interactions where id = ${r.parsed.data.interaction_id}`;
+    expect(row!.person_id).toBeNull();
+    expect(row!.org_id).toBe(r.parsed.data.org_id);
+    // 'auto' mode now resolves the existing org rather than minting a person
+    const r2 = await call("minime_log_interaction", {
+      person_name: "Vazyme",
+      kind: "call",
+      summary: "Follow-up on lead time.",
+    });
+    expect(r2.parsed.data.org_id).toBe(r.parsed.data.org_id);
+  });
+
   test("minime_log_decision + minime_review_decision close the loop", async () => {
     const d = await call("minime_log_decision", {
       question: "Harness: ship the test suite now?",

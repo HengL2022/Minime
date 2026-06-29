@@ -9,6 +9,7 @@ import {
   openItemsFor,
   parentMeta,
   recentInteractionsFor,
+  recentInteractionsForOrg,
   resolveOrg,
   resolvePerson,
 } from "../../db/repo";
@@ -147,6 +148,20 @@ export const getContextTool: ToolDef = {
         });
       }
       openItems = await openItemsFor(row.canonical_name, ctx.actor);
+    } else if (type === "org") {
+      // Org-keyed interactions (vendors/institutions) — enabled by 013_interactions_org.sql.
+      interactions = await recentInteractionsForOrg(row.id, 20, ctx.actor);
+      if (interactions.length === 0 && (await allowedTier(ctx.actor)) < 2) {
+        gaps.push("interactions are tier 2 — locked; call minime_unlock to read them");
+      }
+      for (const i of interactions) {
+        sources.push({
+          type: "interaction",
+          id: i.id,
+          updated_at: i.occurred_at,
+          created_by: i.created_by,
+        });
+      }
     }
 
     const newest = type === "person" ? (row.last_contact_at ?? row.updated_at) : row.updated_at;

@@ -858,24 +858,38 @@ export async function upsertTask(
   return row as any;
 }
 
+// An interaction attaches to EXACTLY ONE subject: a person OR an org (XOR enforced
+// by the interactions_subject_xor CHECK in 013_interactions_org.sql). Org-keyed
+// interactions are how vendors/institutions get history without minting a phantom
+// person row (the root cause of the phantom-org audit churn).
 export async function insertInteraction(
   i: {
-    personId: string;
+    personId?: string;
+    orgId?: string;
     kind: string;
     summary: string;
     occurredAt?: Date;
   } & Std,
 ): Promise<{ id: string }> {
+  if ((i.personId ? 1 : 0) + (i.orgId ? 1 : 0) !== 1) {
+    throw new Error("insertInteraction requires exactly one of personId or orgId");
+  }
   const at = i.occurredAt ?? now();
   const [row] = await sql`
-    insert into interactions (person_id, kind, summary, occurred_at, created_by, source, derived_from, tier)
-    values (${i.personId}, ${i.kind}, ${i.summary}, ${at},
+    insert into interactions (person_id, org_id, kind, summary, occurred_at, created_by, source, derived_from, tier)
+    values (${i.personId ?? null}, ${i.orgId ?? null}, ${i.kind}, ${i.summary}, ${at},
             ${i.createdBy ?? "human"}, ${i.source ?? "manual"}, ${i.derivedFrom ?? null}, ${i.tier ?? 2})
     returning id`;
-  await touchLastContact(i.personId, at);
-  await sql`insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by)
-            values ('interaction', ${row!.id}, 'involves', 'person', ${i.personId},
-                    'interactions', ${row!.id}, ${i.createdBy ?? "human"})`;
+  if (i.personId) {
+    await touchLastContact(i.personId, at);
+    await sql`insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by)
+              values ('interaction', ${row!.id}, 'involves', 'person', ${i.personId},
+                      'interactions', ${row!.id}, ${i.createdBy ?? "human"})`;
+  } else {
+    await sql`insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by)
+              values ('interaction', ${row!.id}, 'involves', 'org', ${i.orgId ?? null},
+                      'interactions', ${row!.id}, ${i.createdBy ?? "human"})`;
+  }
   return row as any;
 }
 
@@ -1387,6 +1401,19 @@ export async function recentInteractionsFor(
   const allowed = await allowedTier(actor);
   return sql`select id, kind, summary, occurred_at, created_by from interactions
              where person_id = ${personId} and tier <= ${allowed}
+             order by occurred_at desc limit ${limit}`;
+}
+
+// Org-keyed interactions (vendors/institutions). Mirrors recentInteractionsFor but
+// keyed on org_id — enabled by 013_interactions_org.sql.
+export async function recentInteractionsForOrg(
+  orgId: string,
+  limit = 20,
+  actor?: AccessActor,
+): Promise<any[]> {
+  const allowed = await allowedTier(actor);
+  return sql`select id, kind, summary, occurred_at, created_by from interactions
+             where org_id = ${orgId} and tier <= ${allowed}
              order by occurred_at desc limit ${limit}`;
 }
 
