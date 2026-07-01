@@ -1108,3 +1108,31 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   conversion to the MCP boundary prevents "today" and visible timestamps from drifting when the
   server is in UTC/Singapore and the owner is elsewhere.
 - **Approved by:** human (owner, 2026-06-18 — requested user-time-based MCP behavior).
+
+## 2026-07-01 — Minime owns person-vs-org classification (phantom-org root fix)
+
+- **Context:** Logging contact with a vendor/company repeatedly minted a phantom *person* row
+  (BioTree, and earlier vendors). Migration 015 let `interactions` attach to an `org`, but the
+  decision of *person vs. org* still leaked to the caller: the MCP `log_interaction` binding
+  can't pass `subject_type` (always `auto`), so Hermes had to pre-create the org or repair after.
+  That put classification intelligence in Hermes — a violation of the architecture (Minime owns
+  ingestion/classification; Hermes feeds raw text only).
+- **Decision:** Move the person/org decision into Minime's own pipeline.
+  1. `classify.ts` — interaction classification now emits `subject_type: "person"|"org"`
+     (LLM prompt instructs it; heuristic/mock uses a shared `orgCue` regex). Exported `orgCue`.
+  2. `watcher.ts` — the interaction branch routes to an org when: an org of that name already
+     exists (`resolveOrg`), OR `subject_type === "org"`, OR (subject_type absent) the *name*
+     carries a company cue. Otherwise it files a person, unchanged. Name-only cue fallback so
+     "met Daniel at the hospital" never misfiles Daniel.
+  3. Nightly watchdog (`dream` step `3b_phantom_persons` + `phantomPersonCandidates` in repo.ts)
+     flags existing person rows that look like an org (name matches a live org, or company-cue
+     name with zero human signal) as a **flag-only** `review_queue('phantom_person')` item —
+     never auto-retypes. New migration `016_phantom_person_review.sql` adds the queue kind;
+     the `minime_review_queue` tool exposes it.
+- **Why:** Fixes the bug at its source (write path) so new vendors never mint a person, keeps
+  the intelligence inside Minime, and adds a safety net for rows that slip through a binding
+  that can't pass `subject_type`. All flag-only repairs preserve the reversible-repair contract.
+- **Tests:** `test/m12.phantom-org.test.ts` (12 cases) — orgCue unit, classifier subject_type,
+  watcher org/person/existing-org routing, watchdog flag/no-flag/idempotency. Full suite 266 pass.
+- **Approved by:** human (owner — "1 and 2": approved both the classifier+watcher fix and the
+  nightly watchdog).

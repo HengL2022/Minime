@@ -1208,37 +1208,38 @@ export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Pro
   // correct regardless of DB session TZ or time of day. See DECISIONS.md.
   const today = localDateStr(t, timeZone);
   const allowed = await allowedTier(actor);
-  const [calendar, tasks, commitments, decisionsDue, openReview, anomalies, movedToday] = await Promise.all([
-    sql`select id, uid, starts_at, ends_at, title, location from calendar_events
+  const [calendar, tasks, commitments, decisionsDue, openReview, anomalies, movedToday] =
+    await Promise.all([
+      sql`select id, uid, starts_at, ends_at, title, location from calendar_events
         where starts_at >= ${t}::timestamptz - interval '1 hour'
           and starts_at < ${t}::timestamptz + interval '2 days'
           and tier <= ${allowed}
         order by starts_at`,
-    sql`select id, title, status, due from tasks
+      sql`select id, title, status, due from tasks
         where status in ('inbox','active','waiting') and due is not null and due <= ${today}::date
           and tier <= ${allowed}
         order by due`,
-    sql`select id, what, to_whom, due from commitments
+      sql`select id, what, to_whom, due from commitments
         where status = 'open' and tier <= ${allowed}
         order by due nulls last`,
-    sql`select id, question, review_at, choice from decisions
+      sql`select id, question, review_at, choice from decisions
         where reviewed_at is null
           and tier <= ${allowed}
           and ( (review_at is not null and review_at <= ${today}::date + 3)
                 or choice is null )
         order by review_at nulls last`,
-    sql`select count(*)::int as n from review_queue where status = 'open'`,
-    metricAnomalies(),
-    // What MOVED today: tasks closed (done/dropped) on the owner's LOCAL calendar
-    // day. minime_state otherwise reports only OPEN work, so same-day completions
-    // were structurally invisible to the evening review's "what moved today".
-    // Compare the local-date of updated_at (cast in the owner's TZ) to local today.
-    sql`select id, title, status, updated_at from tasks
+      sql`select count(*)::int as n from review_queue where status = 'open'`,
+      metricAnomalies(),
+      // What MOVED today: tasks closed (done/dropped) on the owner's LOCAL calendar
+      // day. minime_state otherwise reports only OPEN work, so same-day completions
+      // were structurally invisible to the evening review's "what moved today".
+      // Compare the local-date of updated_at (cast in the owner's TZ) to local today.
+      sql`select id, title, status, updated_at from tasks
         where status in ('done','dropped')
           and (updated_at at time zone ${timeZone ?? "UTC"})::date = ${today}::date
           and tier <= ${allowed}
         order by updated_at`,
-  ]);
+    ]);
   return {
     calendar,
     tasks_due: tasks,
@@ -1486,6 +1487,46 @@ export async function staleItems(
     union all
     select 'person' as type, id, canonical_name as label, updated_at from people
     where coalesce(last_contact_at, updated_at) < ${t}::timestamptz - make_interval(days => ${untouchedDays})`;
+}
+
+// Phantom-person watchdog candidates (dream step 3b). Surfaces person rows that actually
+// look like an organisation, so a human can retype them (retypePersonToOrg-style) or dismiss:
+//   - name_match: the person's canonical name or an alias equals an existing, non-retired
+//     org's canonical name or alias (case-insensitive). Strong signal it's really that org.
+//   - the caller (dream) additionally applies a company-cue heuristic to the name and only
+//     flags cue matches that ALSO have zero human signal (no relation, no interactions),
+//     using has_human_signal below. Both paths flag only — never auto-retype.
+// Returns one row per candidate person with the columns the dream step needs to decide.
+export async function phantomPersonCandidates(): Promise<
+  {
+    id: string;
+    canonical_name: string;
+    name_match: boolean;
+    has_human_signal: boolean;
+  }[]
+> {
+  return sql`
+    with p as (
+      select pe.id, pe.canonical_name, pe.relation,
+             array_agg(distinct lower(x.name)) as names
+      from people pe
+      cross join lateral (
+        select pe.canonical_name as name
+        union select pa.alias from person_aliases pa where pa.person_id = pe.id
+      ) x
+      group by pe.id, pe.canonical_name, pe.relation
+    ),
+    org_names as (
+      select lower(o.canonical_name) as name from orgs o where o.retired_at is null
+      union
+      select lower(oa.alias) from org_aliases oa
+      join orgs o on o.id = oa.org_id where o.retired_at is null
+    )
+    select p.id, p.canonical_name,
+           exists (select 1 from org_names n where n.name = any(p.names)) as name_match,
+           (p.relation is not null
+            or exists (select 1 from interactions i where i.person_id = p.id)) as has_human_signal
+    from p` as any;
 }
 
 export async function decisionsNeedingReview(): Promise<any[]> {

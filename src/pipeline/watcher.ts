@@ -5,6 +5,7 @@ import { copyFile, mkdir, readdir } from "node:fs/promises";
 import { basename, join } from "node:path";
 import chokidar from "chokidar";
 import {
+  ensureOrg,
   ensurePerson,
   findInboxByPath,
   insertDecision,
@@ -15,6 +16,7 @@ import {
   logEvent,
   openTasksForDedup,
   pendingInboxItems,
+  resolveOrg,
   setInboxFiled,
   setInboxPending,
   setInboxRejected,
@@ -29,6 +31,7 @@ import {
   classify,
   completionSignal,
   completionTitle,
+  orgCue,
   splitActionDecision,
 } from "./classify";
 import { findDuplicate } from "./dedup";
@@ -192,10 +195,35 @@ async function fileRow(
       return ["journal_entries", id];
     }
     case "interaction": {
-      const person = await ensurePerson(c.fields.person_name || "Unknown", ACTOR);
+      const name = c.fields.person_name || "Unknown";
       const kind = ["meeting", "call", "message", "email", "note"].includes(c.fields.kind)
         ? c.fields.kind
         : "note";
+      // Decide person vs. org so a vendor/company never mints a phantom person (the
+      // phantom-org bug). Precedence:
+      //   1. an EXISTING org of this name always wins (attach history to it);
+      //   2. else honour the classifier's explicit subject_type ("org" or "person");
+      //   3. else (subject_type absent — legacy/synced captures, or model omission) fall
+      //      back to a company cue in the NAME only. Name-only, not full text, so
+      //      "met Daniel at the hospital" doesn't misfile the person Daniel as an org.
+      // Minime owns this decision at ingestion — the caller (e.g. Hermes) only feeds raw text.
+      const existingOrg = await resolveOrg(name, ACTOR);
+      const st = c.fields.subject_type;
+      const useOrg = !!existingOrg || st === "org" || (st !== "person" && orgCue(name));
+      if (useOrg) {
+        const org = existingOrg ? { id: existingOrg.id } : await ensureOrg(name, ACTOR, "capture");
+        const { id } = await insertInteraction({
+          orgId: org.id,
+          kind,
+          summary: text,
+          createdBy: ACTOR,
+          source: "capture",
+          derivedFrom: inboxId,
+        });
+        await indexParent("interaction", id, text, undefined, 2);
+        return ["interactions", id];
+      }
+      const person = await ensurePerson(name, ACTOR);
       const { id } = await insertInteraction({
         personId: person.id,
         kind,

@@ -3,7 +3,14 @@ import { type ParentType, openReviewItems, parentMeta, resolveReviewItem } from 
 import { type SourceRef, ToolError, envelope } from "../envelope";
 import type { ToolDef } from "./registry";
 
-const KINDS = ["contradiction", "stale", "duplicate", "decision_review", "inbox_unfiled"] as const;
+const KINDS = [
+  "contradiction",
+  "stale",
+  "duplicate",
+  "decision_review",
+  "inbox_unfiled",
+  "phantom_person",
+] as const;
 const HIDDEN = "[above current tier]";
 const CONTENT_KEYS = new Set([
   "body",
@@ -77,7 +84,7 @@ async function maskStaleLabel(item: any, actor: string): Promise<any> {
 export const reviewQueueTool: ToolDef = {
   name: "minime_review_queue",
   description:
-    "List open review-queue items (contradiction | stale | duplicate | decision_review | inbox_unfiled), or resolve one as 'resolved' | 'dismissed'. The queue is flag-only: resolving never edits the flagged rows themselves.",
+    "List open review-queue items (contradiction | stale | duplicate | decision_review | inbox_unfiled | phantom_person), or resolve one as 'resolved' | 'dismissed'. The queue is flag-only: resolving never edits the flagged rows themselves.",
   schema: {
     action: z.enum(["list", "resolve"]).default("list"),
     kind: z.enum(KINDS).optional(),

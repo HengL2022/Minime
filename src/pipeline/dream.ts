@@ -8,6 +8,7 @@ import {
   listMetricDefs,
   logEvent,
   parentsNeedingExtraction,
+  phantomPersonCandidates,
   reviewItemExists,
   runMetricAgg,
   staleItems,
@@ -81,6 +82,37 @@ export async function contradictionScan(limit = 100): Promise<number> {
   return flagged;
 }
 
+// -- step 3b: phantom-person watchdog ---------------------------------------
+//
+// Safety net for the phantom-org bug. 015 + the classifier subject_type fix stop NEW
+// vendors/companies from minting a person row on the write path; this scan catches any
+// that slip through (a synced legacy capture, an MCP binding that can't pass subject_type,
+// a model miss). Flags — never auto-retypes — so a human confirms via the review queue.
+// Two independent signals:
+//   1. name_match: the person shares a name/alias with an existing non-retired org.
+//   2. company cue in the name (orgCue) AND zero human signal (no relation, no
+//      interactions) — a bare "BioTree"-shaped row nobody has ever interacted with.
+export async function phantomPersonScan(): Promise<number> {
+  const { orgCue } = await import("./classify");
+  let flagged = 0;
+  for (const c of await phantomPersonCandidates()) {
+    const cueOnly = !c.has_human_signal && orgCue(c.canonical_name);
+    if (!c.name_match && !cueOnly) continue;
+    if (await reviewItemExists("phantom_person", "person_id", c.id)) continue;
+    const reason = c.name_match
+      ? "person shares a name with an existing organisation"
+      : "name looks like a company and has no human interaction/relation signal";
+    await insertReviewItem("phantom_person", {
+      person_id: c.id,
+      canonical_name: c.canonical_name,
+      reason,
+      suggestion: "retype to org, or dismiss if this really is a person",
+    });
+    flagged++;
+  }
+  return flagged;
+}
+
 // -- step 5: metric rollups -------------------------------------------------
 
 export async function rollupMetrics(days = 90): Promise<number> {
@@ -143,6 +175,7 @@ export async function dream(): Promise<Record<string, unknown>> {
     return { candidates, compiled, skipped };
   });
   await step("3_contradictions", () => contradictionScan());
+  await step("3b_phantom_persons", () => phantomPersonScan());
   await step("4_stale", async () => {
     let flagged = 0;
     for (const item of await staleItems(7, 180)) {
