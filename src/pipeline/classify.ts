@@ -30,7 +30,10 @@ Reply with ONLY a JSON object: {"type": "...", "confidence": 0.0-1.0, "reason": 
 "reason" is one short sentence (<=140 chars) justifying the type and confidence; when confidence is low,
 say what made it ambiguous (e.g. "could be task or interaction", "two intents in one capture", "unknown person").
 fields by type: task -> {"title": string, "due": "YYYY-MM-DD" | null};
-interaction -> {"person_name": string, "kind": "meeting"|"call"|"message"|"email"|"note"};
+interaction -> {"person_name": string, "kind": "meeting"|"call"|"message"|"email"|"note", "subject_type": "person"|"org"};
+For interaction, set "subject_type" to "org" when the counterparty is a COMPANY / vendor / lab /
+institution / supplier (e.g. "emailed BioTree, a metabolomics company", "called Vazyme about the order")
+and "person" when it is an individual human ("met Daniel about sorting"). When unsure, use "person".
 journal -> {"mood": 1-5 | null}; decision_note -> {"question": string, "choice": string | null};
 note -> {"title": string}; unknown -> {}.
 
@@ -51,6 +54,20 @@ const COMPLETION_RE =
 
 export function completionSignal(text: string): boolean {
   return COMPLETION_RE.test(text);
+}
+
+// Org/company cue detection for interaction subject-typing. When a capture logs contact
+// with a COUNTERPARTY, we must decide whether it attaches to a person or an org — attaching
+// a vendor/company to a person mints a phantom person (the phantom-org bug this fixes).
+// The real LLM classifier decides via the prompt; this regex is the mock/heuristic fallback
+// AND the signal the phantom-person watchdog reuses to spot a company wrongly filed as a
+// person. Matches an appositive company descriptor ("BioTree, a metabolomics company") or a
+// trailing corporate suffix ("Vazyme Biotech", "Acme Inc", "… Ltd/GmbH/Pte").
+const ORG_CUE_RE =
+  /\b(company|companies|vendor|supplier|corp(?:oration)?|inc\.?|ltd\.?|llc|gmbh|s\.?a\.?|pte\.?|co\.?|biotech|bioscience|laborator(?:y|ies)|institute|university|clinic|hospital|foundation|agency|firm|startup|manufacturer|distributor|contractor|consultancy|consulting)\b/i;
+
+export function orgCue(text: string): boolean {
+  return ORG_CUE_RE.test(text);
 }
 
 // Build a concise done-task title from a mixed capture's text: take the leading clause up
@@ -130,7 +147,11 @@ export function heuristicClassify(text: string): Classification {
     return {
       type: "interaction",
       confidence: 0.85,
-      fields: { person_name: m?.[1] ?? "Unknown", kind },
+      fields: {
+        person_name: m?.[1] ?? "Unknown",
+        kind,
+        subject_type: orgCue(firstLine) ? "org" : "person",
+      },
       reason: "opens with a met/called/talked-to verb",
     };
   }
