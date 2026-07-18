@@ -290,11 +290,45 @@ describe("dream wiring + review tool", () => {
     expect(items.length).toBe(3);
     expect(JSON.stringify(items)).toContain("Verity"); // entity names are the label
     expect(JSON.stringify(items)).not.toContain("school run"); // anchor text never surfaces
+    // the model's one-line reason may quote tier-2 anchor text — always masked at the tool
+    for (const it of items) expect(it.payload.reason).toBe("[above current tier]");
     const resolved = await invokeTool(
       tool,
       { action: "resolve", id: items[0].id, status: "dismissed" },
       { actor: "agent:test" },
     );
     expect(resolved.ok).toBe(true);
+  });
+
+  test("tier-2-anchored suspect edge: rel + names masked at tier 1, ids stay for triage", async () => {
+    await resetDb();
+    // Bare-first-name org on a TIER-2 page → the edge inherits tier 2; the heuristic denies it.
+    const [org] =
+      await testSql`insert into orgs (canonical_name, tier) values ('Verity', 1) returning id`;
+    const [pg] = await testSql`insert into pages (path, title, body_md, content_hash, tier)
+      values ('gh/mask.md', 'gh/mask', 'Talked with Verity about the school run.', 'hmask', 2) returning id`;
+    await testSql`insert into chunks (parent_type, parent_id, ord, text, tier)
+      values ('page', ${pg!.id}, 0, 'Talked with Verity about the school run.', 2)`;
+    const [edge] = await testSql`
+      insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by, confidence)
+      values ('page', ${pg!.id}, 'mentions', 'org', ${org!.id}, 'pages', ${pg!.id}, 'system:extract', 0.8)
+      returning id`;
+    const r = await validateEdges();
+    expect(r.flagged).toBe(1);
+
+    const tool = toolByName("minime_review_queue");
+    const res = await invokeTool(
+      tool,
+      { action: "list", kind: "extract_suspect" },
+      { actor: "agent:test" },
+    );
+    expect(res.ok).toBe(true);
+    const [item] = (res as any).envelope.data.items;
+    expect(item.payload.edge_id).toBe(edge!.id); // ids stay for post-unlock triage
+    expect(item.payload.rule_key).toBe("mentions@0.8");
+    expect(item.payload.verdict).toBe("deny");
+    expect(item.payload.rel).toBe("[above current tier]"); // the triple is tier-2-anchored
+    expect(item.payload.dst.name).toBe("[above current tier]");
+    expect(JSON.stringify(item)).not.toContain("Verity"); // the name never rides a tier-1 read
   });
 });

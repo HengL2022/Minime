@@ -20,11 +20,12 @@ const FAMILY_CUE =
   /\b(daughter|son|wife|husband|spouse|partner|mother|father|parent|sibling|grandm\w+|grandf\w+)\b/i;
 const BARE_FIRST_NAME = /^[A-Z][a-z]+$/;
 // orgCue (classify.ts) is tuned for interaction-capture appositive phrasing ("a metabolomics
-// company") and misses a bare vendor-style trailing noun with no such cue (e.g. "BioTree
+// company") and misses a bare vendor-style trailing noun with no such cue (e.g. "FernCrest
 // Supplies") — exactly the third historical archetype this heuristic must catch. A small,
 // local supplement closes that gap without touching the shared classifier cue (deviation:
-// see w1-task-3-report.md). Deliberately narrow: this covers the KNOWN archetype vocabulary
-// seen in past incidents, not general vendor detection — the live model is the real detector.
+// DECISIONS.md § 2026-07-18 — W1). Deliberately narrow: this covers the KNOWN archetype
+// vocabulary seen in past incidents, not general vendor detection — the live model is the
+// real detector.
 const VENDOR_SUFFIX_CUE =
   /\b(supplies|supply|labs?|systems|solutions|holdings|logistics|pharmacy|group|enterprises|traders)\b/i;
 
@@ -93,6 +94,29 @@ async function modelVerdict(
   }
 }
 
+/** Queue the flag-only review item for a disagreement. IDs + names + one-line reason only —
+ * the anchor text itself never enters the payload. Returns false when already queued. */
+async function flagSuspect(
+  e: EdgeToValidate,
+  ruleKey: string,
+  verdict: Verdict["verdict"],
+  entityType: Verdict["entity_type"],
+  reason: string,
+): Promise<boolean> {
+  if (await reviewItemExists("extract_suspect", "edge_id", e.id)) return false;
+  await insertReviewItem("extract_suspect", {
+    edge_id: e.id,
+    rel: e.rel,
+    rule_key: ruleKey,
+    verdict,
+    src: { type: e.src_type, id: e.src_id, name: e.src_name },
+    dst: { type: e.dst_type, id: e.dst_id, name: e.dst_name },
+    entity_type: entityType,
+    reason,
+  });
+  return true;
+}
+
 export async function validateEdges(budget = 200) {
   const { classifyIsCloudForTier } = await import("../llm");
   const edges = await edgesForValidation(RECENT_HOURS, budget);
@@ -105,11 +129,14 @@ export async function validateEdges(budget = 200) {
     byRule: {} as Record<string, { checked: number; denied: number }>,
   };
   for (const e of edges) {
-    const tier = (e.tier >= 2 ? 2 : 1) as 1 | 2;
-    // legacy ceiling semantics (only reachable with no route set): skip rather than send
-    if (!config.mockOllama && classifyIsCloudForTier(tier) && tier > config.cloudMaxTier) continue;
     const anchors = await edgeAnchorTexts(e, e.dst_name ?? "");
     const anchor = anchors.map((a) => a.text).join(" ");
+    // Route by the text actually SENT: the prompt carries the anchor chunks, whose tier can
+    // exceed the edge's own (fetching them is a local read, so ordering this after the fetch
+    // leaks nothing). Ceiling-skip semantics below are unchanged.
+    const tier = (Math.max(e.tier, ...anchors.map((a) => a.tier), 1) >= 2 ? 2 : 1) as 1 | 2;
+    // legacy ceiling semantics (only reachable with no route set): skip rather than send
+    if (!config.mockOllama && classifyIsCloudForTier(tier) && tier > config.cloudMaxTier) continue;
     const v = config.mockOllama ? heuristicVerdict(e, anchor) : await modelVerdict(e, anchor, tier);
     if (!v) continue;
     const ruleKey = `${e.rel}@${e.confidence}`;
@@ -131,38 +158,15 @@ export async function validateEdges(budget = 200) {
     if (v.verdict === "deny" || typeMismatch) {
       out.denied++;
       rule.denied++;
-      if (!(await reviewItemExists("extract_suspect", "edge_id", e.id))) {
-        // IDs + names + one-line reason only — the anchor text itself never enters the payload
-        await insertReviewItem("extract_suspect", {
-          edge_id: e.id,
-          rel: e.rel,
-          rule_key: ruleKey,
-          verdict: v.verdict,
-          src: { type: e.src_type, id: e.src_id, name: e.src_name },
-          dst: { type: e.dst_type, id: e.dst_id, name: e.dst_name },
-          entity_type: v.entity_type,
-          reason: v.reason,
-        });
-        out.flagged++;
-      }
+      if (await flagSuspect(e, ruleKey, v.verdict, v.entity_type, v.reason)) out.flagged++;
     } else if (v.verdict === "unsure") {
       out.unsure++;
+      const resample = `unsure twice: ${v.reason}`.slice(0, REASON_CAP);
       if (
         (await edgeUnsureCount(e.id)) >= 2 &&
-        !(await reviewItemExists("extract_suspect", "edge_id", e.id))
-      ) {
-        await insertReviewItem("extract_suspect", {
-          edge_id: e.id,
-          rel: e.rel,
-          rule_key: ruleKey,
-          verdict: "unsure",
-          src: { type: e.src_type, id: e.src_id, name: e.src_name },
-          dst: { type: e.dst_type, id: e.dst_id, name: e.dst_name },
-          entity_type: v.entity_type,
-          reason: `unsure twice: ${v.reason}`.slice(0, REASON_CAP),
-        });
+        (await flagSuspect(e, ruleKey, "unsure", v.entity_type, resample))
+      )
         out.flagged++;
-      }
     } else out.confirmed++;
   }
   return out;

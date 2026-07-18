@@ -19,33 +19,6 @@ function todayStr(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-// Drop-all + migrate on the scratch DB — the same reset contract test/helpers.ts's resetDb()
-// gives tests, replicated inline. Scripts may not import test/helpers (test-only scaffolding);
-// this keeps the drop list in lockstep by hand instead.
-async function resetScratchDb(): Promise<void> {
-  const { sql } = await import("../src/db/client");
-  const { migrate } = await import("../src/db/migrate");
-  const tables = await sql`select tablename from pg_tables where schemaname = 'public'`;
-  for (const t of tables) {
-    await sql.unsafe(`drop table if exists "${t.tablename}" cascade`);
-  }
-  const fns = [
-    "set_updated_at",
-    "events_append_only",
-    "decision_transcripts_append_only",
-    "touch_decision_from_transcript",
-    "sync_decision_branch_update",
-    "edge_source_tier",
-    "set_edge_tier",
-    "app_allowed_tier",
-    "metric_agg",
-  ];
-  for (const f of fns) {
-    await sql.unsafe(`drop function if exists ${f} cascade`);
-  }
-  await migrate();
-}
-
 async function main(): Promise<number> {
   if (!process.env.EVAL_DATABASE_URL) {
     console.error("ERROR: EVAL_DATABASE_URL must point at a throwaway scratch database.");
@@ -75,7 +48,8 @@ async function main(): Promise<number> {
   (config as { databaseUrl: string }).databaseUrl = process.env.EVAL_DATABASE_URL;
 
   console.error(`graph-hygiene live bake: db=${db}`);
-  await resetScratchDb();
+  const { resetDb } = await import("../test/helpers");
+  await resetDb(); // drop + migrate the scratch DB (sanctioned reset path, as eval-search.ts)
 
   const { plantGraphHygieneCorpus } = await import("../fixtures/graph-hygiene");
   const { badEdgeIds, goodEdgeIds } = await plantGraphHygieneCorpus();

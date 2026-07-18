@@ -1257,7 +1257,10 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   Flag-only: repairs remain human-invoked (retypeOrgToPerson via the W4 repair runner). The
   CI heuristic's vendor-suffix vocabulary is deliberately narrow (known archetypes;
   production orgCue itself misses "X Supplies"-style names — the routed live model is the
-  real detector).
+  real detector). edge_validations is append-only by convention (no trigger — I8 concerns
+  events, untouched) and is engineer-ro-readable like review_queue; its reason text may
+  paraphrase tier-2 anchors, same accepted posture as review_queue payloads, masked at the
+  MCP read surface.
 - **Why:** Converts silent graph poisoning into triaged review items without LLM write
   authority (I5/I8 intact); creates the measurement for future rule demotion decisions.
 - **Approved by:** human (owner, 2026-07-18 improvement plan §2).

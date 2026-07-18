@@ -1,5 +1,11 @@
 import { z } from "zod";
-import { type ParentType, openReviewItems, parentMeta, resolveReviewItem } from "../../db/repo";
+import {
+  type ParentType,
+  edgeVisibleAtTier,
+  openReviewItems,
+  parentMeta,
+  resolveReviewItem,
+} from "../../db/repo";
 import { type SourceRef, ToolError, envelope } from "../envelope";
 import type { ToolDef } from "./registry";
 
@@ -41,6 +47,21 @@ async function visibleTitle(type: ParentType, id: string, actor: string): Promis
   return meta.get(id)?.title ?? null;
 }
 
+// extract_suspect endpoints ({type, id, name}) carry names the dream job captured in system
+// context (no tier predicate). Even when the edge itself is visible, re-resolve each name
+// through the tier-filtered parentMeta so e.g. a tier-2 person's name never rides a tier-1
+// edge — anything parentMeta won't return at the caller's tier comes back masked.
+async function visibleEndpoint(ep: any, actor: string): Promise<any> {
+  if (!ep || typeof ep !== "object" || ep.name == null) return ep;
+  if (ep.type !== "person" && ep.type !== "org") return ep; // page/etc. srcs store no name
+  return { ...ep, name: (await visibleTitle(ep.type, ep.id, actor)) ?? HIDDEN };
+}
+
+function maskEndpointName(ep: any): any {
+  if (!ep || typeof ep !== "object" || ep.name == null) return ep;
+  return { ...ep, name: HIDDEN };
+}
+
 // Stale payloads carry a label captured at dream time, which may title a row that is
 // above the caller's current tier — re-resolve through the tier-filtered parentMeta and
 // mask what the caller may not see (row IDs are fine, titles are not).
@@ -70,6 +91,48 @@ async function maskReviewPayload(item: any, actor: string): Promise<any> {
       ...payload,
       question: (await visibleTitle("decision", item.payload.decision_id, actor)) ?? HIDDEN,
     };
+  }
+
+  // Phantom-person payloads store canonical_name captured at dream time (system context) —
+  // re-resolve through the tier-filtered parentMeta so a tier-2 person stays masked.
+  if (item.kind === "phantom_person" && typeof item.payload?.person_id === "string") {
+    try {
+      payload = {
+        ...payload,
+        canonical_name: (await visibleTitle("person", item.payload.person_id, actor)) ?? HIDDEN,
+      };
+    } catch {
+      payload = { ...payload, canonical_name: HIDDEN };
+    }
+  }
+
+  // Suspect-edge payloads hold the full triple (rel + endpoint names). Gate it on the EDGE's
+  // tier (edges inherit their source parent's tier): invisible → mask rel + names, keep
+  // edge_id/rule_key/verdict/entity_type for post-unlock triage; visible → still re-resolve
+  // each endpoint name at the caller's tier. Fail closed on any lookup error.
+  if (item.kind === "extract_suspect" && typeof item.payload?.edge_id === "string") {
+    const raw = item.payload;
+    try {
+      payload = (await edgeVisibleAtTier(raw.edge_id, actor))
+        ? {
+            ...payload,
+            src: await visibleEndpoint(raw.src, actor),
+            dst: await visibleEndpoint(raw.dst, actor),
+          }
+        : {
+            ...payload,
+            rel: HIDDEN,
+            src: maskEndpointName(raw.src),
+            dst: maskEndpointName(raw.dst),
+          };
+    } catch {
+      payload = {
+        ...payload,
+        rel: HIDDEN,
+        src: maskEndpointName(raw.src),
+        dst: maskEndpointName(raw.dst),
+      };
+    }
   }
 
   return { ...item, payload };

@@ -1575,9 +1575,13 @@ export async function edgesForValidation(
     limit ${limit}`) as unknown as EdgeToValidate[];
 }
 
-/** Chunks of the edge's SOURCE PARENT containing the needle — edges are parent-anchored
- * (source_table = real table name, source_id = parent row id; nothing writes chunk-anchored
- * edges). Falls back to the parent's first chunk when the needle is absent. */
+/** Chunks of the edge's SOURCE PARENT containing the needle. Chunk-anchored edges DO exist
+ * elsewhere (the dream entity-link pass writes mentions edges with source_table='chunks');
+ * the parent-anchored claim (source_table = real table name, source_id = parent row id)
+ * holds for the system:extract works_at/mentions edges written by extract-edges — which is
+ * what edgesForValidation filters on, so those are the only edges reaching this function
+ * from the validation sweep. Falls back to the parent's first chunk when the needle is
+ * absent (and to [] for a source_table with no PARENTS mapping, e.g. 'chunks'). */
 export async function edgeAnchorTexts(
   e: Pick<EdgeToValidate, "source_table" | "source_id">,
   needle: string,
@@ -1613,6 +1617,16 @@ export async function edgeUnsureCount(edgeId: string): Promise<number> {
   const [r] = await sql`select count(*)::int as n from edge_validations
     where edge_id = ${edgeId} and verdict = 'unsure'`;
   return (r as { n: number }).n;
+}
+
+// Read-surface tier gate for extract_suspect review items: the dream job captured the edge
+// triple (rel + endpoint names) without a tier predicate (system context), so the MCP tool
+// must decide per caller whether that triple may surface. Edges inherit their source parent's
+// tier (set_edge_tier trigger), making edges.tier the one check needed here.
+export async function edgeVisibleAtTier(edgeId: string, actor?: AccessActor): Promise<boolean> {
+  const allowed = await allowedTier(actor);
+  const rows = await sql`select 1 from edges where id = ${edgeId} and tier <= ${allowed} limit 1`;
+  return rows.length > 0;
 }
 
 export async function decisionsNeedingReview(): Promise<any[]> {

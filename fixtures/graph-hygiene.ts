@@ -49,12 +49,14 @@ export async function plantGraphHygieneCorpus(): Promise<Planted> {
   await chunk(p2, "My daughter Mia Ito visited Northside Lab where I work.");
   bad.push(await edge(["person", mia!.id], "works_at", ["org", lab!.id], p2, 0.7));
 
-  // Archetype 3: vendor-as-PERSON ("BioTree Supplies" minted as a person)
-  const [biotree] =
-    await sql`insert into people (canonical_name, tier) values ('BioTree Supplies', 1) returning id`;
-  const p3 = await page("gh/3.md", "Ordered two filters from BioTree Supplies today.");
-  await chunk(p3, "Ordered two filters from BioTree Supplies today.");
-  bad.push(await edge(["page", p3], "mentions", ["person", biotree!.id], p3, 0.8));
+  // Archetype 3: vendor-as-PERSON ("FernCrest Supplies" minted as a person). The name is
+  // fictional (fixtures rule) but keeps the "<Name> Supplies" shape of the real 2026-07-01
+  // incident so VENDOR_SUFFIX_CUE exercises the same detection path.
+  const [ferncrest] =
+    await sql`insert into people (canonical_name, tier) values ('FernCrest Supplies', 1) returning id`;
+  const p3 = await page("gh/3.md", "Ordered two filters from FernCrest Supplies today.");
+  await chunk(p3, "Ordered two filters from FernCrest Supplies today.");
+  bad.push(await edge(["page", p3], "mentions", ["person", ferncrest!.id], p3, 0.8));
 
   // Controls: a real works_at with clean evidence + a real person mention
   const [nadia] =
