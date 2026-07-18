@@ -8,6 +8,7 @@ import { importCalendar } from "./importers/calendar";
 import { importEmailMeta } from "./importers/email-meta";
 import { importHealth } from "./importers/health";
 import { type TxProfile, importTransactions } from "./importers/transactions";
+import { validateProviderRoutes } from "./llm";
 import { startMcpServer } from "./mcp/server";
 import { dbSnapshot } from "./pipeline/backup";
 import { brainSync } from "./pipeline/brain-sync";
@@ -78,6 +79,12 @@ async function main(): Promise<number> {
       return 0;
     }
     case "dream": {
+      try {
+        validateProviderRoutes();
+      } catch (e) {
+        console.error(e instanceof Error ? e.message : String(e));
+        return 1;
+      }
       const summary = await dream();
       console.log(JSON.stringify(summary, null, 2));
       return 0;
@@ -95,6 +102,12 @@ async function main(): Promise<number> {
       return r.ran ? 0 : 1;
     }
     case "serve": {
+      try {
+        validateProviderRoutes();
+      } catch (e) {
+        console.error(e instanceof Error ? e.message : String(e));
+        return 1;
+      }
       await migrate();
       await startWatcher();
       const cron = new Cron(config.dreamCron, () => {

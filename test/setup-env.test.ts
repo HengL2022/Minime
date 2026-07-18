@@ -76,6 +76,28 @@ describe("setup-env wizard", () => {
     expect(out).toContain("--no-ollama"); // next-step hint matches the cloud choice
   });
 
+  test("cloud + tier-2 routed local (W3): writes PROVIDER_ROUTE_TIER2 and keeps Ollama installed", async () => {
+    const dir = freshDir();
+    // TZ, stack=cloud, classify=openrouter(4), key, embed=keep-ollama(3),
+    // CLOUD_MAX_TIER=2, "Route tier-2 to local Ollama?"=y, backup=skip(4)
+    const { code, out } = await runWizard(dir, [
+      "",
+      "2",
+      "4",
+      "sk-or-fictional-route",
+      "3",
+      "2",
+      "y",
+      "4",
+    ]);
+    expect(code).toBe(0);
+    const env = await Bun.file(join(dir, ".env")).text();
+    expect(env).toContain("PROVIDER_ROUTE_TIER2=ollama");
+    expect(env).toContain("CLOUD_MAX_TIER=2");
+    // tier-2 still classifies locally, so Ollama must stay installed
+    expect(out).not.toContain("--no-ollama");
+  });
+
   test("B2 backup: shows the restic password but not the entered B2 key", async () => {
     const dir = freshDir();
     // TZ default, stack=local ollama, backup=B2(2), bucket, B2_ACCOUNT_ID, B2_ACCOUNT_KEY, ack

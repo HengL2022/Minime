@@ -3,6 +3,7 @@
 // present for cloud-routed jobs (no cloud network calls during verify).
 
 import { closeDb, sql } from "../db/client";
+import { classifyRouteForTier, validateProviderRoutes } from "../llm";
 import { hasAwsCredentials } from "../llm/bedrock";
 import { config } from "../util/config";
 
@@ -51,11 +52,26 @@ check(
 if (config.mockOllama) {
   check("llm providers", true, "mocked (MINIME_MOCK_OLLAMA=1)");
 } else {
-  const needsOllama: string[] = [];
-  if (config.embedProvider === "ollama") needsOllama.push(config.embedModel);
-  if (config.classifyProvider === "ollama") needsOllama.push(config.classifyModel);
+  let routesOk = true;
+  try {
+    validateProviderRoutes();
+  } catch (e) {
+    routesOk = false;
+    check("provider routes valid", false, e instanceof Error ? e.message : String(e));
+  }
+  const jobs: [string, string][] = [["embed", config.embedProvider]];
+  if (routesOk) {
+    jobs.push(
+      ["classify tier1", classifyRouteForTier(1)],
+      ["classify tier2", classifyRouteForTier(2)],
+    );
+  }
+  const needsOllama = new Set<string>();
+  if (config.embedProvider === "ollama") needsOllama.add(config.embedModel);
+  for (const [job, provider] of jobs)
+    if (job.startsWith("classify") && provider === "ollama") needsOllama.add(config.classifyModel);
 
-  if (needsOllama.length > 0) {
+  if (needsOllama.size > 0) {
     try {
       const res = await fetch(`${config.ollamaUrl}/api/tags`, {
         signal: AbortSignal.timeout(3000),
@@ -72,10 +88,7 @@ if (config.mockOllama) {
     openai: config.openaiEmbedModel,
     openrouter: config.openrouterEmbedModel,
   };
-  for (const [job, provider] of [
-    ["embed", config.embedProvider],
-    ["classify", config.classifyProvider],
-  ] as const) {
+  for (const [job, provider] of jobs) {
     if (provider === "ollama") continue;
     const [ok, detail] = cloudCredsOk(provider);
     const shown =

@@ -14,8 +14,11 @@ source of truth.** This file is only the distilled guardrails.
 
 ## Non-negotiable invariants (spec §1 — every PR is checked against these)
 
-- **I1 Local-first**: no cloud DB, no SaaS APIs, no telemetry. Runtime network = localhost Postgres
-  + localhost Ollama only. CI/tests run fully offline (mock Ollama).
+- **I1 Local-first**: no cloud DB, no SaaS APIs, no telemetry. Default runtime network =
+  localhost Postgres + localhost Ollama. Amendment (DECISIONS.md 2026-06-11 + W3): optional
+  cloud LLM providers for embed/classify, gated by `CLOUD_MAX_TIER` and per-tier
+  `PROVIDER_ROUTE_*` (stricter-only), every call audited as `egress:*`; tier-0 content never
+  leaves on any path. CI/tests still run fully offline (mock Ollama).
 - **I2 One door**: agents reach data only through the Minime MCP server; never hand out a DB
   connection string.
 - **I3 Tiered egress**: tier 0 content (transactions, health) never enters agent context —

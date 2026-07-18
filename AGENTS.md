@@ -92,6 +92,12 @@ audited `events` row (`egress:embed` / `egress:classify` — counts, never conte
 via `bun run src/cli.ts audit`. Mixed setups work (e.g. classify via Anthropic, embed via
 local Ollama). Embeddings are pinned to 768 dims by the schema, hence the embed column above.
 
+**Per-tier routing (W3):** `PROVIDER_ROUTE_TIER1` / `PROVIDER_ROUTE_TIER2` override
+`CLASSIFY_PROVIDER` for content of that tier (embeddings are NOT tier-routable — one vector
+space per index). Routes may only be stricter than `CLOUD_MAX_TIER`; violations fail at
+startup. Egress events carry the resolved `route_tier`. Raw inbox captures (tier unknown
+until classified) route as tier 2.
+
 ## Register the MCP server
 
 The server is stdio: `bun run <ABS_REPO_PATH>/src/cli.ts serve` (also starts the inbox
