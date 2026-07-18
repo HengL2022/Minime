@@ -1136,3 +1136,22 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   watcher org/person/existing-org routing, watchdog flag/no-flag/idempotency. Full suite 266 pass.
 - **Approved by:** human (owner — "1 and 2": approved both the classifier+watcher fix and the
   nightly watchdog).
+
+## 2026-07-18 — Adopted the 2026-07 improvement program (W1–W9)
+
+- **Context:** External repo review + WeKnora v0.6.0 comparative study produced
+  ~/Downloads/minime-improvement-plan.md (owner-reviewed). Reconnaissance against main@2c49cb2
+  grounded it; program touches spec §1/§9/§10/§12 areas via eval-gated workstreams.
+- **Decision:** Execute W3→W1→W4+W2 (phase 1), W5→W6 (2), W8 (3), W7 (4), W9 (last) per
+  .claude/plans/improve-2026-07-program.md; detailed wave-1 task cards in
+  .claude/plans/improve-w{3,1,4,2}-*.md. Orchestrator Fable 5; executors + first-pass review
+  Sonnet 5; critical review invariant-reviewer (Fable) + orchestrator. Milestone numbers:
+  m13=W3, m14=W1 (migration 017), m15=W4 (migration 018), m16–m19=W5/W6/W8/W7 (provisional,
+  renumber at merge). §13 defaults adopted: Q1 tier-2 classify local, Q2 originals outside
+  git + manifest, Q3 VLM bake-off before floors, Q4 topic seeds = decisions+goals, Q5 owner
+  schedules the W8 rebuild window. Rejected adoptions recorded durably: multi-tenant RBAC,
+  provider/vector-DB/IM matrices, web UI/graph browser, GraphRAG-as-mode, BLEU/ROUGE.
+- **Why:** Hardening before features; W3 before W1 so validation calls are born correctly
+  routed; every retrieval-touching change gated on MinimeBench floors (two-strike rule).
+- **Approved by:** human (owner, 2026-07-18 — reviewed the plan summary and said
+  "kick off wave 1"; §13 defaults stand unless vetoed before each wave).
