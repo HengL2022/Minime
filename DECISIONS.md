@@ -1241,3 +1241,26 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   behavior, preserved for compat); PROVIDER_ROUTE_TIER2=ollama is the closure and is the
   recommended standing config.
 - **Approved by:** human (owner, 2026-07-18 improvement plan §4/§13-Q1 defaults).
+
+## 2026-07-18 — W1: nightly extractor re-validation (dream 3c, flag-only)
+
+- **Context:** Five same-class extractor fixes in one month (phantom orgs, family works_at,
+  vendor-as-person). Rule fixes close instances, not the class. known-issues/
+  extractor-phantom-orgs.md anticipated this as "Fix B (dream-step safety net)".
+- **Decision:** Dream step 3c_validate_edges re-verifies a nightly budget (200) of
+  system:extract edges — recent 24h first, then oldest backlog — via the tier-routed classify
+  provider with min-context prompts (edge triple + anchoring sentences). deny/type-mismatch →
+  review_queue('extract_suspect'); unsure resamples once then flags. Verdicts land in the new
+  edge_validations ledger (migration 017) keyed by rule_key '<rel>@<confidence>' so rule
+  miss-rates are SQL, not event archaeology — a deliberate deviation from the proposal's
+  'extract:rule-miss' events. Step name 3c (proposal said 2c; that slot is decision digests).
+  Flag-only: repairs remain human-invoked (retypeOrgToPerson via the W4 repair runner). The
+  CI heuristic's vendor-suffix vocabulary is deliberately narrow (known archetypes;
+  production orgCue itself misses "X Supplies"-style names — the routed live model is the
+  real detector). edge_validations is append-only by convention (no trigger — I8 concerns
+  events, untouched) and is engineer-ro-readable like review_queue; its reason text may
+  paraphrase tier-2 anchors, same accepted posture as review_queue payloads, masked at the
+  MCP read surface.
+- **Why:** Converts silent graph poisoning into triaged review items without LLM write
+  authority (I5/I8 intact); creates the measurement for future rule demotion decisions.
+- **Approved by:** human (owner, 2026-07-18 improvement plan §2).

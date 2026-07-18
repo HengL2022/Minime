@@ -1529,6 +1529,106 @@ export async function phantomPersonCandidates(): Promise<
     from p` as any;
 }
 
+// -- W1 extractor re-validation (system-internal; NOT tier-gated — see personById precedent:
+// the dream job reads locally, egress is gated by per-tier routing at the provider layer) ----
+
+export interface EdgeToValidate {
+  id: string;
+  src_type: string;
+  src_id: string;
+  rel: string;
+  dst_type: string;
+  dst_id: string;
+  confidence: number;
+  tier: number;
+  source_table: string | null;
+  source_id: string | null;
+  src_name: string | null;
+  dst_name: string | null;
+}
+
+/** system:extract edges needing a verdict: the recent window first (born-yesterday edges get
+ * checked the next night), then the oldest backlog, so the whole graph is eventually swept.
+ * Settled verdicts (confirm/deny) exclude an edge; a single 'unsure' leaves it eligible for
+ * exactly the resample pass (validate-edges flags on the second unsure). */
+export async function edgesForValidation(
+  recentHours: number,
+  limit: number,
+): Promise<EdgeToValidate[]> {
+  return (await sql`
+    select e.id, e.src_type, e.src_id, e.rel, e.dst_type, e.dst_id, e.confidence, e.tier,
+           e.source_table, e.source_id,
+           coalesce(sp.canonical_name, so.canonical_name) as src_name,
+           coalesce(dp.canonical_name, do_.canonical_name) as dst_name
+    from edges e
+    left join people sp on e.src_type = 'person' and sp.id = e.src_id
+    left join orgs   so on e.src_type = 'org'    and so.id = e.src_id
+    left join people dp on e.dst_type = 'person' and dp.id = e.dst_id
+    left join orgs   do_ on e.dst_type = 'org'   and do_.id = e.dst_id
+    where e.extracted_by = 'system:extract'
+      and not exists (select 1 from edge_validations v
+                      where v.edge_id = e.id and v.verdict <> 'unsure')
+      and (select count(*) from edge_validations v2
+           where v2.edge_id = e.id and v2.verdict = 'unsure') < 2
+    order by (e.created_at >= now() - make_interval(hours => ${recentHours})) desc,
+             e.created_at asc
+    limit ${limit}`) as unknown as EdgeToValidate[];
+}
+
+/** Chunks of the edge's SOURCE PARENT containing the needle. Chunk-anchored edges DO exist
+ * elsewhere (the dream entity-link pass writes mentions edges with source_table='chunks');
+ * the parent-anchored claim (source_table = real table name, source_id = parent row id)
+ * holds for the system:extract works_at/mentions edges written by extract-edges — which is
+ * what edgesForValidation filters on, so those are the only edges reaching this function
+ * from the validation sweep. Falls back to the parent's first chunk when the needle is
+ * absent (and to [] for a source_table with no PARENTS mapping, e.g. 'chunks'). */
+export async function edgeAnchorTexts(
+  e: Pick<EdgeToValidate, "source_table" | "source_id">,
+  needle: string,
+): Promise<{ text: string; tier: number }[]> {
+  if (!e.source_table || !e.source_id) return [];
+  const shortType = Object.entries(PARENTS).find(([, v]) => v.table === e.source_table)?.[0];
+  if (!shortType) return [];
+  const hits = (await sql`
+    select text, tier from chunks
+    where parent_type = ${shortType} and parent_id = ${e.source_id}
+      and text ilike ${`%${needle}%`}
+    order by ord limit 3`) as unknown as { text: string; tier: number }[];
+  if (hits.length > 0) return hits;
+  return (await sql`
+    select text, tier from chunks
+    where parent_type = ${shortType} and parent_id = ${e.source_id}
+    order by ord limit 1`) as unknown as { text: string; tier: number }[];
+}
+
+export async function insertEdgeValidation(v: {
+  edgeId: string;
+  verdict: "confirm" | "deny" | "unsure";
+  entityType?: "person" | "org" | "neither";
+  reason?: string;
+  model: string;
+  ruleKey: string;
+}): Promise<void> {
+  await sql`insert into edge_validations (edge_id, verdict, entity_type, reason, model, rule_key)
+    values (${v.edgeId}, ${v.verdict}, ${v.entityType ?? null}, ${v.reason ?? null}, ${v.model}, ${v.ruleKey})`;
+}
+
+export async function edgeUnsureCount(edgeId: string): Promise<number> {
+  const [r] = await sql`select count(*)::int as n from edge_validations
+    where edge_id = ${edgeId} and verdict = 'unsure'`;
+  return (r as { n: number }).n;
+}
+
+// Read-surface tier gate for extract_suspect review items: the dream job captured the edge
+// triple (rel + endpoint names) without a tier predicate (system context), so the MCP tool
+// must decide per caller whether that triple may surface. Edges inherit their source parent's
+// tier (set_edge_tier trigger), making edges.tier the one check needed here.
+export async function edgeVisibleAtTier(edgeId: string, actor?: AccessActor): Promise<boolean> {
+  const allowed = await allowedTier(actor);
+  const rows = await sql`select 1 from edges where id = ${edgeId} and tier <= ${allowed} limit 1`;
+  return rows.length > 0;
+}
+
 export async function decisionsNeedingReview(): Promise<any[]> {
   const t = now();
   return sql`select id, question, review_at from decisions
