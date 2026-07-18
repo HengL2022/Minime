@@ -26,7 +26,6 @@ export function checkSubsystems(repoRoot: string): { ok: boolean; problems: stri
       problems.push(
         `no SUBSYSTEMS.md row mentions ${rel} — add a row (complexity budget) or fold it into an existing one`,
       );
-    void isDir;
   }
   return { ok: problems.length === 0, problems };
 }

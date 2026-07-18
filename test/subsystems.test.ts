@@ -19,9 +19,12 @@ describe("subsystem inventory coverage", () => {
     cpSync(`${process.cwd()}/docs/SUBSYSTEMS.md`, `${tmp}/docs/SUBSYSTEMS.md`);
     cpSync(`${process.cwd()}/src`, `${tmp}/src`, { recursive: true });
     writeFileSync(`${tmp}/src/rocketry/launch.ts`, "export {};\n");
-    const res = checkSubsystems(tmp);
-    expect(res.ok).toBe(false);
-    expect(res.problems.join("\n")).toContain("src/rocketry");
-    rmSync(tmp, { recursive: true, force: true });
+    try {
+      const res = checkSubsystems(tmp);
+      expect(res.ok).toBe(false);
+      expect(res.problems.join("\n")).toContain("src/rocketry");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
