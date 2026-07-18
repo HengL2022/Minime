@@ -34,6 +34,10 @@ Check, in priority order:
    `{data, sources, staleness?, gaps?}` envelope.
 9. **Conventions (§14)**: functions ~60 lines max; no ORM creeping in; fixtures fictional;
    deviations from spec recorded in `DECISIONS.md`.
+10. **Engineering write path (W4)**: no code/scripts/docs introduce a raw full-rights DB
+    connection for engineering use; ad-hoc writes appear only as committed repair scripts
+    under `scripts/repairs/` run via `scripts/repair.ts`; repair event payloads carry counts
+    and ids, never row contents.
 
 Output format: a verdict (PASS / BLOCK), then findings grouped as **Blockers** and **Warnings**,
 each with file:line, the invariant violated, and a one-line fix. If the diff is clean, say so

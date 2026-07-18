@@ -43,6 +43,11 @@ raw SQL, **no ORM** · plain numbered `.sql` migrations in `db/migrations/` ·
 - Prefer boring code: small modules, plain SQL, few dependencies — maintainable by one person for
   a decade. No new external network dependencies, ever.
 - Fixtures are realistic but **fictional** — never the owner's real data.
+- **Engineering sessions never write the live DB directly.** Ad-hoc DB access uses the
+  SELECT-only DSN in `.env.engineering` (`make psql-ro`). Live writes go through the MCP
+  tools, `make migrate`, or `bun run scripts/repair.ts <committed-script>` (auto pre-image
+  backup + `repair:*` audit). New tier-0 tables must add an explicit
+  `revoke select ... from minime_engineer_ro` in their migration.
 
 ## Commands
 

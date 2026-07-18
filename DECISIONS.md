@@ -1155,3 +1155,31 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   routed; every retrieval-touching change gated on MinimeBench floors (two-strike rule).
 - **Approved by:** human (owner, 2026-07-18 — reviewed the plan summary and said
   "kick off wave 1"; §13 defaults stand unless vetoed before each wave).
+
+## 2026-07-18 — W4: engineer read-only role + committed-script repair runner
+
+- **Context:** The eval-runner incident got a structural guard for benchmark runners, but
+  engineering sessions still connected as the full-rights owner role. Manual remediations
+  (retype cleanup, edge deletes) relied on discipline, not structure.
+- **Decision:** Migration 018 creates SELECT-only login role minime_engineer_ro; committed
+  .env.engineering is the engineering DSN (make psql-ro). Tightened vs the proposal: the
+  role is NOT BYPASSRLS (engineering sessions are agent sessions — RLS tier-gates them like
+  the MCP door) and tier-0 tables stay revoked per I3; the owner's raw path remains psql as
+  minime. Discovery while building the migration: every existing tier_read RLS policy (007,
+  008, 013, 014) was scoped `to minime_app` only, so Postgres's RLS default-deny meant a
+  merely-GRANTed role with no matching policy TO-list saw ZERO rows at every tier, not just
+  tier-2 — a plain `grant select` alone does not open a policy-gated table on its own.
+  Migration 018 therefore extends each tier_read policy's role list in place to
+  `minime_app, minime_engineer_ro` (write policies — tier_write/tier_update — are left
+  untouched, since the role has no INSERT/UPDATE grant regardless so they never apply to it),
+  with a `pg_policies` completeness test (test/m15.roles.test.ts) that fails immediately if a
+  future migration adds a tier_read policy "to minime_app" on a new table without also
+  extending it to minime_engineer_ro. Writes during engineering: MCP tools, make migrate, or
+  scripts/repair.ts — which requires the repair script to exist in a COMMITTED tree
+  (`git cat-file -e HEAD:scripts/repairs/<name>.ts`, not merely staged in the index, so a
+  `git reset` can't erase the trace of what ran), takes a mandatory pre-image pg_dump
+  (no backup ⇒ no repair), and logs repair:* events (counts only). First repair script wraps
+  retypeOrgToPerson, giving the dormant sanctioned-repair library its audited entry point.
+- **Why:** "Agents were careful" becomes "agents could not have done otherwise" — the
+  eval-guard philosophy extended to the highest-blast-radius surface.
+- **Approved by:** human (owner, 2026-07-18 improvement plan §5).
