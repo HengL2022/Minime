@@ -1155,3 +1155,17 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   routed; every retrieval-touching change gated on MinimeBench floors (two-strike rule).
 - **Approved by:** human (owner, 2026-07-18 — reviewed the plan summary and said
   "kick off wave 1"; §13 defaults stand unless vetoed before each wave).
+
+## 2026-07-18 — W2: subsystem inventory + complexity budget
+
+- **Context:** ~20 substantial subsystems, one owner, decade ambition; no document mapped
+  subsystem → justifying eval → deletion cost. `make verify` had drifted (m10–m12 suites
+  existed outside the gate).
+- **Decision:** docs/SUBSYSTEMS.md (five fields/row) + scripts/check-subsystems.ts structural
+  CI gate (doc↔src coverage both directions, no git dependency) + CLAUDE.md budget rule.
+  First verdicts: access-frequency boost gets its calibration arm piggybacked on W8's live
+  battery or is parked; SkillOpt parked owner-triggered pending train-set coverage. Also
+  backfilled verify-m10/11/12 into `make verify`.
+- **Why:** Cheapest structural defense against unowned complexity; converts deletion debates
+  into table lookups.
+- **Approved by:** human (owner, 2026-07-18 improvement plan §3).
