@@ -14,12 +14,13 @@ export interface RepairModule {
   run(args: string[]): Promise<Record<string, number | string>>;
 }
 
+// HEAD, not the index: a merely-staged script passes `git ls-files` but a `git reset`
+// would erase all trace of what ran — commit-history truth is the contract.
 async function committed(scriptName: string): Promise<boolean> {
-  const proc = Bun.spawn(["git", "ls-files", `scripts/repairs/${scriptName}.ts`], {
-    stdout: "pipe",
+  const proc = Bun.spawn(["git", "cat-file", "-e", `HEAD:scripts/repairs/${scriptName}.ts`], {
+    stderr: "pipe",
   });
-  const out = await new Response(proc.stdout).text();
-  return out.trim().length > 0;
+  return (await proc.exited) === 0;
 }
 
 async function preImageDump(scriptName: string, dumpDir: string): Promise<string | null> {
@@ -44,7 +45,7 @@ export async function runRepair(
     return 2;
   }
   if (!(await committed(scriptName))) {
-    console.error(`refusing: scripts/repairs/${scriptName}.ts is not a committed repair script`);
+    console.error(`refusing: scripts/repairs/${scriptName}.ts is not in a committed tree (HEAD)`);
     return 2;
   }
   const mod = (await import(`./repairs/${scriptName}.ts`)).default as RepairModule;

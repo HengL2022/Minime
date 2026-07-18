@@ -132,4 +132,26 @@ describe("repair runner", () => {
     const backups = [...new Bun.Glob("repair-retype-org-to-person-*.sql").scanSync(dumpDir)];
     expect(backups.length).toBeGreaterThan(0);
   });
+
+  test("failure path: backup precedes run, failed event content-free, exit 1", async () => {
+    if (!Bun.which("pg_dump")) return; // environment without client tools
+    const fakeId = crypto.randomUUID(); // well-formed, matches no org
+    // events accumulate across this file — scope to this invocation via the identity pk
+    const [prev] = await testSql`select coalesce(max(id), 0)::int as max_id from events`;
+    const glob = new Bun.Glob("repair-retype-org-to-person-*.sql");
+    const backupsBefore = [...glob.scanSync(dumpDir)].length;
+    const code = await runRepair("retype-org-to-person", [`--org-id=${fakeId}`], { dumpDir });
+    expect(code).toBe(1); // repair threw AFTER the backup gate — not a refusal (2)
+    const events = await testSql`select verb, payload from events
+      where verb like 'repair:%' and id > ${prev!.max_id} order by id`;
+    expect(events.length).toBe(2); // start + failed, nothing else
+    expect(events[0]!.payload.phase).toBe("start");
+    expect(events[1]!.payload.phase).toBe("failed");
+    const dump = JSON.stringify(events);
+    expect(dump).toContain(fakeId); // error names the uuid at most…
+    expect(dump).not.toContain("Hai Yan"); // …never row contents
+    expect(dump).not.toContain("Retypable");
+    const backupsAfter = [...glob.scanSync(dumpDir)].length;
+    expect(backupsAfter).toBe(backupsBefore + 1); // backup precedes run by design
+  });
 });
