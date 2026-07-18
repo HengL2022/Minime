@@ -1,7 +1,7 @@
 // W2 complexity-budget gate: docs/SUBSYSTEMS.md ↔ src/ structural coverage, both directions.
 // Rule v1 (deliberately simple + deterministic): every top-level entry under src/ must be
-// mentioned in some row's "What / where" cell, and every `src/...` path cited anywhere in the
-// doc must exist. No git, no network — identical result locally and in CI.
+// mentioned somewhere in the doc (any row or the plumbing line), and every `src/...` path
+// cited anywhere in the doc must exist. No git, no network — identical locally and in CI.
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
