@@ -1,5 +1,6 @@
 // W1 extractor re-validation (improve-w1-extract-validate.md). Offline; mock verdicts.
 import { beforeAll, describe, expect, test } from "bun:test";
+import { plantGraphHygieneCorpus } from "../fixtures/graph-hygiene";
 import {
   edgeAnchorTexts,
   edgeUnsureCount,
@@ -7,6 +8,7 @@ import {
   insertEdgeValidation,
   insertReviewItem,
 } from "../src/db/repo";
+import { validateEdges } from "../src/pipeline/validate-edges";
 import { expectSqlReject, resetDb, testSql } from "./helpers";
 
 describe("migration 017", () => {
@@ -109,5 +111,51 @@ describe("validation repo helpers", () => {
     const fallback = await edgeAnchorTexts(batch!, "no such needle anywhere");
     expect(fallback.length).toBe(1); // first-chunk fallback: needle absent
     expect(fallback[0]!.text).toBe("Intro paragraph unrelated to anything.");
+  });
+});
+
+describe("validateEdges (mock verdicts — the CI graph-hygiene bar)", () => {
+  test("flags 100% of planted bad edges, 0 false flags, ledger written, idempotent", async () => {
+    await resetDb();
+    const { badEdgeIds, goodEdgeIds } = await plantGraphHygieneCorpus();
+    const r1 = await validateEdges();
+    expect(r1.checked).toBe(badEdgeIds.length + goodEdgeIds.length);
+    expect(r1.flagged).toBe(badEdgeIds.length); // 100% bad flagged
+    const flagged =
+      await testSql`select payload->>'edge_id' as id from review_queue where kind = 'extract_suspect'`;
+    expect(new Set(flagged.map((f: any) => f.id))).toEqual(new Set(badEdgeIds)); // 0 false flags
+    expect(r1.byRule["works_at@0.7"]?.denied).toBe(1);
+    const r2 = await validateEdges(); // settled → nothing to do
+    expect(r2.checked).toBe(0);
+    const q =
+      await testSql`select count(*)::int as n from review_queue where kind = 'extract_suspect'`;
+    expect(q[0]!.n).toBe(badEdgeIds.length); // no duplicate flags
+  });
+
+  test("budget bounds a night's work; recent edges beat backlog", async () => {
+    await resetDb();
+    await plantGraphHygieneCorpus();
+    const r = await validateEdges(2);
+    expect(r.checked).toBe(2);
+  });
+
+  test("unsure resamples once, flags on the second unsure", async () => {
+    await resetDb();
+    // an edge whose anchor never mentions the dst → heuristic returns 'unsure'
+    const [ghost] =
+      await testSql`insert into orgs (canonical_name, tier) values ('Quiet Harbor Ltd', 1) returning id`;
+    const [pg] = await testSql`insert into pages (path, title, body_md, content_hash, tier)
+      values ('gh/u.md', 'gh/u', 'A page about something else entirely.', 'hu', 1) returning id`;
+    await testSql`insert into chunks (parent_type, parent_id, ord, text, tier)
+      values ('page', ${pg!.id}, 0, 'A page about something else entirely.', 1)`;
+    await testSql`insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by, confidence)
+      values ('page', ${pg!.id}, 'mentions', 'org', ${ghost!.id}, 'pages', ${pg!.id}, 'system:extract', 0.8)`;
+    const r1 = await validateEdges();
+    expect(r1.unsure).toBe(1);
+    expect(r1.flagged).toBe(0);
+    const r2 = await validateEdges(); // resample night
+    expect(r2.flagged).toBe(1);
+    const [item] = await testSql`select payload from review_queue where kind = 'extract_suspect'`;
+    expect(item!.payload.reason).toMatch(/unsure/i);
   });
 });
