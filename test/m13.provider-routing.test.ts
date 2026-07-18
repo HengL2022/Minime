@@ -2,6 +2,7 @@
 // is pure config; provider-level tests inject fakeFetch; pipeline tests patch globalThis.fetch.
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { classifyIsCloudForTier, classifyProviderForTier, classifyRouteForTier } from "../src/llm";
+import { classify } from "../src/pipeline/classify";
 import { contradictionScan } from "../src/pipeline/dream";
 import { compileNotes } from "../src/pipeline/notes";
 import { config } from "../src/util/config";
@@ -207,6 +208,30 @@ describe("contradiction scan per-tier routing", () => {
       patched.restore();
       config.mockOllama = true;
       config.cloudMaxTier = saved.cloudMaxTier;
+    }
+  });
+});
+
+describe("inbox classify assumed-tier-2 routing", () => {
+  test("capture text never reaches the cloud provider when tier-2 routes local", async () => {
+    await resetDb();
+    config.mockOllama = false;
+    config.classifyProvider = "openrouter";
+    config.openrouterApiKey = "test-key";
+    config.providerRouteTier2 = "ollama";
+    const patched = patchFetch(() => ({
+      response: JSON.stringify({ type: "journal", confidence: 0.9, fields: {}, reason: "test" }),
+    }));
+    try {
+      const c = await classify("dear diary, extremely private thought");
+      expect(c.type).toBe("journal");
+      expect(patched.cloudCalls).toEqual([]);
+      const egress =
+        await testSql`select count(*)::int as n from events where verb like 'egress:%'`;
+      expect(egress[0]!.n).toBe(0);
+    } finally {
+      patched.restore();
+      config.mockOllama = true;
     }
   });
 });
