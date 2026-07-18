@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 BUN := bun
 
-.PHONY: install setup install-hooks onboard update up down psql-ro migrate seed embed test lint verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 verify-m13 verify-m15 check-subsystems verify restore-drill restore-pitr promote-restore eval-search eval-search-live eval-snapshot eval-pmb
+.PHONY: install setup install-hooks onboard update up down psql-ro migrate seed embed test lint verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 verify-m13 verify-m14 verify-m15 check-subsystems verify restore-drill restore-pitr promote-restore eval-search eval-search-live eval-snapshot eval-pmb eval-graph-hygiene
 
 # Scratch DB for MinimeBench — a throwaway database the runner DROPs and rebuilds. Derived
 # from DATABASE_URL so non-default ports just work; override EVAL_DATABASE_URL to change it.
@@ -100,6 +100,12 @@ verify-m12:
 verify-m13:
 	@$(BUN) test test/m13.*.test.ts
 
+# W1: nightly extractor re-validation (dream 3c_validate_edges) — planted-corpus bar: 100%
+# of 3 planted-bad edges flagged, 0 false flags on the 2 planted-good edges (mock verdicts;
+# the live-model bake is make eval-graph-hygiene, owner-run).
+verify-m14:
+	@$(BUN) test test/m14.*.test.ts
+
 # W4: engineer read-only role (minime_engineer_ro) + committed-script repair runner.
 verify-m15:
 	@$(BUN) test test/m15.*.test.ts
@@ -112,7 +118,7 @@ check-subsystems:
 # The full gate: every milestone suite PLUS the retrieval-regression gate (offline
 # MinimeBench vs the committed baseline floors) — new features must not quietly make
 # retrieval worse (gbrain-evals stability discipline, DECISIONS.md 2026-06-12).
-verify: verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 verify-m13 verify-m15 check-subsystems eval-search
+verify: verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 verify-m13 verify-m14 verify-m15 check-subsystems eval-search
 
 # Restores the latest restic snapshot into a scratch DB and runs the m1 suite against it.
 restore-drill:
@@ -203,3 +209,9 @@ eval-search-live:
 	@createdb $(notdir $(EVAL_DATABASE_URL)) 2>/dev/null || true
 	@DATABASE_URL=$(EVAL_DATABASE_URL) EVAL_DATABASE_URL=$(EVAL_DATABASE_URL) \
 		$(BUN) run scripts/eval-search.ts --mode live --round $(or $(ROUND),live-r1) --repeats 3
+
+# W1 graph-hygiene live bake (owner-run; CI bar is the mock path inside verify-m14)
+eval-graph-hygiene:
+	@createdb $(notdir $(EVAL_DATABASE_URL)) 2>/dev/null || true
+	@DATABASE_URL=$(EVAL_DATABASE_URL) EVAL_DATABASE_URL=$(EVAL_DATABASE_URL) \
+		$(BUN) run scripts/eval-graph-hygiene.ts
