@@ -1204,3 +1204,40 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   covered by discipline plus the repair:* audit trail — the eval-guard philosophy extended
   to the highest-blast-radius surface.
 - **Approved by:** human (owner, 2026-07-18 improvement plan §5).
+
+## 2026-07-18 — W3: per-tier classify routing (PROVIDER_ROUTE_TIER1/2)
+
+- **Context:** CLOUD_MAX_TIER was all-or-nothing per job: the standing config sent tier-2
+  journal/interaction text to Bedrock for classification and notes compilation. Reconnaissance
+  found the inbox classifier had NO tier gate at all and its content tier is unknowable at
+  call time (assigned after classification).
+- **Decision:** PROVIDER_ROUTE_TIER1/TIER2 override CLASSIFY_PROVIDER per content tier;
+  CLOUD_MAX_TIER stays as a hard ceiling (routes may only be stricter — violations throw at
+  startup). Tier-0 routes rejected. Inbox captures route as assumed tier 2. Egress events
+  gain route_tier. Embed routing DEFERRED (single 768-dim vector space invariant): one embed
+  model for all tiers; revisit only with a per-tier embedding-space design.
+- **Why:** Minimizes the intimate-text egress surface without giving up cloud quality on
+  tier-1 world-facts; pairs skipped under the old ceiling are now scanned locally instead.
+- **Test design:** The m13 cloud-leak tripwires deliberately stand in an openrouter provider
+  with a fake key (NOT bedrock) wherever a test proves content did NOT reach the cloud.
+  Bedrock throws at provider construction when offline (no BEDROCK_MODEL/AWS credentials
+  present in CI), and the pipeline's existing heuristic fallback on that throw would quietly
+  swallow the leak before the test could observe it — a bedrock-backed tripwire would pass
+  vacuously whether or not routing worked. Openrouter constructs successfully with any
+  truthy key, so un-routed code genuinely reaches the patched fetch and trips the leak wire,
+  and the tests can record cloud URLs and egress rows and assert zero of either. The
+  notes-routing tripwire was proven RED against the pre-fix (reverted) code before being
+  accepted, confirming it actually exercises the routing decision rather than passing by
+  construction.
+- **Audit note:** With PROVIDER_ROUTE_TIER1/2 unset, provider selection is unchanged from
+  before W3 (same provider choices, same skip/filter semantics) — but on the migrated call
+  sites (notes compilation, contradiction scan, inbox classify) classify egress events now
+  carry an additive `route_tier` field regardless of routing state. The plan records this as
+  the one tolerated delta from strict byte-identical legacy behavior ("same egress payloads
+  apart from the additive route_tier field"); it enriches the I8 append-only audit trail
+  rather than altering any existing row shape. One honest gap preserved for legacy identity:
+  with routes unset and a cloud CLASSIFY_PROVIDER under CLOUD_MAX_TIER=1, assumed-tier-2
+  inbox captures still egress — the legacy inbox fallback consults no ceiling (pre-existing
+  behavior, preserved for compat); PROVIDER_ROUTE_TIER2=ollama is the closure and is the
+  recommended standing config.
+- **Approved by:** human (owner, 2026-07-18 improvement plan §4/§13-Q1 defaults).

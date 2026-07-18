@@ -16,9 +16,10 @@ function env(name: string, fallback: string): string {
   return process.env[name] ?? fallback;
 }
 
-// Parse a minimal KEY=VALUE .env (comments, blank lines, `export ` prefix, surrounding
-// quotes). Intentionally simple — not a full dotenv: no interpolation or multiline values,
-// none of which Minime's .env uses. Pure (no side effects) so it is unit-testable.
+// Parse a minimal KEY=VALUE .env (full-line comments, unquoted-inline ` #` comments, blank
+// lines, `export ` prefix, surrounding quotes). Intentionally simple — not a full dotenv: no
+// interpolation or multiline values, none of which Minime's .env uses. Pure (no side effects)
+// so it is unit-testable.
 export function parseDotenv(text: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const raw of text.split("\n")) {
@@ -34,6 +35,14 @@ export function parseDotenv(text: string): Record<string, string> {
       ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'")))
     ) {
       val = val.slice(1, -1);
+    } else {
+      // Bun's own .env loader drops a ` # comment` tail on unquoted values; this fallback
+      // must agree or the same .env means different things depending on launch cwd. It
+      // didn't until 2026-07-18: `CLOUD_MAX_TIER=2  # note` kept the tail here, Number()
+      // made it NaN, and `tier > NaN` being false silently opened the egress ceiling
+      // (invariant review B1). Hash without preceding whitespace stays part of the value.
+      const hash = val.search(/\s#/);
+      if (hash >= 0) val = val.slice(0, hash).trimEnd();
     }
     out[key] = val;
   }
@@ -65,6 +74,13 @@ loadRepoDotenv();
 
 export type ProviderName = "ollama" | "anthropic" | "openai" | "openrouter" | "bedrock";
 
+// "" and unset both mean "no route". Name validation happens in src/llm/index.ts so a typo
+// fails loudly at first resolution, not silently at parse time.
+function routeEnv(name: string): ProviderName | undefined {
+  const v = process.env[name]?.trim();
+  return v ? (v as ProviderName) : undefined;
+}
+
 export const config = {
   databaseUrl: env("DATABASE_URL", "postgres://minime:minime@localhost:5432/minime"),
   ollamaUrl: env("OLLAMA_URL", "http://localhost:11434"),
@@ -77,6 +93,10 @@ export const config = {
   // tier ceiling for content sent to CLOUD providers (tier 0 content is never sent
   // anywhere by construction — it is never chunked, classified, or scanned)
   cloudMaxTier: Number(env("CLOUD_MAX_TIER", "2")),
+  // Per-tier classify routing (W3, DECISIONS.md 2026-07): optional stricter-only overrides of
+  // CLASSIFY_PROVIDER per content tier. Tier 0 is never classified and has no route.
+  providerRouteTier1: routeEnv("PROVIDER_ROUTE_TIER1"),
+  providerRouteTier2: routeEnv("PROVIDER_ROUTE_TIER2"),
   anthropicApiKey: process.env.ANTHROPIC_API_KEY,
   anthropicModel: env("ANTHROPIC_MODEL", "claude-opus-4-8"),
   openaiApiKey: process.env.OPENAI_API_KEY,

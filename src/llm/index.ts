@@ -28,7 +28,65 @@ function build(name: ProviderName, fetchFn?: FetchFn): LlmProvider {
   }
 }
 
-function withEgressAudit(p: LlmProvider): LlmProvider {
+const PROVIDER_NAMES: readonly ProviderName[] = [
+  "ollama",
+  "anthropic",
+  "openai",
+  "openrouter",
+  "bedrock",
+];
+
+function providerIsCloud(name: ProviderName): boolean {
+  return name !== "ollama";
+}
+
+export type ClassifyTier = 1 | 2;
+
+/** W3 routing: which provider classifies content of this tier. Fallback chain:
+ * PROVIDER_ROUTE_TIER<t> → CLASSIFY_PROVIDER. Routes may only be STRICTER than
+ * CLOUD_MAX_TIER — an explicit cloud route above the ceiling throws (fail loud, never send).
+ * Tier-0 content is never classified (I3), so a tier-0 route is rejected outright. */
+export function classifyRouteForTier(tier: ClassifyTier): ProviderName {
+  // Fail closed on a malformed ceiling: `tier > NaN` is false, so a NaN CLOUD_MAX_TIER
+  // (e.g. a mistyped .env value) would otherwise wave every cloud route straight past the
+  // stricter-only check, validateProviderRoutes, m0, and the dream gate (review B1).
+  if (!Number.isInteger(config.cloudMaxTier) || config.cloudMaxTier < 0 || config.cloudMaxTier > 2)
+    throw new Error(
+      `CLOUD_MAX_TIER must be an integer 0, 1, or 2 — parsed '${config.cloudMaxTier}' from the environment`,
+    );
+  const t0 = process.env.PROVIDER_ROUTE_TIER0;
+  if (t0 && t0 !== "none")
+    throw new Error(
+      "PROVIDER_ROUTE_TIER0 is not configurable: tier-0 content is never classified (I3)",
+    );
+  const route = tier === 2 ? config.providerRouteTier2 : config.providerRouteTier1;
+  if (route && !PROVIDER_NAMES.includes(route))
+    throw new Error(
+      `PROVIDER_ROUTE_TIER${tier}='${route}' unknown (ollama|anthropic|openai|openrouter|bedrock)`,
+    );
+  if (route && providerIsCloud(route) && tier > config.cloudMaxTier)
+    throw new Error(
+      `PROVIDER_ROUTE_TIER${tier}=${route} is a cloud provider but CLOUD_MAX_TIER=` +
+        `${config.cloudMaxTier} forbids tier-${tier} egress — routes may only be stricter than the ceiling`,
+    );
+  return route ?? config.classifyProvider;
+}
+
+export function classifyProviderForTier(tier: ClassifyTier, fetchFn?: FetchFn): LlmProvider {
+  return withEgressAudit(build(classifyRouteForTier(tier), fetchFn), tier);
+}
+
+export function classifyIsCloudForTier(tier: ClassifyTier): boolean {
+  return providerIsCloud(classifyRouteForTier(tier));
+}
+
+/** Startup validation: resolve both tiers so a bad route fails the daemon/m0 immediately. */
+export function validateProviderRoutes(): void {
+  classifyRouteForTier(1);
+  classifyRouteForTier(2);
+}
+
+function withEgressAudit(p: LlmProvider, routeTier?: number): LlmProvider {
   if (!p.isCloud) return p;
   return {
     ...p,
@@ -46,7 +104,12 @@ function withEgressAudit(p: LlmProvider): LlmProvider {
       await logEvent({
         actor: "system:llm",
         verb: "egress:classify",
-        payload: { provider: p.name, model: p.model, items: 1 },
+        payload: {
+          provider: p.name,
+          model: p.model,
+          items: 1,
+          ...(routeTier !== undefined ? { route_tier: routeTier } : {}),
+        },
       });
       return p.completeJson(prompt);
     },
@@ -60,6 +123,8 @@ export function embedProvider(fetchFn?: FetchFn): LlmProvider {
   return p;
 }
 
+/** scripts/eval-only entry point — pipeline code must use classifyProviderForTier
+ * (tier routing bypassed here). */
 export function classifyProvider(fetchFn?: FetchFn): LlmProvider {
   return withEgressAudit(build(config.classifyProvider, fetchFn));
 }
@@ -80,6 +145,8 @@ export function embedModelName(): string {
   }
 }
 
+/** scripts/eval-only entry point — pipeline code must use classifyIsCloudForTier
+ * (tier routing bypassed here). */
 export function classifyIsCloud(): boolean {
   return config.classifyProvider !== "ollama";
 }

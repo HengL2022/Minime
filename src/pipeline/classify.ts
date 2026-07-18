@@ -1,5 +1,6 @@
-// Inbox classifier: local Ollama with a strict-JSON prompt (I1 — never a cloud call).
-// In tests/CI (MINIME_MOCK_OLLAMA=1) a deterministic heuristic stands in.
+// Inbox classifier: strict-JSON prompt via the classify provider. Raw captures have no tier
+// yet (tier is assigned AFTER classification by watcher.fileRow), so W3 routing treats them
+// as tier 2 — the most intimate destination they might land in. Mocked offline in CI.
 
 import { todayStr } from "../util/clock";
 import { config } from "../util/config";
@@ -184,8 +185,9 @@ export function heuristicClassify(text: string): Classification {
 export async function classify(text: string): Promise<Classification> {
   if (config.mockOllama) return heuristicClassify(text);
   try {
-    const { classifyProvider } = await import("../llm");
-    const raw = await classifyProvider().completeJson(
+    const { classifyProviderForTier } = await import("../llm");
+    // Assumed tier 2: a capture may be journal/interaction-bound; route for the worst case.
+    const raw = await classifyProviderForTier(2).completeJson(
       buildPrompt(todayStr()) + text.slice(0, 4000),
     );
     const parsed = JSON.parse(raw);

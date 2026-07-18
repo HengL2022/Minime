@@ -45,13 +45,13 @@ const ANTONYMS: [RegExp, RegExp][] = [
   [/\bmoved to\b/i, /\bstill lives in\b/i],
 ];
 
-async function claimsConflict(a: string, b: string): Promise<boolean> {
+async function claimsConflict(a: string, b: string, tier: 1 | 2): Promise<boolean> {
   if (config.mockOllama) {
     return ANTONYMS.some(([x, y]) => (x.test(a) && y.test(b)) || (y.test(a) && x.test(b)));
   }
   try {
-    const { classifyProvider } = await import("../llm");
-    const raw = await classifyProvider().completeJson(
+    const { classifyProviderForTier } = await import("../llm");
+    const raw = await classifyProviderForTier(tier).completeJson(
       `Do these two statements about the same person contradict each other? Answer ONLY {"conflict": true} or {"conflict": false}.\nA: ${a.slice(0, 500)}\nB: ${b.slice(0, 500)}`,
     );
     return JSON.parse(raw).conflict === true;
@@ -61,15 +61,17 @@ async function claimsConflict(a: string, b: string): Promise<boolean> {
 }
 
 export async function contradictionScan(limit = 100): Promise<number> {
-  const { classifyIsCloud } = await import("../llm");
-  const cloud = !config.mockOllama && classifyIsCloud();
+  const { classifyIsCloudForTier } = await import("../llm");
   const pairs = await chunkPairsSharingPerson(limit);
   let flagged = 0;
   for (const p of pairs) {
-    // tier gate (CLOUD_MAX_TIER): never send higher-tier chunk text to a cloud provider
-    if (cloud && Math.max(p.a_tier, p.b_tier) > config.cloudMaxTier) continue;
+    const tier = (Math.max(p.a_tier, p.b_tier) >= 2 ? 2 : 1) as 1 | 2;
+    // tier gate: only reachable via the legacy fallback (no route set, cloud CLASSIFY_PROVIDER)
+    // — an explicit cloud route above the ceiling already failed loudly at resolution. With a
+    // local route the pair is scanned on-box instead of skipped (that is the W3 point).
+    if (!config.mockOllama && classifyIsCloudForTier(tier) && tier > config.cloudMaxTier) continue;
     if (await reviewItemExists("contradiction", "pair", `${p.a_id}:${p.b_id}`)) continue;
-    if (await claimsConflict(p.a_text, p.b_text)) {
+    if (await claimsConflict(p.a_text, p.b_text, tier)) {
       // IDs only in the queue payload — flag, never auto-resolve
       await insertReviewItem("contradiction", {
         pair: `${p.a_id}:${p.b_id}`,

@@ -75,13 +75,19 @@ export function heuristicDistill(name: string, chunks: SourceChunk[]): string {
   return capWords(`${name}: ${lines.join(" ")}`, MAX_WORDS);
 }
 
-// Classify provider (local Ollama by default). CLOUD_MAX_TIER gate (§12, same pattern as
-// the contradiction scan): when the provider is cloud, chunks above the ceiling are dropped
-// BEFORE the prompt is built — tier-2 text never leaves the box uninvited. If the gate
-// empties the source list, the caller falls back to the local heuristic distillation.
+// Classify provider chosen by per-tier routing (W3): the resolved provider may still be
+// cloud, in which case the CLOUD_MAX_TIER gate (§12, same pattern as the contradiction
+// scan) applies as before — chunks above the ceiling are dropped BEFORE the prompt is
+// built, and tier-2 text never leaves the box uninvited. If the gate empties the source
+// list, the caller falls back to the local heuristic distillation.
 async function modelDistill(name: string, allChunks: SourceChunk[]): Promise<string> {
-  const { classifyProvider, classifyIsCloud } = await import("../llm");
-  const chunks = classifyIsCloud()
+  const { classifyProviderForTier, classifyIsCloudForTier } = await import("../llm");
+  // W3 routing: provider chosen by the HIGHEST source tier present (same rule as digest
+  // tiering). If the resolved provider is still cloud, the CLOUD_MAX_TIER filter keeps
+  // over-ceiling chunks out of the prompt (belt-and-braces); a stricter local route makes
+  // the filter a no-op so the full source set stays in.
+  const maxTier = (allChunks.some((c) => c.tier >= 2) ? 2 : 1) as 1 | 2;
+  const chunks = classifyIsCloudForTier(maxTier)
     ? allChunks.filter((c) => c.tier <= config.cloudMaxTier)
     : allChunks;
   if (chunks.length === 0) throw new Error("all source chunks above CLOUD_MAX_TIER");
@@ -98,7 +104,7 @@ SOURCES:
 ${sources}
 
 Reply with ONLY {"note": "<the distillation>"}.`;
-  const raw = await classifyProvider().completeJson(prompt);
+  const raw = await classifyProviderForTier(maxTier).completeJson(prompt);
   const note = (JSON.parse(raw).note ?? "").toString().trim();
   if (!note) throw new Error("empty distillation");
   return capWords(note, MAX_WORDS);
