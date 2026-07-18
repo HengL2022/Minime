@@ -15,10 +15,15 @@ export interface RepairModule {
   run(args: string[]): Promise<Record<string, number | string>>;
 }
 
+// Git checks must run against the repo root regardless of the caller's cwd — a cwd-relative
+// pathspec from a subdirectory would match nothing and silently skip the content check.
+const REPO_ROOT = join(import.meta.dir, "..");
+
 // HEAD, not the index: a merely-staged script passes `git ls-files` but a `git reset`
 // would erase all trace of what ran — commit-history truth is the contract.
 async function committed(scriptName: string): Promise<boolean> {
   const proc = Bun.spawn(["git", "cat-file", "-e", `HEAD:scripts/repairs/${scriptName}.ts`], {
+    cwd: REPO_ROOT,
     stderr: "pipe",
   });
   return (await proc.exited) === 0;
@@ -30,7 +35,7 @@ async function committed(scriptName: string): Promise<boolean> {
 async function matchesHead(scriptName: string): Promise<boolean> {
   const proc = Bun.spawn(
     ["git", "diff", "--quiet", "HEAD", "--", `scripts/repairs/${scriptName}.ts`],
-    { stderr: "pipe" },
+    { cwd: REPO_ROOT, stderr: "pipe" },
   );
   return (await proc.exited) === 0;
 }
