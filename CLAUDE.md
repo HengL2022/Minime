@@ -21,7 +21,9 @@ source of truth.** This file is only the distilled guardrails.
 - **I1 Local-first**: no cloud DB, no SaaS APIs, no telemetry. Runtime network = localhost Postgres
   + localhost Ollama only. CI/tests run fully offline (mock Ollama).
 - **I2 One door**: agents reach data only through the Minime MCP server; never hand out a DB
-  connection string.
+  connection string. (Recorded exception, DECISIONS 2026-07-18/W4: the committed
+  `.env.engineering` DSN is SELECT-only + RLS-tier-gated for engineering sessions — full-rights
+  DSNs remain daemon-only.)
 - **I3 Tiered egress**: tier 0 content (transactions, health) never enters agent context —
   aggregates only via `metric_defs.agg_sql`. Tier 2 reads require a time-boxed, audited unlock.
 - **I5 Provenance**: every row stamps `source`, `created_by`, `derived_from`.
@@ -47,6 +49,11 @@ raw SQL, **no ORM** · plain numbered `.sql` migrations in `db/migrations/` ·
 - Prefer boring code: small modules, plain SQL, few dependencies — maintainable by one person for
   a decade. No new external network dependencies, ever.
 - Fixtures are realistic but **fictional** — never the owner's real data.
+- **Engineering sessions never write the live DB directly.** Ad-hoc DB access uses the
+  SELECT-only DSN in `.env.engineering` (`make psql-ro`). Live writes go through the MCP
+  tools, `make migrate`, or `bun run scripts/repair.ts <committed-script>` (auto pre-image
+  backup + `repair:*` audit). New tier-0 tables must add an explicit
+  `revoke select ... from minime_engineer_ro` in their migration.
 
 ## Commands
 

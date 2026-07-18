@@ -123,11 +123,30 @@ decision fields. All tools accept optional `time_zone` (IANA name, e.g.
 canonical timestamps but interprets "today" and date-only inputs in that timezone and renders
 timestamp outputs with that timezone's offset.
 
+## Engineering access (W4)
+
+Engineering sessions — an agent poking at the database directly, not through the MCP tools —
+never connect as the full-rights owner role. Ad-hoc reads use the SELECT-only login role
+`minime_engineer_ro` via the committed `.env.engineering` DSN: `make psql-ro`. The role is
+RLS-gated exactly like any other agent session (tier-2 content stays hidden without an
+unlock; tier-0 tables — `transactions`, `health_samples` — are revoked outright, I3) and
+holds no INSERT/UPDATE/DELETE/TRUNCATE grant anywhere.
+
+Three sanctioned write paths during engineering, nothing else:
+
+1. **MCP tools** — the normal one-door path (I2).
+2. **`make migrate`** — schema changes only.
+3. **`bun run scripts/repair.ts <committed-script>`** — ad-hoc data fixes. The runner refuses
+   to run unless the script is committed to `HEAD` (`git cat-file -e`, not merely staged),
+   takes a mandatory pre-image `pg_dump` before touching anything (no backup ⇒ no repair),
+   and logs `repair:*` events carrying counts and ids only, never row contents. Repair
+   scripts live in `scripts/repairs/` (first one: `retype-org-to-person.ts`).
+
 ## After install
 
 ```
 bun run src/cli.ts serve            # resident: MCP + watcher + 3am dream job
-make verify                         # all milestone acceptance gates (m0–m6)
+make verify                         # every milestone acceptance gate + retrieval-regression gate
 bun run src/cli.ts audit --since 7d # what left the box, to which client
 bun run src/cli.ts import:calendar export.ics       # and the other importers
 ```

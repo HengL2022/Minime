@@ -1169,3 +1169,38 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
 - **Why:** Cheapest structural defense against unowned complexity; converts deletion debates
   into table lookups.
 - **Approved by:** human (owner, 2026-07-18 improvement plan §3).
+
+## 2026-07-18 — W4: engineer read-only role + committed-script repair runner
+
+- **Context:** The eval-runner incident got a structural guard for benchmark runners, but
+  engineering sessions still connected as the full-rights owner role. Manual remediations
+  (retype cleanup, edge deletes) relied on discipline, not structure.
+- **Decision:** Migration 018 creates SELECT-only login role minime_engineer_ro; committed
+  .env.engineering is the engineering DSN (make psql-ro). Tightened vs the proposal: the
+  role is NOT BYPASSRLS (engineering sessions are agent sessions — RLS tier-gates them like
+  the MCP door) and tier-0 tables stay revoked per I3; the owner's raw path remains psql as
+  minime. Discovery while building the migration: every existing tier_read RLS policy (007,
+  008, 013, 014) was scoped `to minime_app` only, so Postgres's RLS default-deny meant a
+  merely-GRANTed role with no matching policy TO-list saw ZERO rows at every tier, not just
+  tier-2 — a plain `grant select` alone does not open a policy-gated table on its own.
+  Migration 018 therefore extends each tier_read policy's role list in place to
+  `minime_app, minime_engineer_ro` (write policies — tier_write/tier_update — are left
+  untouched, since the role has no INSERT/UPDATE grant regardless so they never apply to it),
+  with a `pg_policies` completeness test (test/m15.roles.test.ts) that fails immediately if a
+  future migration adds a tier_read policy "to minime_app" on a new table without also
+  extending it to minime_engineer_ro. Writes during engineering: MCP tools, make migrate, or
+  scripts/repair.ts — which requires the repair script to exist in a COMMITTED tree
+  (`git cat-file -e HEAD:scripts/repairs/<name>.ts`, not merely staged in the index, so a
+  `git reset` can't erase the trace of what ran), takes a mandatory pre-image pg_dump
+  (no backup ⇒ no repair), and logs repair:* events (counts and ids, never row contents).
+  First repair script wraps retypeOrgToPerson, giving the dormant sanctioned-repair library
+  its audited entry point. Known accepted gap: ad-hoc `psql-ro` reads do not write `events`
+  rows, including tier-2 rows while an owner unlock window is active (the unlock is audited;
+  individual engineering reads are not). I8 audit covers the MCP door and repair runs;
+  engineering reads rely on the role's SELECT-only + RLS bounds — revisit if
+  engineering-read auditing ever becomes a requirement.
+- **Why:** Reads become structural (SELECT-only role + RLS tier gate); writes are narrowed by
+  the HEAD-committed clean-tree gate and mandatory pre-image backup, with the residual
+  covered by discipline plus the repair:* audit trail — the eval-guard philosophy extended
+  to the highest-blast-radius surface.
+- **Approved by:** human (owner, 2026-07-18 improvement plan §5).
