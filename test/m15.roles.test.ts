@@ -2,6 +2,7 @@
 // connected as minime_engineer_ro against the same minime_test database.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
+import { runRepair } from "../scripts/repair";
 import { config } from "../src/util/config";
 import { expectSqlReject, resetDb, testSql } from "./helpers";
 
@@ -83,5 +84,52 @@ describe("minime_engineer_ro", () => {
       where schemaname = 'public' and policyname = 'tier_read'
         and 'minime_app' = any(roles) and not ('minime_engineer_ro' = any(roles))`;
     expect(gaps.map((g) => g.tablename)).toEqual([]);
+  });
+});
+
+describe("repair runner", () => {
+  const dumpDir = `${process.cwd()}/db-dump/test-repairs`;
+
+  test("refuses an unknown/uncommitted script name", async () => {
+    expect(await runRepair("no-such-repair", [], { dumpDir })).toBe(2);
+  });
+
+  test("refuses when the backup cannot be written (no backup ⇒ no repair)", async () => {
+    const orgId = (
+      await testSql`insert into orgs (canonical_name, tier) values ('Retypable Ltd', 1) returning id`
+    )[0]!.id;
+    const code = await runRepair("retype-org-to-person", [`--org-id=${orgId}`], {
+      dumpDir: "/nonexistent-dir/deny",
+    });
+    expect(code).toBe(2);
+    const [org] = await testSql`select retired_at from orgs where id = ${orgId}`;
+    expect(org!.retired_at).toBeNull(); // nothing ran
+  });
+
+  test("happy path: backup taken, repair applied, repair:* events logged, summary counts only", async () => {
+    if (!Bun.which("pg_dump")) return; // environment without client tools
+    const orgId = (
+      await testSql`insert into orgs (canonical_name, tier) values ('Hai Yan', 1) returning id`
+    )[0]!.id;
+    const code = await runRepair(
+      "retype-org-to-person",
+      [`--org-id=${orgId}`, "--relation=friend"],
+      { dumpDir },
+    );
+    expect(code).toBe(0);
+    const [org] = await testSql`select retired_at from orgs where id = ${orgId}`;
+    expect(org!.retired_at).not.toBeNull(); // retired, not deleted (reversible-repair contract)
+    const [person] = await testSql`select id from people where canonical_name = 'Hai Yan'`;
+    expect(person).toBeTruthy();
+    const events =
+      await testSql`select verb, payload from events where verb like 'repair:%' order by id`;
+    expect(events.map((e) => e.verb)).toEqual([
+      "repair:retype-org-to-person",
+      "repair:retype-org-to-person",
+    ]);
+    expect(events[0]!.payload.backup).toContain("repair-retype-org-to-person");
+    expect(JSON.stringify(events)).not.toContain("Hai Yan"); // counts/ids only, never contents
+    const backups = [...new Bun.Glob("repair-retype-org-to-person-*.sql").scanSync(dumpDir)];
+    expect(backups.length).toBeGreaterThan(0);
   });
 });
