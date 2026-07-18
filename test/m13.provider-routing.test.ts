@@ -22,7 +22,7 @@ afterEach(() => {
   config.providerRouteTier2 = saved.r2;
   config.openrouterApiKey = saved.openrouterApiKey;
   config.mockOllama = saved.mockOllama;
-  delete process.env.PROVIDER_ROUTE_TIER0;
+  Reflect.deleteProperty(process.env, "PROVIDER_ROUTE_TIER0");
 });
 
 describe("classifyRouteForTier resolution", () => {
@@ -126,7 +126,12 @@ function patchFetch(ollamaResponder: () => unknown) {
     cloudCalls.push(u);
     throw new Error(`LEAK: unexpected non-local egress to ${u}`);
   }) as typeof fetch;
-  return { cloudCalls, restore: () => void (globalThis.fetch = real) };
+  return {
+    cloudCalls,
+    restore: () => {
+      globalThis.fetch = real;
+    },
+  };
 }
 
 describe("notes distillation per-tier routing", () => {
@@ -144,7 +149,12 @@ describe("notes distillation per-tier routing", () => {
         values ('page', ${pg!.id}, 'mentions', 'person', ${p!.id}, 'pages', ${pg!.id}, 'system:extract')`;
     }
     config.mockOllama = false; // exercise the real modelDistill path
-    config.classifyProvider = "bedrock"; // cloud default that must NOT be reached
+    // Cloud default that must NOT be reached. openrouter (not bedrock): it constructs with
+    // any truthy key, so un-routed code genuinely reaches the patched fetch and trips the
+    // leak wire — bedrock would throw at construction (no BEDROCK_MODEL offline) and the
+    // heuristic fallback would mask the leak, making the tripwire inert.
+    config.classifyProvider = "openrouter";
+    config.openrouterApiKey = "test-key";
     config.providerRouteTier2 = "ollama";
     const patched = patchFetch(() => ({
       response: JSON.stringify({ note: "Nadia Rossi: koi pond filter builder." }),
