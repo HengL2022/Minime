@@ -240,17 +240,17 @@ describe("repair runner", () => {
 
   test("happy path: backup taken, repair applied, repair:* events logged, summary counts only", async () => {
     if (!Bun.which("pg_dump")) return;                 // environment without client tools
-    const orgId = (await testSql`insert into orgs (canonical_name, tier) values ('Hai Yan', 1) returning id`)[0]!.id;
+    const orgId = (await testSql`insert into orgs (canonical_name, tier) values ('Quill Marbury', 1) returning id`)[0]!.id;
     const code = await runRepair("retype-org-to-person", [`--org-id=${orgId}`, "--relation=friend"], { dumpDir });
     expect(code).toBe(0);
     const [org] = await testSql`select retired_at from orgs where id = ${orgId}`;
     expect(org!.retired_at).not.toBeNull();            // retired, not deleted (reversible-repair contract)
-    const [person] = await testSql`select id from people where canonical_name = 'Hai Yan'`;
+    const [person] = await testSql`select id from people where canonical_name = 'Quill Marbury'`;
     expect(person).toBeTruthy();
     const events = await testSql`select verb, payload from events where verb like 'repair:%' order by id`;
     expect(events.map((e) => e.verb)).toEqual(["repair:retype-org-to-person", "repair:retype-org-to-person"]);
     expect(events[0]!.payload.backup).toContain("repair-retype-org-to-person");
-    expect(JSON.stringify(events)).not.toContain("Hai Yan"); // counts/ids only, never contents
+    expect(JSON.stringify(events)).not.toContain("Quill Marbury"); // counts/ids only, never contents
     const backups = [...new Bun.Glob("repair-retype-org-to-person-*.sql").scanSync(dumpDir)];
     expect(backups.length).toBeGreaterThan(0);
   });
@@ -361,7 +361,7 @@ if (import.meta.main) {
 ```
 
 *(Summary values must stay counts/ids — the runner trusts repair modules on this; the m15 test
-and invariant-reviewer enforce it. `Hai Yan` appearing in an event payload fails the test.)*
+and invariant-reviewer enforce it. `Quill Marbury` appearing in an event payload fails the test.)*
 
 Note: the happy-path test asserts `person_id`/ids in payload are fine but names are not — the
 `retype-org-to-person` summary returns ids only, satisfying this.

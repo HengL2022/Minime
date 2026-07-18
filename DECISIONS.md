@@ -1291,6 +1291,14 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   fictional. The renames preserve every property under test (regex cue triggers, name-match
   branches, alias preservation, mistyped-entity detection) while removing the real-world
   identifiers, so the fix is pure hygiene with no behavior change.
+  Integration addendum (same day): also swapped the gratuitous prompt-example mention
+  ("called Vazyme about the order" → "Corvid Biotech" in classify.ts — it disclosed a real
+  vendor relationship inside the committed prompt) and the executed plan docs'
+  illustrative fixture names (.claude/plans/improve-w{1,4}-*.md → the shipped fictional
+  names). Boundary drawn: PUBLIC brand names (Vazyme/Fapon) are retained in
+  m11/m12/m2 fixtures and the repo.ts screen comment where brand-vs-surname ambiguity IS
+  the property under test — renaming those would weaken what the tests prove; owner may
+  veto and request fully fictional brands with equivalent ambiguity.
 - **Verified:** test/m11.entity-retype.test.ts + test/m12.phantom-org.test.ts: 24 pass / 0 fail
   (same test count as before the rename). Full suite: 306 pass / 1 skip / 0 fail (unchanged
   baseline). `tsc --noEmit` clean; `biome check` zero diagnostics on the 5 touched files.
