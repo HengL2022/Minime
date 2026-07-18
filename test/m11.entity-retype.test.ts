@@ -1,6 +1,6 @@
 // M11 — sanctioned entity retype/supersede (DECISIONS.md 2026-06-16).
 // The relation extractor can mint an `org` row for something that is really a person
-// (e.g. "Hai Yan", a boss first seen only inside a task title), and there is no
+// (e.g. "Vera Saltmarsh", a boss first seen only inside a task title), and there is no
 // classifier path that retypes an existing wrong row. retypeOrgToPerson() is the
 // authorized, reversible admin operation that:
 //   - creates (or reuses) a person row carrying the org's name + aliases
@@ -29,7 +29,7 @@ describe("retypeOrgToPerson", () => {
   });
 
   test("converts an org into a person, preserving name + alias", async () => {
-    const { id: orgId } = await ensureOrg("Hai Yan", "system:extract");
+    const { id: orgId } = await ensureOrg("Vera Saltmarsh", "system:extract");
     await sql`insert into org_aliases (org_id, alias) values (${orgId}, '阎海') on conflict do nothing`;
 
     const res = await retypeOrgToPerson(orgId, { relation: "boss" });
@@ -37,9 +37,9 @@ describe("retypeOrgToPerson", () => {
     expect(res.personId).toBeTruthy();
     expect(res.orgId).toBe(orgId);
     // org no longer resolves as an active org
-    expect(await resolveOrg("Hai Yan")).toBeNull();
+    expect(await resolveOrg("Vera Saltmarsh")).toBeNull();
     // person now resolves under canonical name AND the preserved alias
-    const p = await resolvePerson("Hai Yan");
+    const p = await resolvePerson("Vera Saltmarsh");
     expect(p?.id).toBe(res.personId);
     expect(p?.relation).toBe("boss");
     const byAlias = await resolvePerson("阎海");
@@ -47,7 +47,7 @@ describe("retypeOrgToPerson", () => {
   });
 
   test("repoints edges from the org to the new person and de-dupes collisions", async () => {
-    const { id: orgId } = await ensureOrg("Hai Yan", "system:extract");
+    const { id: orgId } = await ensureOrg("Vera Saltmarsh", "system:extract");
     const { id: keepPerson } = await ensurePerson("Chen Mengwei", "agent:classifier");
     const pageId = (
       await sql`insert into pages (path,title,body_md,content_hash)
@@ -81,18 +81,19 @@ describe("retypeOrgToPerson", () => {
   });
 
   test("merges into an existing person of the same name instead of creating a duplicate", async () => {
-    const { id: existing } = await ensurePerson("Hai Yan", "agent:mcp");
-    const { id: orgId } = await ensureOrg("Hai Yan", "system:extract");
+    const { id: existing } = await ensurePerson("Vera Saltmarsh", "agent:mcp");
+    const { id: orgId } = await ensureOrg("Vera Saltmarsh", "system:extract");
 
     const res = await retypeOrgToPerson(orgId, {});
 
     expect(res.personId).toBe(existing);
-    const all = await sql`select count(*)::int n from people where lower(canonical_name)='hai yan'`;
+    const all =
+      await sql`select count(*)::int n from people where lower(canonical_name)='vera saltmarsh'`;
     expect(all[0]!.n).toBe(1);
   });
 
   test("is reversible-friendly: org row is retired (kept), not hard-deleted", async () => {
-    const { id: orgId } = await ensureOrg("Hai Yan", "system:extract");
+    const { id: orgId } = await ensureOrg("Vera Saltmarsh", "system:extract");
     const res = await retypeOrgToPerson(orgId, {});
     const row = await sql`select id, retired_at, supersedes_id from orgs where id=${orgId}`;
     expect(row.length).toBe(1); // still present
@@ -116,10 +117,10 @@ describe("detectMistypedEntities (read-only screen)", () => {
 
   test("flags an org whose name looks like a person (extractor-minted, has a relation cue)", async () => {
     // org created by the extractor, referenced by a task whose body calls it a boss
-    const { id: orgId } = await ensureOrg("Hai Yan", "system:extract");
+    const { id: orgId } = await ensureOrg("Vera Saltmarsh", "system:extract");
     const taskId = (
       await sql`insert into tasks (title,status,created_by)
-      values ('PPT for Hai Yan (my boss)','inbox','agent:classifier') returning id`
+      values ('PPT for Vera Saltmarsh (my boss)','inbox','agent:classifier') returning id`
     )[0]!.id;
     await sql`insert into edges (src_type,src_id,rel,dst_type,dst_id,extracted_by)
       values ('task',${taskId},'mentions','org',${orgId},'system:extract')`;

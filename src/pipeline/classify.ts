@@ -33,7 +33,7 @@ say what made it ambiguous (e.g. "could be task or interaction", "two intents in
 fields by type: task -> {"title": string, "due": "YYYY-MM-DD" | null};
 interaction -> {"person_name": string, "kind": "meeting"|"call"|"message"|"email"|"note", "subject_type": "person"|"org"};
 For interaction, set "subject_type" to "org" when the counterparty is a COMPANY / vendor / lab /
-institution / supplier (e.g. "emailed BioTree, a metabolomics company", "called Vazyme about the order")
+institution / supplier (e.g. "emailed Glasswing, a metabolomics company", "called Vazyme about the order")
 and "person" when it is an individual human ("met Daniel about sorting"). When unsure, use "person".
 journal -> {"mood": 1-5 | null}; decision_note -> {"question": string, "choice": string | null};
 note -> {"title": string}; unknown -> {}.
@@ -62,7 +62,7 @@ export function completionSignal(text: string): boolean {
 // a vendor/company to a person mints a phantom person (the phantom-org bug this fixes).
 // The real LLM classifier decides via the prompt; this regex is the mock/heuristic fallback
 // AND the signal the phantom-person watchdog reuses to spot a company wrongly filed as a
-// person. Matches an appositive company descriptor ("BioTree, a metabolomics company") or a
+// person. Matches an appositive company descriptor ("Glasswing, a metabolomics company") or a
 // trailing corporate suffix ("Vazyme Biotech", "Acme Inc", "… Ltd/GmbH/Pte").
 const ORG_CUE_RE =
   /\b(company|companies|vendor|supplier|corp(?:oration)?|inc\.?|ltd\.?|llc|gmbh|s\.?a\.?|pte\.?|co\.?|biotech|bioscience|laborator(?:y|ies)|institute|university|clinic|hospital|foundation|agency|firm|startup|manufacturer|distributor|contractor|consultancy|consulting)\b/i;

@@ -93,7 +93,7 @@ export async function contradictionScan(limit = 100): Promise<number> {
 // Two independent signals:
 //   1. name_match: the person shares a name/alias with an existing non-retired org.
 //   2. company cue in the name (orgCue) AND zero human signal (no relation, no
-//      interactions) — a bare "BioTree"-shaped row nobody has ever interacted with.
+//      interactions) — a bare "Glasswing Biotech"-shaped row nobody has ever interacted with.
 export async function phantomPersonScan(): Promise<number> {
   const { orgCue } = await import("./classify");
   let flagged = 0;
