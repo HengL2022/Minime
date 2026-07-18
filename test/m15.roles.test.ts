@@ -106,7 +106,7 @@ describe("repair runner", () => {
     expect(org!.retired_at).toBeNull(); // nothing ran
   });
 
-  test("happy path: backup taken, repair applied, repair:* events logged, summary counts only", async () => {
+  test("happy path: backup taken, repair applied, repair:* events logged, payload ids/counts only", async () => {
     if (!Bun.which("pg_dump")) return; // environment without client tools
     const orgId = (
       await testSql`insert into orgs (canonical_name, tier) values ('Hai Yan', 1) returning id`

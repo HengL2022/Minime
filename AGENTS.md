@@ -146,7 +146,7 @@ Three sanctioned write paths during engineering, nothing else:
 
 ```
 bun run src/cli.ts serve            # resident: MCP + watcher + 3am dream job
-make verify                         # all milestone acceptance gates (m0–m6)
+make verify                         # every milestone acceptance gate + retrieval-regression gate
 bun run src/cli.ts audit --since 7d # what left the box, to which client
 bun run src/cli.ts import:calendar export.ics       # and the other importers
 ```

@@ -17,7 +17,9 @@ source of truth.** This file is only the distilled guardrails.
 - **I1 Local-first**: no cloud DB, no SaaS APIs, no telemetry. Runtime network = localhost Postgres
   + localhost Ollama only. CI/tests run fully offline (mock Ollama).
 - **I2 One door**: agents reach data only through the Minime MCP server; never hand out a DB
-  connection string.
+  connection string. (Recorded exception, DECISIONS 2026-07-18/W4: the committed
+  `.env.engineering` DSN is SELECT-only + RLS-tier-gated for engineering sessions — full-rights
+  DSNs remain daemon-only.)
 - **I3 Tiered egress**: tier 0 content (transactions, health) never enters agent context —
   aggregates only via `metric_defs.agg_sql`. Tier 2 reads require a time-boxed, audited unlock.
 - **I5 Provenance**: every row stamps `source`, `created_by`, `derived_from`.

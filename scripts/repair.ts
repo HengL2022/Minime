@@ -1,8 +1,8 @@
 // W4 repair runner (improve-w4-roles.md): the ONLY sanctioned ad-hoc write path to the live
 // DB besides MCP tools and `make migrate`. Contract: named COMMITTED repair script → automatic
 // pre-image pg_dump (no backup ⇒ no repair) → run as the owner role → repair:* audit events
-// with counts only. Formalizes the manual backup→fix→read-back discipline from DECISIONS.md
-// 2026-06-16.
+// with counts and ids, never row contents. Formalizes the manual backup→fix→read-back
+// discipline from DECISIONS.md 2026-06-16.
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { logEvent } from "../src/db/repo";
