@@ -65,6 +65,13 @@ loadRepoDotenv();
 
 export type ProviderName = "ollama" | "anthropic" | "openai" | "openrouter" | "bedrock";
 
+// "" and unset both mean "no route". Name validation happens in src/llm/index.ts so a typo
+// fails loudly at first resolution, not silently at parse time.
+function routeEnv(name: string): ProviderName | undefined {
+  const v = process.env[name]?.trim();
+  return v ? (v as ProviderName) : undefined;
+}
+
 export const config = {
   databaseUrl: env("DATABASE_URL", "postgres://minime:minime@localhost:5432/minime"),
   ollamaUrl: env("OLLAMA_URL", "http://localhost:11434"),
@@ -77,6 +84,10 @@ export const config = {
   // tier ceiling for content sent to CLOUD providers (tier 0 content is never sent
   // anywhere by construction — it is never chunked, classified, or scanned)
   cloudMaxTier: Number(env("CLOUD_MAX_TIER", "2")),
+  // Per-tier classify routing (W3, DECISIONS.md 2026-07): optional stricter-only overrides of
+  // CLASSIFY_PROVIDER per content tier. Tier 0 is never classified and has no route.
+  providerRouteTier1: routeEnv("PROVIDER_ROUTE_TIER1"),
+  providerRouteTier2: routeEnv("PROVIDER_ROUTE_TIER2"),
   anthropicApiKey: process.env.ANTHROPIC_API_KEY,
   anthropicModel: env("ANTHROPIC_MODEL", "claude-opus-4-8"),
   openaiApiKey: process.env.OPENAI_API_KEY,
