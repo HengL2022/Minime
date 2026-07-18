@@ -1178,8 +1178,9 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   scripts/repair.ts — which requires the repair script to exist in a COMMITTED tree
   (`git cat-file -e HEAD:scripts/repairs/<name>.ts`, not merely staged in the index, so a
   `git reset` can't erase the trace of what ran), takes a mandatory pre-image pg_dump
-  (no backup ⇒ no repair), and logs repair:* events (counts only). First repair script wraps
-  retypeOrgToPerson, giving the dormant sanctioned-repair library its audited entry point.
+  (no backup ⇒ no repair), and logs repair:* events (counts and ids, never row contents).
+  First repair script wraps retypeOrgToPerson, giving the dormant sanctioned-repair library
+  its audited entry point.
 - **Why:** "Agents were careful" becomes "agents could not have done otherwise" — the
   eval-guard philosophy extended to the highest-blast-radius surface.
 - **Approved by:** human (owner, 2026-07-18 improvement plan §5).
