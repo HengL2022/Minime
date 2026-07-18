@@ -11,6 +11,10 @@ source of truth.** This file is only the distilled guardrails.
 - Record every deviation from the spec in `DECISIONS.md` (use `/log-decision`). When the spec is
   ambiguous, ask the human — do not invent scope.
 - TDD where cheap: write the verify target's failing test first for each acceptance criterion.
+- **Complexity budget (W2):** a new subsystem lands only with (a) a `docs/SUBSYSTEMS.md` row,
+  (b) a justifying eval with a committed floor, and (c) an explicit statement of what existing
+  subsystem it replaces or why net surface must grow. `make check-subsystems` (in `verify` and
+  CI) enforces structural coverage.
 
 ## Non-negotiable invariants (spec §1 — every PR is checked against these)
 

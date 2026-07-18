@@ -38,6 +38,8 @@ jobs:
           createdb minime_eval || true
       - name: full offline suite
         run: bun test
+      - name: Subsystem inventory gate
+        run: bun run scripts/check-subsystems.ts
       - name: retrieval-regression gate (MinimeBench vs committed floors)
         run: make eval-search
       - name: upload scorecard
