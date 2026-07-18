@@ -96,8 +96,8 @@ if [ "$REPLY" = "2" ]; then
   ask "CLOUD_MAX_TIER — 2 sends journal/interactions too; 1 keeps them local-only" "2"
   set_kv CLOUD_MAX_TIER "$REPLY"
   if [ "$(get_kv CLOUD_MAX_TIER)" = "2" ]; then
-    echo "Tier-2 = journals/interactions — the most intimate text. You can keep CLOUDs for"
-    echo "tier-1 world-facts but classify tier-2 locally (needs: ollama pull llama3.1:8b)."
+    echo "Tier-2 = journals/interactions — the most intimate text. You can keep the cloud model"
+    echo "for tier-1 world-facts but classify tier-2 locally (needs: ollama pull llama3.1:8b)."
     ask "Route tier-2 classification to local Ollama? [y/N]" "N"
     case "$REPLY" in
       y|Y|yes) set_kv PROVIDER_ROUTE_TIER2 ollama; ROUTE2_LOCAL=1 ;;

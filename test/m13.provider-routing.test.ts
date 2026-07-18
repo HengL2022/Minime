@@ -50,6 +50,17 @@ describe("classifyRouteForTier resolution", () => {
     expect(() => classifyRouteForTier(2)).toThrow(/stricter/);
   });
 
+  test("malformed CLOUD_MAX_TIER fails closed, not open (NaN/out-of-range throws)", () => {
+    // `tier > NaN` is false, so without this guard a NaN ceiling (e.g. an inline .env
+    // comment surviving a lax parser) would wave every cloud route through (review B1).
+    config.cloudMaxTier = Number.NaN;
+    expect(() => classifyRouteForTier(2)).toThrow(/CLOUD_MAX_TIER/);
+    config.cloudMaxTier = 5;
+    expect(() => classifyRouteForTier(2)).toThrow(/CLOUD_MAX_TIER/);
+    config.cloudMaxTier = 0; // legal strictest ceiling — must not throw
+    expect(classifyRouteForTier(2)).toBe(config.classifyProvider);
+  });
+
   test("local route above the ceiling is fine (stricter is allowed)", () => {
     config.cloudMaxTier = 1;
     config.providerRouteTier2 = "ollama";

@@ -95,8 +95,9 @@ local Ollama). Embeddings are pinned to 768 dims by the schema, hence the embed 
 **Per-tier routing (W3):** `PROVIDER_ROUTE_TIER1` / `PROVIDER_ROUTE_TIER2` override
 `CLASSIFY_PROVIDER` for content of that tier (embeddings are NOT tier-routable — one vector
 space per index). Routes may only be stricter than `CLOUD_MAX_TIER`; violations fail at
-startup. Egress events carry the resolved `route_tier`. Raw inbox captures (tier unknown
-until classified) route as tier 2.
+startup. Classify egress from the tier-routed pipeline call sites carries the resolved
+`route_tier` (embed and script-driven classify egress carry none). Raw inbox captures (tier
+unknown until classified) route as tier 2.
 
 ## Register the MCP server
 

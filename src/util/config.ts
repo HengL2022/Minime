@@ -16,9 +16,10 @@ function env(name: string, fallback: string): string {
   return process.env[name] ?? fallback;
 }
 
-// Parse a minimal KEY=VALUE .env (comments, blank lines, `export ` prefix, surrounding
-// quotes). Intentionally simple — not a full dotenv: no interpolation or multiline values,
-// none of which Minime's .env uses. Pure (no side effects) so it is unit-testable.
+// Parse a minimal KEY=VALUE .env (full-line comments, unquoted-inline ` #` comments, blank
+// lines, `export ` prefix, surrounding quotes). Intentionally simple — not a full dotenv: no
+// interpolation or multiline values, none of which Minime's .env uses. Pure (no side effects)
+// so it is unit-testable.
 export function parseDotenv(text: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const raw of text.split("\n")) {
@@ -34,6 +35,14 @@ export function parseDotenv(text: string): Record<string, string> {
       ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'")))
     ) {
       val = val.slice(1, -1);
+    } else {
+      // Bun's own .env loader drops a ` # comment` tail on unquoted values; this fallback
+      // must agree or the same .env means different things depending on launch cwd. It
+      // didn't until 2026-07-18: `CLOUD_MAX_TIER=2  # note` kept the tail here, Number()
+      // made it NaN, and `tier > NaN` being false silently opened the egress ceiling
+      // (invariant review B1). Hash without preceding whitespace stays part of the value.
+      const hash = val.search(/\s#/);
+      if (hash >= 0) val = val.slice(0, hash).trimEnd();
     }
     out[key] = val;
   }

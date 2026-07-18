@@ -47,6 +47,13 @@ export type ClassifyTier = 1 | 2;
  * CLOUD_MAX_TIER — an explicit cloud route above the ceiling throws (fail loud, never send).
  * Tier-0 content is never classified (I3), so a tier-0 route is rejected outright. */
 export function classifyRouteForTier(tier: ClassifyTier): ProviderName {
+  // Fail closed on a malformed ceiling: `tier > NaN` is false, so a NaN CLOUD_MAX_TIER
+  // (e.g. a mistyped .env value) would otherwise wave every cloud route straight past the
+  // stricter-only check, validateProviderRoutes, m0, and the dream gate (review B1).
+  if (!Number.isInteger(config.cloudMaxTier) || config.cloudMaxTier < 0 || config.cloudMaxTier > 2)
+    throw new Error(
+      `CLOUD_MAX_TIER must be an integer 0, 1, or 2 — parsed '${config.cloudMaxTier}' from the environment`,
+    );
   const t0 = process.env.PROVIDER_ROUTE_TIER0;
   if (t0 && t0 !== "none")
     throw new Error(
@@ -116,6 +123,8 @@ export function embedProvider(fetchFn?: FetchFn): LlmProvider {
   return p;
 }
 
+/** scripts/eval-only entry point — pipeline code must use classifyProviderForTier
+ * (tier routing bypassed here). */
 export function classifyProvider(fetchFn?: FetchFn): LlmProvider {
   return withEgressAudit(build(config.classifyProvider, fetchFn));
 }
@@ -136,6 +145,8 @@ export function embedModelName(): string {
   }
 }
 
+/** scripts/eval-only entry point — pipeline code must use classifyIsCloudForTier
+ * (tier routing bypassed here). */
 export function classifyIsCloud(): boolean {
   return config.classifyProvider !== "ollama";
 }

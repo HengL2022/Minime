@@ -1186,5 +1186,9 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   carry an additive `route_tier` field regardless of routing state. The plan records this as
   the one tolerated delta from strict byte-identical legacy behavior ("same egress payloads
   apart from the additive route_tier field"); it enriches the I8 append-only audit trail
-  rather than altering any existing row shape.
+  rather than altering any existing row shape. One honest gap preserved for legacy identity:
+  with routes unset and a cloud CLASSIFY_PROVIDER under CLOUD_MAX_TIER=1, assumed-tier-2
+  inbox captures still egress — the legacy inbox fallback consults no ceiling (pre-existing
+  behavior, preserved for compat); PROVIDER_ROUTE_TIER2=ollama is the closure and is the
+  recommended standing config.
 - **Approved by:** human (owner, 2026-07-18 improvement plan §4/§13-Q1 defaults).
