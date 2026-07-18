@@ -1181,8 +1181,12 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   (no backup ⇒ no repair), and logs repair:* events (counts and ids, never row contents).
   First repair script wraps retypeOrgToPerson, giving the dormant sanctioned-repair library
   its audited entry point. Known accepted gap: ad-hoc `psql-ro` reads do not write `events`
-  rows (I8 audit covers the MCP door and repair runs; engineering reads rely on the role's
-  SELECT-only + RLS bounds) — revisit if engineering-read auditing ever becomes a requirement.
-- **Why:** "Agents were careful" becomes "agents could not have done otherwise" — the
-  eval-guard philosophy extended to the highest-blast-radius surface.
+  rows, including tier-2 rows while an owner unlock window is active (the unlock is audited;
+  individual engineering reads are not). I8 audit covers the MCP door and repair runs;
+  engineering reads rely on the role's SELECT-only + RLS bounds — revisit if
+  engineering-read auditing ever becomes a requirement.
+- **Why:** Reads become structural (SELECT-only role + RLS tier gate); writes are narrowed by
+  the HEAD-committed clean-tree gate and mandatory pre-image backup, with the residual
+  covered by discipline plus the repair:* audit trail — the eval-guard philosophy extended
+  to the highest-blast-radius surface.
 - **Approved by:** human (owner, 2026-07-18 improvement plan §5).

@@ -11,6 +11,7 @@ import { config } from "../src/util/config";
 export interface RepairModule {
   name: string;
   description: string;
+  // run() must throw content-free errors — ids/codes only, never row contents (checklist item 10).
   run(args: string[]): Promise<Record<string, number | string>>;
 }
 
@@ -20,6 +21,17 @@ async function committed(scriptName: string): Promise<boolean> {
   const proc = Bun.spawn(["git", "cat-file", "-e", `HEAD:scripts/repairs/${scriptName}.ts`], {
     stderr: "pipe",
   });
+  return (await proc.exited) === 0;
+}
+
+// The dynamic import() below loads the WORKING-TREE file, so it must also match HEAD —
+// otherwise an uncommitted edit executes under the committed name and the audit row
+// attributes the run to code history never had.
+async function matchesHead(scriptName: string): Promise<boolean> {
+  const proc = Bun.spawn(
+    ["git", "diff", "--quiet", "HEAD", "--", `scripts/repairs/${scriptName}.ts`],
+    { stderr: "pipe" },
+  );
   return (await proc.exited) === 0;
 }
 
@@ -48,6 +60,12 @@ export async function runRepair(
     console.error(`refusing: scripts/repairs/${scriptName}.ts is not in a committed tree (HEAD)`);
     return 2;
   }
+  if (!(await matchesHead(scriptName))) {
+    console.error(
+      `refusing: scripts/repairs/${scriptName}.ts differs from HEAD (commit your repair script first)`,
+    );
+    return 2;
+  }
   const mod = (await import(`./repairs/${scriptName}.ts`)).default as RepairModule;
   if (mod.name !== scriptName) {
     console.error("repair module name mismatch");
@@ -74,14 +92,15 @@ export async function runRepair(
     console.log(JSON.stringify(summary, null, 2));
     return 0;
   } catch (e) {
+    // capped: module errors must stay content-free, and even a misbehaving one
+    // can't turn the audit payload into a row-contents dump
+    const msg = String(e instanceof Error ? e.message : e).slice(0, 200);
     await logEvent({
       actor: "system:repair",
       verb: `repair:${scriptName}`,
-      payload: { phase: "failed", backup, error: e instanceof Error ? e.message : String(e) },
+      payload: { phase: "failed", backup, error: msg },
     });
-    console.error(
-      `repair failed (pre-image backup at ${backup}): ${e instanceof Error ? e.message : e}`,
-    );
+    console.error(`repair failed (pre-image backup at ${backup}): ${msg}`);
     return 1;
   }
 }

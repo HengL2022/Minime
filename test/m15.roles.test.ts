@@ -1,6 +1,7 @@
 // W4 role separation (improve-w4-roles.md). Probes run through a second postgres.js pool
 // connected as minime_engineer_ro against the same minime_test database.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { readFileSync, writeFileSync } from "node:fs";
 import postgres from "postgres";
 import { runRepair } from "../scripts/repair";
 import { config } from "../src/util/config";
@@ -94,7 +95,24 @@ describe("repair runner", () => {
     expect(await runRepair("no-such-repair", [], { dumpDir })).toBe(2);
   });
 
+  test("refuses a committed script whose working-tree file differs from HEAD", async () => {
+    const path = `${process.cwd()}/scripts/repairs/retype-org-to-person.ts`;
+    const saved = readFileSync(path); // restored via fs below, never via git commands
+    const [prev] = await testSql`select coalesce(max(id), 0)::int as max_id from events`;
+    try {
+      writeFileSync(path, Buffer.concat([saved, Buffer.from("\n// dirty")]));
+      expect(await runRepair("retype-org-to-person", [], { dumpDir })).toBe(2);
+      const events = await testSql`
+        select id from events where verb like 'repair:%' and id > ${prev!.max_id}`;
+      expect(events.length).toBe(0); // refused before backup/import — no side effects
+    } finally {
+      writeFileSync(path, saved);
+    }
+    expect(readFileSync(path).equals(saved)).toBe(true); // original bytes back in place
+  });
+
   test("refuses when the backup cannot be written (no backup ⇒ no repair)", async () => {
+    if (!Bun.which("pg_dump")) return; // environment without client tools
     const orgId = (
       await testSql`insert into orgs (canonical_name, tier) values ('Retypable Ltd', 1) returning id`
     )[0]!.id;
@@ -109,7 +127,7 @@ describe("repair runner", () => {
   test("happy path: backup taken, repair applied, repair:* events logged, payload ids/counts only", async () => {
     if (!Bun.which("pg_dump")) return; // environment without client tools
     const orgId = (
-      await testSql`insert into orgs (canonical_name, tier) values ('Hai Yan', 1) returning id`
+      await testSql`insert into orgs (canonical_name, tier) values ('Quill Marbury', 1) returning id`
     )[0]!.id;
     const code = await runRepair(
       "retype-org-to-person",
@@ -119,7 +137,7 @@ describe("repair runner", () => {
     expect(code).toBe(0);
     const [org] = await testSql`select retired_at from orgs where id = ${orgId}`;
     expect(org!.retired_at).not.toBeNull(); // retired, not deleted (reversible-repair contract)
-    const [person] = await testSql`select id from people where canonical_name = 'Hai Yan'`;
+    const [person] = await testSql`select id from people where canonical_name = 'Quill Marbury'`;
     expect(person).toBeTruthy();
     const events =
       await testSql`select verb, payload from events where verb like 'repair:%' order by id`;
@@ -128,7 +146,7 @@ describe("repair runner", () => {
       "repair:retype-org-to-person",
     ]);
     expect(events[0]!.payload.backup).toContain("repair-retype-org-to-person");
-    expect(JSON.stringify(events)).not.toContain("Hai Yan"); // counts/ids only, never contents
+    expect(JSON.stringify(events)).not.toContain("Quill Marbury"); // counts/ids only, never contents
     const backups = [...new Bun.Glob("repair-retype-org-to-person-*.sql").scanSync(dumpDir)];
     expect(backups.length).toBeGreaterThan(0);
   });
@@ -149,7 +167,7 @@ describe("repair runner", () => {
     expect(events[1]!.payload.phase).toBe("failed");
     const dump = JSON.stringify(events);
     expect(dump).toContain(fakeId); // error names the uuid at most…
-    expect(dump).not.toContain("Hai Yan"); // …never row contents
+    expect(dump).not.toContain("Quill Marbury"); // …never row contents
     expect(dump).not.toContain("Retypable");
     const backupsAfter = [...glob.scanSync(dumpDir)].length;
     expect(backupsAfter).toBe(backupsBefore + 1); // backup precedes run by design
