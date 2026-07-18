@@ -31,7 +31,7 @@ async function writeInbox(name: string, body: string): Promise<string> {
 
 describe("orgCue (unit)", () => {
   test("fires on company/vendor/institution descriptors", () => {
-    expect(orgCue("BioTree, a metabolomics company")).toBe(true);
+    expect(orgCue("Glasswing, a metabolomics company")).toBe(true);
     expect(orgCue("Vazyme Biotech")).toBe(true);
     expect(orgCue("Acme Pte Ltd")).toBe(true);
     expect(orgCue("Huashan Hospital")).toBe(true);
@@ -91,11 +91,11 @@ describe("watcher interaction routing (e2e, classifier mocked)", () => {
   test("an interaction whose name matches an EXISTING org reuses it (no new row)", async () => {
     // pre-create the org, as the sanctioned vendor-precreate workaround would
     const [org] = await sql`
-      insert into orgs (canonical_name, created_by, source) values ('BioTree','test','manual')
+      insert into orgs (canonical_name, created_by, source) values ('Glasswing','test','manual')
       returning id`;
-    await sql`insert into org_aliases (org_id, alias) values (${org!.id}, 'BioTree')`;
+    await sql`insert into org_aliases (org_id, alias) values (${org!.id}, 'Glasswing')`;
 
-    const path = await writeInbox("reuse.md", "met BioTree, discussed metabolomics pricing");
+    const path = await writeInbox("reuse.md", "met Glasswing, discussed metabolomics pricing");
     const result = await processInboxFile(path);
     expect(result.filed).toBe(true);
 
@@ -132,7 +132,7 @@ describe("phantom-person watchdog (dream step 3b)", () => {
   test("flags a company-cue person with zero human signal", async () => {
     await sql`
       insert into people (canonical_name, created_by, source)
-      values ('BioTree Biotech','test','manual')`;
+      values ('Glasswing Biotech','test','manual')`;
     const flagged = await phantomPersonScan();
     expect(flagged).toBe(1);
     const [q] = await sql`

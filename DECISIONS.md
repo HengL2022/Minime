@@ -1264,3 +1264,35 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
 - **Why:** Converts silent graph poisoning into triaged review items without LLM write
   authority (I5/I8 intact); creates the measurement for future rule demotion decisions.
 - **Approved by:** human (owner, 2026-07-18 improvement plan §2).
+
+## 2026-07-18 — Fixture hygiene: owner-real names replaced with fictional equivalents
+
+- **Context:** Two invariant reviews found spec §14 violations ("fixtures are realistic but
+  fictional — never the owner's real data") predating the improvement program: "Hai Yan" (a
+  real colleague, the 2026-06-16 mistyped-org retype incident) appeared in
+  test/m11.entity-retype.test.ts and the retypeOrgToPerson comment in src/db/repo.ts;
+  "BioTree" (a real vendor, the 2026-07-01 phantom-org incident) appeared in
+  test/m12.phantom-org.test.ts and the classify.ts/dream.ts comments describing that fix.
+- **Decision:** Renamed "Hai Yan" → "Vera Saltmarsh" throughout test/m11.entity-retype.test.ts
+  (comment + all fixture/assertion occurrences, including the lower-cased SQL literal and the
+  task-title string) and reworded the repo.ts comment to cite "the 2026-06-16 mistyped-org
+  retype incident (DECISIONS.md)" instead of the name. Renamed "BioTree" → "Glasswing" in
+  test/m12.phantom-org.test.ts wherever the bare name appeared, and "BioTree Biotech" →
+  "Glasswing Biotech" wherever the cue-bearing form appeared, so each fixture keeps exercising
+  the exact same trigger it did before (the ORG_CUE_RE company/biotech cue word vs. the
+  existing-org-by-name-match branch, independent of any cue) — confirmed
+  `orgCue("Glasswing") === false` and `orgCue("Glasswing Biotech") === true`, mirroring the
+  original pair exactly. Reworded the matching classify.ts prompt example and comment, and the
+  dream.ts phantom-person-scan comment, to the fictional name. Left untouched: DECISIONS.md
+  history (append-only, the real names are the historical record), test/m15.roles.test.ts and
+  fixtures/graph-hygiene.ts (already fictional), and docs/benchmarks/ scorecards.
+- **Why:** Both names identified real people/vendors from the owner's life that had leaked
+  into committed test data via earlier incident write-ups; spec §14 requires fixtures to be
+  fictional. The renames preserve every property under test (regex cue triggers, name-match
+  branches, alias preservation, mistyped-entity detection) while removing the real-world
+  identifiers, so the fix is pure hygiene with no behavior change.
+- **Verified:** test/m11.entity-retype.test.ts + test/m12.phantom-org.test.ts: 24 pass / 0 fail
+  (same test count as before the rename). Full suite: 306 pass / 1 skip / 0 fail (unchanged
+  baseline). `tsc --noEmit` clean; `biome check` zero diagnostics on the 5 touched files.
+  `grep -rn "Hai Yan\|BioTree" src/ test/ fixtures/ scripts/` returns zero hits.
+- **Approved by:** human (owner, 2026-07-18 — "yes" to the sweep).

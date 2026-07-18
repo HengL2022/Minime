@@ -435,8 +435,9 @@ export async function allOrgsWithAliases(): Promise<{ id: string; names: string[
 //
 // Sanctioned, reversible repair for a mis-typed entity: the relation extractor sometimes
 // mints an `org` row for what is really a person (e.g. a boss first seen only inside a task
-// title — "Hai Yan"). There is no classifier path that retypes an existing wrong row, so
-// this is the one authorized place that converts org → person. It:
+// title — see the 2026-06-16 mistyped-org retype incident, DECISIONS.md). There is no
+// classifier path that retypes an existing wrong row, so this is the one authorized place
+// that converts org → person. It:
 //   1. reuses an existing person of the same name, else creates one (carrying org aliases),
 //   2. repoints every edge that referenced the org (src or dst) to the person, dropping
 //      self-referential edges and de-duping any edge that now collides,
