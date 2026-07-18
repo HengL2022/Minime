@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!.env.engineering
 
 # owner data — files are the archive, but not in this repo (spec §5)
 data/*

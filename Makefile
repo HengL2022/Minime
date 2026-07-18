@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 BUN := bun
 
-.PHONY: install setup install-hooks onboard update up down migrate seed embed test lint verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify restore-drill restore-pitr promote-restore eval-search eval-search-live eval-snapshot eval-pmb
+.PHONY: install setup install-hooks onboard update up down psql-ro migrate seed embed test lint verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify restore-drill restore-pitr promote-restore eval-search eval-search-live eval-snapshot eval-pmb
 
 # Scratch DB for MinimeBench — a throwaway database the runner DROPs and rebuilds. Derived
 # from DATABASE_URL so non-default ports just work; override EVAL_DATABASE_URL to change it.
@@ -37,6 +37,10 @@ up:
 
 down:
 	@./scripts/down.sh
+
+# Read-only psql for engineering sessions (W4): SELECT-only role, RLS tier-gated.
+psql-ro:
+	@psql "$$(grep '^DATABASE_URL=' .env.engineering | cut -d= -f2-)"
 
 migrate:
 	@$(BUN) run src/cli.ts migrate
