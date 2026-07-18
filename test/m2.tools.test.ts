@@ -133,7 +133,8 @@ describe("MCP server", () => {
   });
 
   test("minime_log_interaction with subject_type='org' attaches to an org, not a phantom person", async () => {
-    const before = await sql`select count(*)::int n from people where lower(canonical_name) = 'vazyme'`;
+    const before =
+      await sql`select count(*)::int n from people where lower(canonical_name) = 'vazyme'`;
     const r = await call("minime_log_interaction", {
       person_name: "Vazyme",
       kind: "email",
@@ -143,7 +144,8 @@ describe("MCP server", () => {
     // org-keyed: envelope carries org_id, no person_id, and NO phantom person was minted
     expect(r.parsed.data.org_id).toBeString();
     expect(r.parsed.data.person_id).toBeUndefined();
-    const after = await sql`select count(*)::int n from people where lower(canonical_name) = 'vazyme'`;
+    const after =
+      await sql`select count(*)::int n from people where lower(canonical_name) = 'vazyme'`;
     expect(after[0]!.n).toBe(before[0]!.n); // no phantom person created
     // interaction row is org-keyed and satisfies the XOR
     const [row] =

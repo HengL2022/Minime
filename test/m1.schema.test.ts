@@ -155,7 +155,8 @@ describe("decision interview schema", () => {
   });
 
   test("interactions_subject_xor: rejects BOTH person+org, tolerates a single subject or none", async () => {
-    const [p] = await sql`insert into people (canonical_name) values ('XOR Probe Person') returning id`;
+    const [p] =
+      await sql`insert into people (canonical_name) values ('XOR Probe Person') returning id`;
     const [o] = await sql`insert into orgs (canonical_name) values ('XOR Probe Org') returning id`;
     // both subjects set → ambiguous → rejected
     await expectSqlReject(
