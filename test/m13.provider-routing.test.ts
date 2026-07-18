@@ -2,6 +2,7 @@
 // is pure config; provider-level tests inject fakeFetch; pipeline tests patch globalThis.fetch.
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { classifyIsCloudForTier, classifyProviderForTier, classifyRouteForTier } from "../src/llm";
+import { contradictionScan } from "../src/pipeline/dream";
 import { compileNotes } from "../src/pipeline/notes";
 import { config } from "../src/util/config";
 import { resetDb, testSql } from "./helpers";
@@ -160,6 +161,42 @@ describe("notes distillation per-tier routing", () => {
     } finally {
       patched.restore();
       config.mockOllama = true;
+    }
+  });
+});
+
+describe("contradiction scan per-tier routing", () => {
+  test("tier-2 pair + local tier-2 route is scanned locally (was: skipped when cloud+ceiling)", async () => {
+    await resetDb();
+    const [p] =
+      await testSql`insert into people (canonical_name, tier) values ('Old Cat', 1) returning id`;
+    const mk = async (i: number, text: string) => {
+      const [pg] = await testSql`insert into pages (path, title, body_md, content_hash, tier)
+        values (${`c/${i}.md`}, ${`C${i}`}, ${text}, ${`ch${i}`}, 2) returning id`;
+      const [ch] = await testSql`insert into chunks (parent_type, parent_id, ord, text, tier)
+        values ('page', ${pg!.id}, 0, ${text}, 2) returning id`;
+      // pair query joins mentions edges anchored at chunks (see repo.chunkPairsSharingPerson)
+      await testSql`insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by)
+        values ('page', ${pg!.id}, 'mentions', 'person', ${p!.id}, 'chunks', ${ch!.id}, 'system:extract')`;
+    };
+    await mk(1, "Old Cat always eats at dawn.");
+    await mk(2, "Old Cat never eats at dawn.");
+    config.mockOllama = false;
+    config.classifyProvider = "bedrock";
+    config.cloudMaxTier = 1; // legacy behavior: tier-2 pair would be SKIPPED
+    config.providerRouteTier2 = "ollama"; // W3: now scanned locally instead
+    const patched = patchFetch(() => ({ response: '{"conflict": true}' }));
+    try {
+      const flagged = await contradictionScan();
+      expect(flagged).toBe(1);
+      expect(patched.cloudCalls).toEqual([]);
+      const q =
+        await testSql`select count(*)::int as n from review_queue where kind = 'contradiction'`;
+      expect(q[0]!.n).toBe(1);
+    } finally {
+      patched.restore();
+      config.mockOllama = true;
+      config.cloudMaxTier = saved.cloudMaxTier;
     }
   });
 });
