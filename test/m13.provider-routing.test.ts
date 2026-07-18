@@ -2,6 +2,7 @@
 // is pure config; provider-level tests inject fakeFetch; pipeline tests patch globalThis.fetch.
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { classifyIsCloudForTier, classifyProviderForTier, classifyRouteForTier } from "../src/llm";
+import { compileNotes } from "../src/pipeline/notes";
 import { config } from "../src/util/config";
 import { resetDb, testSql } from "./helpers";
 
@@ -11,6 +12,7 @@ const saved = {
   r1: config.providerRouteTier1,
   r2: config.providerRouteTier2,
   openrouterApiKey: config.openrouterApiKey,
+  mockOllama: config.mockOllama,
 };
 afterEach(() => {
   config.classifyProvider = saved.classifyProvider;
@@ -18,6 +20,7 @@ afterEach(() => {
   config.providerRouteTier1 = saved.r1;
   config.providerRouteTier2 = saved.r2;
   config.openrouterApiKey = saved.openrouterApiKey;
+  config.mockOllama = saved.mockOllama;
   delete process.env.PROVIDER_ROUTE_TIER0;
 });
 
@@ -105,5 +108,58 @@ describe("egress audit route_tier", () => {
     await classifyProviderForTier(2, fn).completeJson("journal text");
     const after = await testSql`select count(*)::int as n from events where verb like 'egress:%'`;
     expect(after[0]!.n).toBe(before[0]!.n);
+  });
+});
+
+/** Patch fetch: localhost Ollama gets a canned answer; ANY other host trips the leak wire. */
+function patchFetch(ollamaResponder: () => unknown) {
+  const real = globalThis.fetch;
+  const cloudCalls: string[] = [];
+  globalThis.fetch = (async (url: any, init?: any) => {
+    const u = String(url);
+    if (u.startsWith(config.ollamaUrl))
+      return new Response(JSON.stringify(ollamaResponder()), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    cloudCalls.push(u);
+    throw new Error(`LEAK: unexpected non-local egress to ${u}`);
+  }) as typeof fetch;
+  return { cloudCalls, restore: () => void (globalThis.fetch = real) };
+}
+
+describe("notes distillation per-tier routing", () => {
+  test("tier-2 sources + PROVIDER_ROUTE_TIER2=ollama → distilled locally, all chunks in prompt, zero egress", async () => {
+    await resetDb();
+    // Seed a person with 3 mentioning chunks, one of them tier 2 (same shape as m9.notes tests):
+    const [p] =
+      await testSql`insert into people (canonical_name, tier) values ('Nadia Rossi', 1) returning id`;
+    for (const [i, tier] of [1, 1, 2].entries()) {
+      const [pg] = await testSql`insert into pages (path, title, body_md, content_hash, tier)
+        values (${`t/${i}.md`}, ${`T${i}`}, 'Nadia Rossi built the koi pond filter.', ${`h${i}`}, ${tier}) returning id`;
+      await testSql`insert into chunks (parent_type, parent_id, ord, text, tier)
+        values ('page', ${pg!.id}, 0, ${`Nadia Rossi built the koi pond filter. Sentence ${i}`}, ${tier})`;
+      await testSql`insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by)
+        values ('page', ${pg!.id}, 'mentions', 'person', ${p!.id}, 'pages', ${pg!.id}, 'system:extract')`;
+    }
+    config.mockOllama = false; // exercise the real modelDistill path
+    config.classifyProvider = "bedrock"; // cloud default that must NOT be reached
+    config.providerRouteTier2 = "ollama";
+    const patched = patchFetch(() => ({
+      response: JSON.stringify({ note: "Nadia Rossi: koi pond filter builder." }),
+    }));
+    try {
+      const res = await compileNotes();
+      expect(res.compiled).toBeGreaterThanOrEqual(1);
+      expect(patched.cloudCalls).toEqual([]);
+      const egress =
+        await testSql`select count(*)::int as n from events where verb like 'egress:%'`;
+      expect(egress[0]!.n).toBe(0);
+      const [note] = await testSql`select tier, body_md from pages where source = 'dream:notes'`;
+      expect(note!.tier).toBe(2); // tier = max(sources), unchanged by routing
+    } finally {
+      patched.restore();
+      config.mockOllama = true;
+    }
   });
 });
