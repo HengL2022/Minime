@@ -8,6 +8,8 @@ import {
   insertEdgeValidation,
   insertReviewItem,
 } from "../src/db/repo";
+import { toolByName } from "../src/mcp/tools"; // match m7.graph.test.ts's actual import
+import { invokeTool } from "../src/mcp/tools/registry";
 import { validateEdges } from "../src/pipeline/validate-edges";
 import { config } from "../src/util/config";
 import { expectSqlReject, resetDb, testSql } from "./helpers";
@@ -177,9 +179,31 @@ describe("validateEdges (mock verdicts — the CI graph-hygiene bar)", () => {
 
   test("budget bounds a night's work; recent edges beat backlog", async () => {
     await resetDb();
-    await plantGraphHygieneCorpus();
-    const r = await validateEdges(2);
-    expect(r.checked).toBe(2);
+    // One backdated backlog edge + one fresh edge, same dst so only recency differs. Budget=1
+    // must NOT just cap `checked` at 1 — it must actually pick the fresh edge first (the
+    // dedicated recent-first ordering assertion; edgesForValidation's own ORDER BY is covered
+    // above, this proves validateEdges's budget slicing preserves it end to end).
+    const [org] =
+      await testSql`insert into orgs (canonical_name, tier) values ('Beta Org', 1) returning id`;
+    const [pg] = await testSql`insert into pages (path, title, body_md, content_hash, tier)
+      values ('gh/budget.md', 'gh/budget', 'Beta Org appears here for budget testing.', 'hbud', 1) returning id`;
+    await testSql`insert into chunks (parent_type, parent_id, ord, text, tier)
+      values ('page', ${pg!.id}, 0, 'Beta Org appears here for budget testing.', 1)`;
+    const mkEdge = async (createdAt: string) =>
+      (
+        await testSql`
+      insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by, confidence, created_at)
+      values ('page', ${pg!.id}, 'mentions', 'org', ${org!.id}, 'pages', ${pg!.id}, 'system:extract', 0.8, ${createdAt})
+      returning id`
+      )[0]!.id as string;
+    const backlogEdge = await mkEdge("2020-01-01T00:00:00Z");
+    const freshEdge = await mkEdge(new Date().toISOString());
+
+    const r = await validateEdges(1);
+    expect(r.checked).toBe(1); // budget bounds the run to exactly one edge
+    const [row] = await testSql`select edge_id from edge_validations`;
+    expect(row!.edge_id).toBe(freshEdge); // recent-first: the fresh edge wins the single slot
+    expect(row!.edge_id).not.toBe(backlogEdge); // …not the backdated backlog edge
   });
 
   test("unsure resamples once, flags on the second unsure", async () => {
@@ -238,5 +262,39 @@ describe("validateEdges provider routing", () => {
       config.providerRouteTier2 = undefined;
       config.classifyProvider = saved.classifyProvider;
     }
+  });
+});
+
+describe("dream wiring + review tool", () => {
+  test("dream() runs 3c_validate_edges and reports counts", async () => {
+    await resetDb();
+    await plantGraphHygieneCorpus();
+    const { dream } = await import("../src/pipeline/dream");
+    const summary = await dream();
+    // dream() runs 2_entity_link first, which may extract ADDITIONAL edges over the planted
+    // pages — so assert the step ran and caught at least the planted bad ones; the exact
+    // 3-flags/0-false bar lives in the direct tests above.
+    const step = summary["3c_validate_edges"] as { flagged: number };
+    expect(step.flagged).toBeGreaterThanOrEqual(3);
+  });
+
+  test("minime_review_queue lists extract_suspect with names visible and reason masked at tier 1", async () => {
+    const tool = toolByName("minime_review_queue");
+    const res = await invokeTool(
+      tool,
+      { action: "list", kind: "extract_suspect" },
+      { actor: "agent:test" },
+    );
+    expect(res.ok).toBe(true);
+    const items = (res as any).envelope.data.items;
+    expect(items.length).toBe(3);
+    expect(JSON.stringify(items)).toContain("Verity"); // entity names are the label
+    expect(JSON.stringify(items)).not.toContain("school run"); // anchor text never surfaces
+    const resolved = await invokeTool(
+      tool,
+      { action: "resolve", id: items[0].id, status: "dismissed" },
+      { actor: "agent:test" },
+    );
+    expect(resolved.ok).toBe(true);
   });
 });

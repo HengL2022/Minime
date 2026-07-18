@@ -10,6 +10,7 @@ const KINDS = [
   "decision_review",
   "inbox_unfiled",
   "phantom_person",
+  "extract_suspect",
 ] as const;
 const HIDDEN = "[above current tier]";
 const CONTENT_KEYS = new Set([
@@ -19,6 +20,7 @@ const CONTENT_KEYS = new Set([
   "entry_md",
   "existing_title",
   "question",
+  "reason",
   "summary",
   "text",
   "title",
@@ -84,7 +86,7 @@ async function maskStaleLabel(item: any, actor: string): Promise<any> {
 export const reviewQueueTool: ToolDef = {
   name: "minime_review_queue",
   description:
-    "List open review-queue items (contradiction | stale | duplicate | decision_review | inbox_unfiled | phantom_person), or resolve one as 'resolved' | 'dismissed'. The queue is flag-only: resolving never edits the flagged rows themselves.",
+    "List open review-queue items (contradiction | stale | duplicate | decision_review | inbox_unfiled | phantom_person | extract_suspect), or resolve one as 'resolved' | 'dismissed'. The queue is flag-only: resolving never edits the flagged rows themselves.",
   schema: {
     action: z.enum(["list", "resolve"]).default("list"),
     kind: z.enum(KINDS).optional(),

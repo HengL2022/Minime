@@ -23,8 +23,10 @@ const BARE_FIRST_NAME = /^[A-Z][a-z]+$/;
 // company") and misses a bare vendor-style trailing noun with no such cue (e.g. "BioTree
 // Supplies") — exactly the third historical archetype this heuristic must catch. A small,
 // local supplement closes that gap without touching the shared classifier cue (deviation:
-// see w1-task-3-report.md).
-const VENDOR_SUFFIX_CUE = /\b(supplies|supply|labs?|systems|solutions|holdings)\b/i;
+// see w1-task-3-report.md). Deliberately narrow: this covers the KNOWN archetype vocabulary
+// seen in past incidents, not general vendor detection — the live model is the real detector.
+const VENDOR_SUFFIX_CUE =
+  /\b(supplies|supply|labs?|systems|solutions|holdings|logistics|pharmacy|group|enterprises|traders)\b/i;
 
 type Verdict = {
   verdict: "confirm" | "deny" | "unsure";

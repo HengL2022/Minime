@@ -178,6 +178,10 @@ export async function dream(): Promise<Record<string, unknown>> {
   });
   await step("3_contradictions", () => contradictionScan());
   await step("3b_phantom_persons", () => phantomPersonScan());
+  await step("3c_validate_edges", async () => {
+    const { validateEdges } = await import("./validate-edges");
+    return validateEdges();
+  });
   await step("4_stale", async () => {
     let flagged = 0;
     for (const item of await staleItems(7, 180)) {
