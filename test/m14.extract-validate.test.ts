@@ -1,5 +1,5 @@
 // W1 extractor re-validation (improve-w1-extract-validate.md). Offline; mock verdicts.
-import { beforeAll, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { plantGraphHygieneCorpus } from "../fixtures/graph-hygiene";
 import {
   edgeAnchorTexts,
@@ -9,7 +9,50 @@ import {
   insertReviewItem,
 } from "../src/db/repo";
 import { validateEdges } from "../src/pipeline/validate-edges";
+import { config } from "../src/util/config";
 import { expectSqlReject, resetDb, testSql } from "./helpers";
+
+// W3 provider-routing test seam (copied locally from test/m13.provider-routing.test.ts — test
+// files stay self-contained, no cross-file imports).
+const saved = {
+  classifyProvider: config.classifyProvider,
+  cloudMaxTier: config.cloudMaxTier,
+  r1: config.providerRouteTier1,
+  r2: config.providerRouteTier2,
+  openrouterApiKey: config.openrouterApiKey,
+  mockOllama: config.mockOllama,
+};
+afterEach(() => {
+  config.classifyProvider = saved.classifyProvider;
+  config.cloudMaxTier = saved.cloudMaxTier;
+  config.providerRouteTier1 = saved.r1;
+  config.providerRouteTier2 = saved.r2;
+  config.openrouterApiKey = saved.openrouterApiKey;
+  config.mockOllama = saved.mockOllama;
+  Reflect.deleteProperty(process.env, "PROVIDER_ROUTE_TIER0");
+});
+
+/** Patch fetch: localhost Ollama gets a canned answer; ANY other host trips the leak wire. */
+function patchFetch(ollamaResponder: () => unknown) {
+  const real = globalThis.fetch;
+  const cloudCalls: string[] = [];
+  globalThis.fetch = (async (url: any, init?: any) => {
+    const u = String(url);
+    if (u.startsWith(config.ollamaUrl))
+      return new Response(JSON.stringify(ollamaResponder()), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    cloudCalls.push(u);
+    throw new Error(`LEAK: unexpected non-local egress to ${u}`);
+  }) as typeof fetch;
+  return {
+    cloudCalls,
+    restore: () => {
+      globalThis.fetch = real;
+    },
+  };
+}
 
 describe("migration 017", () => {
   beforeAll(async () => {
@@ -157,5 +200,43 @@ describe("validateEdges (mock verdicts — the CI graph-hygiene bar)", () => {
     expect(r2.flagged).toBe(1);
     const [item] = await testSql`select payload from review_queue where kind = 'extract_suspect'`;
     expect(item!.payload.reason).toMatch(/unsure/i);
+  });
+});
+
+describe("validateEdges provider routing", () => {
+  test("tier-2 edge: cloud+no-route skips; local tier-2 route validates on-box with zero egress", async () => {
+    await resetDb();
+    const [org] =
+      await testSql`insert into orgs (canonical_name, tier) values ('Verity', 1) returning id`;
+    const [pg] = await testSql`insert into pages (path, title, body_md, content_hash, tier)
+      values ('gh/t2.md', 'gh/t2', 'Talked with Verity about the school run.', 'ht2', 2) returning id`;
+    await testSql`insert into chunks (parent_type, parent_id, ord, text, tier)
+      values ('page', ${pg!.id}, 0, 'Talked with Verity about the school run.', 2)`;
+    await testSql`insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by, confidence)
+      values ('page', ${pg!.id}, 'mentions', 'org', ${org!.id}, 'pages', ${pg!.id}, 'system:extract', 0.8)`;
+    config.mockOllama = false;
+    config.classifyProvider = "bedrock";
+    config.cloudMaxTier = 1;
+    const patched = patchFetch(() => ({
+      response: '{"verdict":"deny","entity_type":"person","reason":"bare first name"}',
+    }));
+    try {
+      const skip = await validateEdges();
+      expect(skip.checked).toBe(0); // legacy: skipped, never sent
+      config.providerRouteTier2 = "ollama";
+      const run = await validateEdges();
+      expect(run.checked).toBe(1);
+      expect(run.flagged).toBe(1);
+      expect(patched.cloudCalls).toEqual([]);
+      const egress =
+        await testSql`select count(*)::int as n from events where verb like 'egress:%'`;
+      expect(egress[0]!.n).toBe(0);
+    } finally {
+      patched.restore();
+      config.mockOllama = true;
+      config.cloudMaxTier = saved.cloudMaxTier;
+      config.providerRouteTier2 = undefined;
+      config.classifyProvider = saved.classifyProvider;
+    }
   });
 });
