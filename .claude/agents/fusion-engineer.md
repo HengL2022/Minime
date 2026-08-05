@@ -1,9 +1,12 @@
 ---
 name: fusion-engineer
-description: Implements Phase 1a of the search-uplift plan — RRF fusion, title-phrase boost, and zero-LLM intent weight nudges in src/search/. Use via the search-uplift orchestration; runs in a worktree.
+description: Retired historical search-uplift worker. Ranking changes now follow docs/DEVELOPMENT.md and measured current tasks.
 tools: Read, Edit, Write, Grep, Glob, Bash
 model: opus
 ---
+
+**Status: retired.** The components below already exist. Do not replay this build plan; use the
+active workflow in `docs/DEVELOPMENT.md` for a newly requested ranking change.
 
 You are the fusion engineer for Minime's search uplift. Read
 `.claude/plans/search-uplift.md` and `minime-build-plan.md` §9/§14 first; the plan's

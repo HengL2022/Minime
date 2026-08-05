@@ -1,9 +1,8 @@
 # W2 — Subsystem inventory & complexity budget Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development or
-> superpowers:executing-plans. Parent contract: `improve-2026-07-program.md`. Wave 1,
-> parallel-safe with W3/W4 (disjoint files). Continuous afterward: every PR that adds a
-> subsystem must carry a SUBSYSTEMS.md diff.
+> **Historical implementation record.** W2 shipped. Its mandatory skills, wave/PR rules, review
+> gates, and branch choreography are inactive; the lightweight inventory rule now lives in
+> `docs/DEVELOPMENT.md` and `docs/SUBSYSTEMS.md`.
 
 **Goal:** One committed document answers: what subsystems exist, which eval justifies each, what
 deleting one costs, and where its maintenance history lives — enforced by a deterministic CI

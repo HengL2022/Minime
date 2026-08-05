@@ -16,8 +16,9 @@ reflection prompts, then (B) when the owner replies, capture what they say.
    - `"today review open decisions current focus"`
    - `"active projects routines health"`
    - `"open questions blocked next steps follow up"`
-4. If tier-2 gaps block relevant interaction/journal-derived context, take a
-   short audited `minime_unlock` (≤5 minutes), then re-read. Only when needed.
+4. If tier-2 gaps block relevant interaction/journal-derived context, tell the owner what is
+   locked and ask whether they want a short audited unlock. Call `minime_unlock` only after an
+   explicit yes, then re-read.
 
 Then deliver a short review, in this order. Omit any empty section:
 
@@ -49,14 +50,10 @@ Run as a short conversation, not a form — write as you go:
 
 ## Answer rules
 
-- **Timestamps are UTC.** Every datetime Minime returns (capture/`created_at`
-  times, `occurred_at`, review timestamps, the trailing `Z` in ISO strings) is
-  UTC. Before describing *when* something happened — especially time-of-day words
-  like "this morning / afternoon / evening" — convert to the owner's local
-  timezone (resolve it from owner context; do not hardcode). A capture stamped
-  `08:42Z` is 16:42 (afternoon) for a UTC+8 owner, not morning. When unsure of
-  the owner's timezone, state the time in UTC explicitly rather than guessing a
-  time-of-day label.
+- Pass the owner's current IANA `time_zone` on every read when it is known. Minime then renders
+  timestamps with that timezone's offset, so use the returned clock time directly and do not
+  convert it again. When the timezone is unknown and a timestamp is returned in UTC, label it as
+  UTC rather than guessing a local time-of-day.
 - Confirm each write with the returned ID, one line each.
 - Never invent content the owner did not say; quote their words in `entry_md`.
 - Writes are allowed without unlock (tier-2 writes are fine); do not request an

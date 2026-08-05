@@ -1,5 +1,6 @@
-// The ONLY place application SQL runs (spec §14). Every content read applies the tier
-// predicate `tier <= allowedTier()`. Tier-0 tables (transactions, health_samples) have no
+// The ONLY place application SQL runs (spec §14). Every agent/ordinary content read applies
+// the predicate `tier >= 1 AND tier <= allowedTier()`. Tier-0 tables
+// (transactions, health_samples) have no
 // content-read functions at all — they are reachable only via metric_agg() (I3).
 // Everything is parameterized; string-interpolated SQL is a review-blocker.
 
@@ -7,8 +8,22 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { cjkFold, isCjkStopToken } from "../util/cjk";
 import { localDateStr, now } from "../util/clock";
+import {
+  COMPILED_NOTE_MARKER,
+  COMPILED_NOTE_SOURCE,
+  COMPILED_NOTE_UUID_PATH_SQL_RE,
+  type CompiledNoteIdentity,
+  recognizeCompiledNote,
+} from "../util/compiled-note-archive";
 import { config } from "../util/config";
-import { sql } from "./client";
+import {
+  type DbExecutor,
+  db,
+  hasDbTransaction,
+  withDbTransaction,
+  withReservedDb,
+  withRuntimeDbTransaction,
+} from "./client";
 
 export type ParentType =
   | "page"
@@ -50,15 +65,69 @@ export function parentTable(type: string): { table: string; titleCol: string } {
 
 export type AccessActor = string | null | undefined;
 
+/** Execute one MCP handler in an actor-local transaction. */
+export async function withActorDbSession<T>(actor: string, work: () => Promise<T>): Promise<T> {
+  if (hasDbTransaction()) throw new Error("nested_actor_scope");
+  return withRuntimeDbTransaction(async (tx) => {
+    await tx`select set_config('minime.actor', ${actor}, true)`;
+    return work();
+  });
+}
+
+function assertProseTier(tier: number): asserts tier is 1 | 2 {
+  if (tier === 0) throw new Error("TIER0_PROSE_BLOCKED");
+  if (tier !== 1 && tier !== 2) throw new Error("INVALID_CONTENT_TIER");
+}
+
+function evidenceTier(values: number[]): { min: number | null; max: number | null } {
+  return values.length === 0
+    ? { min: null, max: null }
+    : { min: Math.min(...values), max: Math.max(...values) };
+}
+
+const COMPILED_PARENT_TIER = (executor: DbExecutor) => executor`
+  case c.parent_type
+    when 'page' then (select p.tier from pages p where p.id = c.parent_id)
+    when 'journal' then (select j.tier from journal_entries j where j.id = c.parent_id)
+    when 'decision' then (select d.tier from decisions d where d.id = c.parent_id)
+    when 'interaction' then (select i.tier from interactions i where i.id = c.parent_id)
+    when 'task' then (select t.tier from tasks t where t.id = c.parent_id)
+    else null
+  end`;
+
+function containsCjk(value: string): boolean {
+  return /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(value);
+}
+
+// One ownership matcher for every compiled-note evidence path. Alphanumeric aliases need
+// Unicode letter/number boundaries; punctuation-bearing aliases are literal; CJK names
+// intentionally retain substring behavior.
+function ownershipNameMatches(text: string, rawName: string): boolean {
+  const name = rawName.trim();
+  if (!name) return false;
+  const haystack = text.toLocaleLowerCase();
+  const needle = name.toLocaleLowerCase();
+  if (containsCjk(needle) || /[^\p{L}\p{N}\s]/u.test(needle)) {
+    return haystack.includes(needle);
+  }
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, "u").test(haystack);
+}
+
 export async function allowedTier(actor?: AccessActor): Promise<1 | 2> {
-  const rows = actor
-    ? await sql`
-        select 1 from session_unlocks
-        where scope = 'tier2' and granted_via = ${actor} and expires_at > ${now()}
-        limit 1`
-    : await sql`
-        select 1 from session_unlocks where scope = 'tier2' and expires_at > ${now()} limit 1`;
-  return rows.length > 0 ? 2 : 1;
+  const readTier = async (): Promise<1 | 2> => {
+    const [row] = await db()`select app_allowed_tier()::int as tier`;
+    const tier = Number(row?.tier);
+    if (tier !== 1 && tier !== 2) throw new Error("allowed_tier_invalid");
+    return tier;
+  };
+  if (actor !== undefined && !hasDbTransaction()) {
+    return withDbTransaction(async (tx) => {
+      await tx`select set_config('minime.actor', ${actor ?? ""}, true)`;
+      return readTier();
+    });
+  }
+  return readTier();
 }
 
 export async function insertUnlock(
@@ -66,11 +135,11 @@ export async function insertUnlock(
   via: string,
 ): Promise<{ id: string; expires_at: Date }> {
   const expires = new Date(now().getTime() + minutes * 60_000);
-  const [row] = await sql`
-    insert into session_unlocks (scope, granted_at, expires_at, granted_via)
-    values ('tier2', ${now()}, ${expires}, ${via})
-    returning id, expires_at`;
-  return row as any;
+  const id = crypto.randomUUID();
+  await db()`
+    insert into session_unlocks (id, scope, granted_at, expires_at, granted_via)
+    values (${id}, 'tier2', ${now()}, ${expires}, ${via})`;
+  return { id, expires_at: expires };
 }
 
 export async function logEvent(e: {
@@ -79,15 +148,18 @@ export async function logEvent(e: {
   entityType?: string;
   entityId?: string;
   payload?: unknown;
-}): Promise<void> {
-  await sql`
+}): Promise<string> {
+  const [row] = await db()`
     insert into events (at, actor, verb, entity_type, entity_id, payload)
     values (${now()}, ${e.actor}, ${e.verb}, ${e.entityType ?? null}, ${e.entityId ?? null},
-            ${sql.json((e.payload as any) ?? {})})`;
+            ${db().json((e.payload as any) ?? {})})
+    returning id::text as id`;
+  if (!row || typeof row.id !== "string") throw new Error("event insert returned no id");
+  return row.id;
 }
 
 export async function eventsSince(since: Date): Promise<any[]> {
-  return sql`select id, at, actor, verb, entity_type, entity_id, payload
+  return db()`select id, at, actor, verb, entity_type, entity_id, payload
              from events where at >= ${since} order by at desc`;
 }
 
@@ -99,7 +171,8 @@ export async function replaceChunks(
   texts: string[],
   tier: number,
 ): Promise<void> {
-  await sql.begin(async (tx) => {
+  assertProseTier(tier);
+  await withDbTransaction(async (tx) => {
     await tx`delete from chunks where parent_type = ${parentType} and parent_id = ${parentId}`;
     for (let ord = 0; ord < texts.length; ord++) {
       await tx`insert into chunks (parent_type, parent_id, ord, text, tier)
@@ -108,11 +181,44 @@ export async function replaceChunks(
   });
 }
 
+export async function replacePageChunksMonotonic(
+  pageId: string,
+  texts: string[],
+  requestedTier: 1 | 2,
+): Promise<{ count: number; effectiveTier: 1 | 2 }> {
+  assertProseTier(requestedTier);
+  return withDbTransaction(async (tx) => {
+    const [page] = await tx`select tier from pages where id = ${pageId} for update`;
+    if (!page) return { count: 0, effectiveTier: requestedTier };
+    const chunks = await tx`
+      select tier from chunks where parent_type = 'page' and parent_id = ${pageId} for update`;
+    const edges = await tx`
+      select tier from edges
+      where ((source_table = 'pages' and source_id = ${pageId})
+          or (src_type = 'page' and src_id = ${pageId}))
+      for update`;
+    const evidence = [
+      Number(page.tier),
+      ...chunks.map((row: any) => Number(row.tier)),
+      ...edges.map((row: any) => Number(row.tier)),
+    ];
+    for (const tier of evidence) assertProseTier(tier);
+    const effectiveTier = Math.max(requestedTier, ...evidence) as 1 | 2;
+    await tx`delete from chunks where parent_type = 'page' and parent_id = ${pageId}`;
+    for (let ord = 0; ord < texts.length; ord++) {
+      await tx`insert into chunks (parent_type, parent_id, ord, text, tier)
+               values ('page', ${pageId}, ${ord}, ${texts[ord]!}, ${effectiveTier})`;
+    }
+    return { count: texts.length, effectiveTier };
+  });
+}
+
 export async function chunksMissingEmbedding(
   limit: number,
   maxTier = 2, // cloud embed providers pass CLOUD_MAX_TIER; local providers see everything
 ): Promise<{ id: string; text: string }[]> {
-  return sql`select id, text from chunks where embedding is null and tier <= ${maxTier}
+  return db()`select id, text from chunks
+             where embedding is null and tier >= 1 and tier <= ${maxTier}
              order by updated_at limit ${limit}` as any;
 }
 
@@ -121,25 +227,26 @@ export async function setChunkEmbedding(
   vector: number[],
   model: string,
 ): Promise<void> {
-  await sql`update chunks set embedding = ${JSON.stringify(vector)}::vector, embed_model = ${model}
-            where id = ${id}`;
+  await db()`update chunks set embedding = ${JSON.stringify(vector)}::vector, embed_model = ${model}
+            where id = ${id} and tier >= 1`;
 }
 
 export async function countChunksMissingEmbedding(): Promise<number> {
-  const [r] = await sql`select count(*)::int as n from chunks where embedding is null`;
+  const [r] =
+    await db()`select count(*)::int as n from chunks where embedding is null and tier >= 1`;
   return r!.n;
 }
 
 // Vectors from different models live in different spaces and must never be compared.
 // Switching EMBED_PROVIDER/model therefore wipes everything for a clean re-embed.
 export async function clearEmbeddings(): Promise<number> {
-  const rows = await sql`update chunks set embedding = null, embed_model = null
+  const rows = await db()`update chunks set embedding = null, embed_model = null
                          where embedding is not null returning id`;
   return rows.length;
 }
 
 export async function embedModelsInUse(): Promise<string[]> {
-  const rows = await sql`select distinct embed_model from chunks where embed_model is not null`;
+  const rows = await db()`select distinct embed_model from chunks where embed_model is not null`;
   return rows.map((r: any) => r.embed_model);
 }
 
@@ -171,12 +278,12 @@ export async function ftsCandidates(
     .filter(Boolean)
     .filter((t) => !isCjkStopToken(t))
     .join(" OR ");
-  return sql`
+  return db()`
     select c.id, c.parent_type, c.parent_id, c.ord, c.text,
            0::float as cosine,
            ts_rank_cd(c.tsv, websearch_to_tsquery('english', ${orQuery}))::float as fts
     from chunks c
-    where c.tier <= ${allowed}
+    where c.tier >= 1 and c.tier <= ${allowed}
       and c.tsv @@ websearch_to_tsquery('english', ${orQuery})
       and (${types === null} or c.parent_type = any(${types ?? []}))
       and (${parentIds === null} or c.parent_id = any(${parentIds ?? []}))
@@ -192,12 +299,12 @@ export async function vectorCandidates(
 ): Promise<Candidate[]> {
   const allowed = await allowedTier(actor);
   const vec = JSON.stringify(embedding);
-  return sql`
+  return db()`
     select c.id, c.parent_type, c.parent_id, c.ord, c.text,
            (1 - (c.embedding <=> ${vec}::vector))::float as cosine,
            0::float as fts
     from chunks c
-    where c.tier <= ${allowed} and c.embedding is not null
+    where c.tier >= 1 and c.tier <= ${allowed} and c.embedding is not null
       and (${types === null} or c.parent_type = any(${types ?? []}))
       and (${parentIds === null} or c.parent_id = any(${parentIds ?? []}))
     order by c.embedding <=> ${vec}::vector
@@ -222,11 +329,11 @@ export async function parentMeta(
   const allowed = await allowedTier(actor);
   const { table, titleCol } = parentTable(type);
   // table/titleCol come from the fixed PARENTS map above, never from user input.
-  const rows = await sql`
-    select id, left(${sql(titleCol)}::text, 120) as title, updated_at, created_by, derived_from,
+  const rows = await db()`
+    select id, left(${db()(titleCol)}::text, 120) as title, updated_at, created_by, derived_from,
            source
-    from ${sql(table)}
-    where id = any(${ids}) and tier <= ${allowed}`;
+    from ${db()(table)}
+    where id = any(${ids}) and tier >= 1 and tier <= ${allowed}`;
   return new Map(rows.map((r: any) => [r.id as string, r as ParentMeta]));
 }
 
@@ -239,18 +346,18 @@ export interface EntityRef {
 export async function entitiesNamedIn(query: string, actor?: AccessActor): Promise<EntityRef[]> {
   const allowed = await allowedTier(actor);
   const q = query.toLowerCase();
-  const people = await sql`
+  const people = await db()`
     select distinct p.id from people p
     left join person_aliases a on a.person_id = p.id
     where (${q} like '%' || lower(p.canonical_name) || '%'
        or (a.alias is not null and ${q} like '%' || lower(a.alias) || '%'))
-      and p.tier <= ${allowed}`;
-  const orgs = await sql`
+      and p.tier >= 1 and p.tier <= ${allowed}`;
+  const orgs = await db()`
     select distinct o.id from orgs o
     left join org_aliases a on a.org_id = o.id
     where (${q} like '%' || lower(o.canonical_name) || '%'
        or (a.alias is not null and ${q} like '%' || lower(a.alias) || '%'))
-      and o.tier <= ${allowed}`;
+      and o.tier >= 1 and o.tier <= ${allowed}`;
   return [
     ...people.map((r: any) => ({ type: "person" as const, id: r.id })),
     ...orgs.map((r: any) => ({ type: "org" as const, id: r.id })),
@@ -267,12 +374,12 @@ export async function oneHopNeighbors(
   for (const type of ["person", "org"] as const) {
     const ids = refs.filter((r) => r.type === type).map((r) => r.id);
     if (ids.length === 0) continue;
-    const rows = await sql`
+    const rows = await db()`
       select src_type as t, src_id as i from edges where dst_type = ${type} and dst_id = any(${ids})
-        and tier <= ${allowed}
+        and tier >= 1 and tier <= ${allowed}
       union
       select dst_type as t, dst_id as i from edges where src_type = ${type} and src_id = any(${ids})
-        and tier <= ${allowed}`;
+        and tier >= 1 and tier <= ${allowed}`;
     for (const r of rows as any[]) set.add(`${r.t}:${r.i}`);
     for (const id of ids) set.add(`${type}:${id}`);
   }
@@ -292,13 +399,18 @@ export async function accessCounts(
 ): Promise<Map<string, number>> {
   if (ids.length === 0) return new Map();
   const since = new Date(now().getTime() - sinceDays * 86_400_000);
-  const rows = await sql`
-    select payload->'returned_ids'->>0 as id, count(*)::int as n
-    from events
-    where verb = 'tool:minime_get_context'
-      and at >= ${since}
-      and (${!actor} or actor = ${actor ?? ""})
-      and payload->'returned_ids'->>0 = any(${ids})
+  const rows = await db()`
+    select r.payload->'returned_ids'->>0 as id, count(*)::int as n
+    from events r
+    join events d
+      on d.verb = 'tool:minime_get_context:disposition'
+     and d.payload->>'result_event_id' = r.id::text
+     and d.payload->>'status' = 'released'
+    where r.verb = 'tool:minime_get_context'
+      and r.payload->>'delivery' = 'transport'
+      and r.at >= ${since}
+      and (${!actor} or r.actor = ${actor ?? ""})
+      and r.payload->'returned_ids'->>0 = any(${ids})
     group by 1`;
   return new Map(rows.map((r: any) => [r.id as string, r.n as number]));
 }
@@ -307,11 +419,11 @@ export async function accessCounts(
 
 export async function resolvePerson(name: string, actor?: AccessActor): Promise<any | null> {
   const allowed = await allowedTier(actor);
-  const rows = await sql`
+  const rows = await db()`
     select distinct p.* from people p
     left join person_aliases a on a.person_id = p.id
     where (lower(p.canonical_name) = lower(${name}) or lower(a.alias) = lower(${name}))
-      and p.tier <= ${allowed}
+      and p.tier >= 1 and p.tier <= ${allowed}
     limit 1`;
   return rows[0] ?? null;
 }
@@ -323,7 +435,7 @@ export async function resolvePerson(name: string, actor?: AccessActor): Promise<
 export async function personById(
   id: string,
 ): Promise<{ id: string; canonical_name: string; relation: string | null } | null> {
-  const rows = await sql`
+  const rows = await db()`
     select id, canonical_name, relation from people where id = ${id} limit 1`;
   return (rows[0] as any) ?? null;
 }
@@ -335,10 +447,10 @@ export async function ensurePerson(
 ): Promise<{ id: string; created: boolean }> {
   const existing = await resolvePerson(name);
   if (existing) return { id: existing.id, created: false };
-  const [row] = await sql`
+  const [row] = await db()`
     insert into people (canonical_name, created_by, source)
     values (${name}, ${createdBy}, ${source}) returning id`;
-  await sql`insert into person_aliases (person_id, alias) values (${row!.id}, ${name})
+  await db()`insert into person_aliases (person_id, alias) values (${row!.id}, ${name})
             on conflict do nothing`;
   return { id: row!.id, created: true };
 }
@@ -349,34 +461,44 @@ export async function setPersonDetails(
   relation: string | null,
   context: string | null,
 ): Promise<void> {
-  await sql`update people set relation = coalesce(${relation}, relation),
+  await db()`update people set relation = coalesce(${relation}, relation),
                               context = coalesce(${context}, context)
             where id = ${id}`;
 }
 
+export async function setDecisionOutcome(
+  id: string,
+  actualOutcome: string,
+  reviewedAt: Date,
+): Promise<void> {
+  await db()`update decisions
+             set actual_outcome = ${actualOutcome}, reviewed_at = ${reviewedAt}
+             where id = ${id}`;
+}
+
 export async function addAlias(personId: string, alias: string): Promise<void> {
-  await sql`insert into person_aliases (person_id, alias) values (${personId}, ${alias})
+  await db()`insert into person_aliases (person_id, alias) values (${personId}, ${alias})
             on conflict do nothing`;
 }
 
 export async function touchLastContact(personId: string, at: Date): Promise<void> {
-  await sql`update people set last_contact_at = greatest(coalesce(last_contact_at, ${at}), ${at})
+  await db()`update people set last_contact_at = greatest(coalesce(last_contact_at, ${at}), ${at})
             where id = ${personId}`;
 }
 
 // Owner-relation ("my physiotherapist") detected by extraction: fill only if empty —
 // a human-set relation is never overwritten by a rule.
 export async function setPersonRelationIfNull(personId: string, relation: string): Promise<void> {
-  await sql`update people set relation = ${relation} where id = ${personId} and relation is null`;
+  await db()`update people set relation = ${relation} where id = ${personId} and relation is null`;
 }
 
 // Extraction may upgrade "Tomasz" to "Tomasz Wójcik" once the fuller form is seen.
 export async function setPersonCanonicalName(personId: string, name: string): Promise<void> {
-  await sql`update people set canonical_name = ${name} where id = ${personId}`;
+  await db()`update people set canonical_name = ${name} where id = ${personId}`;
 }
 
 export async function peopleByFirstName(first: string): Promise<{ id: string }[]> {
-  return sql`
+  return db()`
     select id from people
     where lower(split_part(canonical_name, ' ', 1)) = ${first.toLowerCase()}` as any;
 }
@@ -385,11 +507,11 @@ export async function peopleByFirstName(first: string): Promise<{ id: string }[]
 
 export async function resolveOrg(name: string, actor?: AccessActor): Promise<any | null> {
   const allowed = await allowedTier(actor);
-  const rows = await sql`
+  const rows = await db()`
     select distinct o.* from orgs o
     left join org_aliases a on a.org_id = o.id
     where (lower(o.canonical_name) = lower(${name}) or lower(a.alias) = lower(${name}))
-      and o.tier <= ${allowed}
+      and o.tier >= 1 and o.tier <= ${allowed}
       and o.retired_at is null
     limit 1`;
   return rows[0] ?? null;
@@ -402,25 +524,25 @@ export async function ensureOrg(
 ): Promise<{ id: string; created: boolean }> {
   const existing = await resolveOrg(name);
   if (existing) return { id: existing.id, created: false };
-  const [row] = await sql`
+  const [row] = await db()`
     insert into orgs (canonical_name, created_by, source)
     values (${name}, ${createdBy}, ${source}) returning id`;
-  await sql`insert into org_aliases (org_id, alias) values (${row!.id}, ${name})
+  await db()`insert into org_aliases (org_id, alias) values (${row!.id}, ${name})
             on conflict do nothing`;
   return { id: row!.id, created: true };
 }
 
 export async function addOrgAlias(orgId: string, alias: string): Promise<void> {
-  await sql`insert into org_aliases (org_id, alias) values (${orgId}, ${alias})
+  await db()`insert into org_aliases (org_id, alias) values (${orgId}, ${alias})
             on conflict do nothing`;
 }
 
 export async function setOrgCanonicalName(orgId: string, name: string): Promise<void> {
-  await sql`update orgs set canonical_name = ${name} where id = ${orgId}`;
+  await db()`update orgs set canonical_name = ${name} where id = ${orgId}`;
 }
 
 export async function allOrgsWithAliases(): Promise<{ id: string; names: string[] }[]> {
-  const rows = await sql`
+  const rows = await db()`
     select o.id, array_agg(distinct x.name) as names
     from orgs o
     cross join lateral (
@@ -447,11 +569,11 @@ export async function retypeOrgToPerson(
   orgId: string,
   opts: { relation?: string | null; reason?: string } = {},
 ): Promise<{ personId: string; orgId: string; created: boolean; edgesRepointed: number }> {
-  const [org] = await sql`select id, canonical_name from orgs where id = ${orgId}`;
+  const [org] = await db()`select id, canonical_name from orgs where id = ${orgId}`;
   if (!org) throw new Error(`org not found: ${orgId}`);
   const name = org.canonical_name as string;
 
-  return sql.begin(async (tx) => {
+  return withDbTransaction(async (tx) => {
     // 1. resolve-or-create the person (no tier predicate here — admin repair path)
     const [existingPerson] = await tx`
       select p.id from people p
@@ -542,7 +664,7 @@ export async function detectMistypedEntities(): Promise<
   // excluded — they are ambiguous brand-vs-surname (e.g. "Vazyme", "Fapon") and produce
   // false positives on a review screen. The `>= 2 distinct works_at people` workplace
   // signal is applied below in JS (per-org distinct count) so the rule stays readable.
-  const orgs = await sql`
+  const orgs = await db()`
     select o.id, o.canonical_name as name,
            (select count(*)::int from edges e where e.src_id = o.id or e.dst_id = o.id) as edges,
            (select count(distinct e.src_id)::int from edges e
@@ -555,7 +677,7 @@ export async function detectMistypedEntities(): Promise<
   const flaggedOrgs = orgs.filter(
     (r: any) => r.employees < 2 && !knownOrgs.has(String(r.name).toLowerCase()),
   );
-  const people = await sql`
+  const people = await db()`
     select p.id, p.canonical_name as name,
            (select count(*)::int from edges e where e.src_id = p.id or e.dst_id = p.id) as edges
     from people p
@@ -611,6 +733,132 @@ interface Std {
   tier?: number;
 }
 
+export interface PageSnapshot {
+  id: string;
+  path: string;
+  title: string;
+  body_md: string;
+  content_hash: string;
+  tier: number;
+  status: "active" | "deleted";
+  source: string;
+  created_by: string;
+  derived_from: string | null;
+  updated_at: Date;
+}
+
+export interface PageChunkSnapshot {
+  id: string;
+  parent_type: ParentType;
+  parent_id: string;
+  ord: number;
+  text: string;
+  tier: number;
+  updated_at: Date;
+}
+
+export interface UpsertPageInput {
+  path: string;
+  title: string;
+  bodyMd: string;
+  contentHash: string;
+  tier?: number;
+  createdBy?: string;
+  source?: string;
+  derivedFrom?: string | null;
+}
+
+export interface CompiledSourceEvidence {
+  requested_ids: string[];
+  resolved: {
+    id: string;
+    tier: number;
+    parent_type: ParentType;
+    parent_id: string;
+    chunk_ord: number;
+    chunk_updated_at: Date;
+    mention_created_at: Date | null;
+    entity_refs: CompiledNoteIdentity[];
+    parent_tier: number | null;
+    entity_min_tier: number | null;
+    entity_max_tier: number | null;
+    evidence_unresolved: boolean;
+    min_tier: number;
+    max_tier: number;
+  }[];
+  unresolved_ids: string[];
+  owner_entities: CompiledNoteIdentity[];
+  min_tier: number | null;
+  max_tier: number | null;
+  latest_mention_at: Date | null;
+  representative_parent_id: string | null;
+}
+
+export interface CompiledRepresentationTierEvidence {
+  page_tier: number;
+  chunk_min_tier: number | null;
+  chunk_max_tier: number | null;
+  edge_max_tier: number | null;
+  edge_min_tier: number | null;
+  entity_min_tier: number | null;
+  entity_max_tier: number | null;
+  evidence_unresolved: boolean;
+  min_tier: number;
+  max_tier: number;
+  edge_count: number;
+}
+
+const PAGE_SNAPSHOT_COLUMNS = db()`p.id, p.path, p.title, p.body_md, p.content_hash,
+  p.tier, p.status, p.source, p.created_by, p.derived_from, p.updated_at`;
+
+function mapPageSnapshot(row: any): PageSnapshot {
+  return {
+    id: row.id,
+    path: row.path,
+    title: row.title,
+    body_md: row.body_md,
+    content_hash: row.content_hash,
+    tier: Number(row.tier),
+    status: row.status,
+    source: row.source,
+    created_by: row.created_by,
+    derived_from: row.derived_from ?? null,
+    updated_at: new Date(row.updated_at),
+  };
+}
+
+export async function pageByPath(path: string): Promise<PageSnapshot | null> {
+  const rows =
+    await db()`select ${PAGE_SNAPSHOT_COLUMNS} from pages p where p.path = ${path} limit 1`;
+  return rows[0] ? mapPageSnapshot(rows[0]) : null;
+}
+
+export async function pageById(id: string): Promise<PageSnapshot | null> {
+  const rows = await db()`select ${PAGE_SNAPSHOT_COLUMNS} from pages p where p.id = ${id} limit 1`;
+  return rows[0] ? mapPageSnapshot(rows[0]) : null;
+}
+
+export async function activePagesForCompiledNoteReconciliation(): Promise<PageSnapshot[]> {
+  const rows = await db()`select ${PAGE_SNAPSHOT_COLUMNS} from pages p where p.status = 'active'`;
+  return rows.map(mapPageSnapshot);
+}
+
+export async function pageChunkSnapshot(pageId: string): Promise<PageChunkSnapshot[]> {
+  const rows = await db()`
+    select id, parent_type, parent_id, ord, text, tier, updated_at
+    from chunks where parent_type = 'page' and parent_id = ${pageId}
+    order by ord, id`;
+  return rows.map((row: any) => ({
+    id: row.id,
+    parent_type: row.parent_type as ParentType,
+    parent_id: row.parent_id,
+    ord: Number(row.ord),
+    text: row.text,
+    tier: Number(row.tier),
+    updated_at: new Date(row.updated_at),
+  }));
+}
+
 function decisionTier(tier?: number): 1 | 2 {
   if (tier === undefined) return 1;
   if (tier === 1 || tier === 2) return tier;
@@ -639,12 +887,14 @@ export async function insertJournal(
     at?: Date;
   } & Std,
 ): Promise<{ id: string }> {
-  const [row] = await sql`
-    insert into journal_entries (at, entry_md, mood, energy, created_by, source, derived_from, tier)
-    values (${e.at ?? now()}, ${e.entryMd}, ${e.mood ?? null}, ${e.energy ?? null},
-            ${e.createdBy ?? "human"}, ${e.source ?? "manual"}, ${e.derivedFrom ?? null}, ${e.tier ?? 2})
-    returning id`;
-  return row as any;
+  // Generate the identifier client-side.  A locked tier-2 INSERT is allowed, but PostgreSQL's
+  // INSERT ... RETURNING applies the SELECT RLS policy and would therefore return no row.
+  const id = crypto.randomUUID();
+  await db()`
+    insert into journal_entries (id, at, entry_md, mood, energy, created_by, source, derived_from, tier)
+    values (${id}, ${e.at ?? now()}, ${e.entryMd}, ${e.mood ?? null}, ${e.energy ?? null},
+            ${e.createdBy ?? "human"}, ${e.source ?? "manual"}, ${e.derivedFrom ?? null}, ${e.tier ?? 2})`;
+  return { id };
 }
 
 export async function insertDecision(
@@ -668,12 +918,12 @@ export async function insertDecision(
   const branchIds: string[] = [];
   const decisionId = crypto.randomUUID();
   const tier = decisionTier(d.tier);
-  await sql.begin(async (tx) => {
+  await withDbTransaction(async (tx) => {
     await tx`
       insert into decisions (id, question, options, criteria, choice, reasoning, expected_outcome,
                              falsifier, stakes, reversibility, confidence,
                              decided_at, review_at, created_by, source, derived_from, tier)
-      values (${decisionId}, ${d.question}, ${sql.json(d.options as any)}, ${d.criteria ? sql.json(d.criteria as any) : null},
+      values (${decisionId}, ${d.question}, ${db().json(d.options as any)}, ${d.criteria ? db().json(d.criteria as any) : null},
               ${d.choice ?? null}, ${d.reasoning ?? null}, ${d.expectedOutcome ?? null},
               ${d.falsifier ?? null}, ${d.stakes ?? null}, ${d.reversibility ?? null},
               ${d.confidence ?? null},
@@ -769,31 +1019,32 @@ function branchRel(status: "chosen" | "rejected" | "considered"): string {
 
 export async function getDecision(id: string, actor?: AccessActor): Promise<any | null> {
   const allowed = await allowedTier(actor);
-  const rows = await sql`select * from decisions where id = ${id} and tier <= ${allowed}`;
+  const rows =
+    await db()`select * from decisions where id = ${id} and tier >= 1 and tier <= ${allowed}`;
   return rows[0] ?? null;
 }
 
 export async function getDecisionTranscript(id: string, actor?: AccessActor): Promise<any[]> {
   const allowed = await allowedTier(actor);
-  return sql`
+  return db()`
     select id, decision_id, ord, question_key, prompt, answer, at, created_at, created_by, source, tier
     from decision_transcripts
-    where decision_id = ${id} and tier <= ${allowed}
+    where decision_id = ${id} and tier >= 1 and tier <= ${allowed}
     order by ord` as any;
 }
 
 export async function getDecisionBranches(id: string, actor?: AccessActor): Promise<any[]> {
   const allowed = await allowedTier(actor);
-  return sql`
+  return db()`
     select id, decision_id, label, status, note, would_be_right_if, created_at, updated_at,
            created_by, source, tier
     from decision_branches
-    where decision_id = ${id} and tier <= ${allowed}
+    where decision_id = ${id} and tier >= 1 and tier <= ${allowed}
     order by created_at, id` as any;
 }
 
 export async function decisionBranchesForIndex(id: string): Promise<any[]> {
-  return sql`
+  return db()`
     select id, decision_id, label, status, note, would_be_right_if, created_at, updated_at,
            created_by, source, tier
     from decision_branches
@@ -809,7 +1060,7 @@ export async function reviewDecision(
   outcomeScore?: number | null,
 ): Promise<{ principleId: string | null }> {
   let principleId: string | null = null;
-  await sql.begin(async (tx) => {
+  await withDbTransaction(async (tx) => {
     const [dec] = await tx`update decisions
                set actual_outcome = ${actualOutcome}, reviewed_at = ${now()},
                    outcome_score = coalesce(${outcomeScore ?? null}, outcome_score)
@@ -839,7 +1090,7 @@ export async function upsertTask(
   } & Std,
 ): Promise<{ id: string }> {
   if (t.id) {
-    const [row] = await sql`
+    const [row] = await db()`
       update tasks set title = ${t.title},
                        body = coalesce(${t.body ?? null}, body),
                        status = coalesce(${t.status ?? null}, status),
@@ -850,13 +1101,13 @@ export async function upsertTask(
     if (!row) throw new Error("task not found");
     return row as any;
   }
-  const [row] = await sql`
-    insert into tasks (title, body, status, due, goal_id, created_by, source, derived_from, tier, completed_at)
-    values (${t.title}, ${t.body ?? null}, ${t.status ?? "inbox"}, ${t.due ?? null}, ${t.goalId ?? null},
+  const id = crypto.randomUUID();
+  await db()`
+    insert into tasks (id, title, body, status, due, goal_id, created_by, source, derived_from, tier, completed_at)
+    values (${id}, ${t.title}, ${t.body ?? null}, ${t.status ?? "inbox"}, ${t.due ?? null}, ${t.goalId ?? null},
             ${t.createdBy ?? "human"}, ${t.source ?? "manual"}, ${t.derivedFrom ?? null}, ${t.tier ?? 1},
-            ${t.status === "done" ? now() : null})
-    returning id`;
-  return row as any;
+            ${t.status === "done" ? now() : null})`;
+  return { id };
 }
 
 // An interaction attaches to EXACTLY ONE subject: a person OR an org (XOR enforced
@@ -876,28 +1127,30 @@ export async function insertInteraction(
     throw new Error("insertInteraction requires exactly one of personId or orgId");
   }
   const at = i.occurredAt ?? now();
-  const [row] = await sql`
-    insert into interactions (person_id, org_id, kind, summary, occurred_at, created_by, source, derived_from, tier)
-    values (${i.personId ?? null}, ${i.orgId ?? null}, ${i.kind}, ${i.summary}, ${at},
-            ${i.createdBy ?? "human"}, ${i.source ?? "manual"}, ${i.derivedFrom ?? null}, ${i.tier ?? 2})
-    returning id`;
+  // See insertJournal: avoid RETURNING on a locked tier-2 write, while retaining a stable id
+  // for the interaction's graph edge and the caller's receipt.
+  const id = crypto.randomUUID();
+  await db()`
+    insert into interactions (id, person_id, org_id, kind, summary, occurred_at, created_by, source, derived_from, tier)
+    values (${id}, ${i.personId ?? null}, ${i.orgId ?? null}, ${i.kind}, ${i.summary}, ${at},
+            ${i.createdBy ?? "human"}, ${i.source ?? "manual"}, ${i.derivedFrom ?? null}, ${i.tier ?? 2})`;
   if (i.personId) {
     await touchLastContact(i.personId, at);
-    await sql`insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by)
-              values ('interaction', ${row!.id}, 'involves', 'person', ${i.personId},
-                      'interactions', ${row!.id}, ${i.createdBy ?? "human"})`;
+    await db()`insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by)
+              values ('interaction', ${id}, 'involves', 'person', ${i.personId},
+                      'interactions', ${id}, ${i.createdBy ?? "human"})`;
   } else {
-    await sql`insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by)
-              values ('interaction', ${row!.id}, 'involves', 'org', ${i.orgId ?? null},
-                      'interactions', ${row!.id}, ${i.createdBy ?? "human"})`;
+    await db()`insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by)
+              values ('interaction', ${id}, 'involves', 'org', ${i.orgId ?? null},
+                      'interactions', ${id}, ${i.createdBy ?? "human"})`;
   }
-  return row as any;
+  return { id };
 }
 
 export async function insertPrinciple(
   p: { rule: string; domain?: string | null } & Std,
 ): Promise<{ id: string }> {
-  const [row] = await sql`
+  const [row] = await db()`
     insert into principles (rule, domain, created_by, source)
     values (${p.rule}, ${p.domain ?? null}, ${p.createdBy ?? "human"}, ${p.source ?? "manual"})
     returning id`;
@@ -912,7 +1165,7 @@ export async function insertCommitment(
     status?: string;
   } & Std,
 ): Promise<{ id: string }> {
-  const [row] = await sql`
+  const [row] = await db()`
     insert into commitments (what, to_whom, due, status, created_by, source)
     values (${c.what}, ${c.toWhom}, ${c.due ?? null}, ${c.status ?? "open"},
             ${c.createdBy ?? "human"}, ${c.source ?? "manual"})
@@ -928,7 +1181,7 @@ export async function insertGoal(
     parentId?: string | null;
   } & Std,
 ): Promise<{ id: string }> {
-  const [row] = await sql`
+  const [row] = await db()`
     insert into goals (horizon, statement, why, parent_id, created_by, source)
     values (${g.horizon}, ${g.statement}, ${g.why ?? null}, ${g.parentId ?? null},
             ${g.createdBy ?? "human"}, ${g.source ?? "manual"})
@@ -938,14 +1191,14 @@ export async function insertGoal(
 
 // Onboarding re-run hint: a non-empty values table means the interview already ran once.
 export async function valuesCount(): Promise<number> {
-  const [r] = await sql`select count(*)::int as n from values_items`;
+  const [r] = await db()`select count(*)::int as n from values_items`;
   return r!.n;
 }
 
 export async function insertValueItem(
   v: { statement: string; priority?: number; notes?: string | null } & Std,
 ): Promise<{ id: string }> {
-  const [row] = await sql`
+  const [row] = await db()`
     insert into values_items (statement, priority, notes, created_by, source)
     values (${v.statement}, ${v.priority ?? 100}, ${v.notes ?? null}, ${v.createdBy ?? "human"}, ${v.source ?? "manual"})
     returning id`;
@@ -963,7 +1216,7 @@ export async function insertEdge(e: {
   extractedBy?: string;
   confidence?: number;
 }): Promise<void> {
-  await sql`
+  await db()`
     insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by, confidence)
     values (${e.srcType}, ${e.srcId}, ${e.rel}, ${e.dstType}, ${e.dstId},
             ${e.sourceTable ?? null}, ${e.sourceId ?? null}, ${e.extractedBy ?? "human"}, ${e.confidence ?? 1.0})`;
@@ -974,7 +1227,7 @@ export async function deleteExtractedEdgesForSource(
   sourceId: string,
   extractedBy: string,
 ): Promise<number> {
-  const rows = await sql`
+  const rows = await db()`
     delete from edges
     where source_table = ${sourceTable} and source_id = ${sourceId} and extracted_by = ${extractedBy}
     returning id`;
@@ -988,7 +1241,7 @@ export async function edgeExists(
   dstType: string,
   dstId: string,
 ): Promise<boolean> {
-  const rows = await sql`select 1 from edges where src_type = ${srcType} and src_id = ${srcId}
+  const rows = await db()`select 1 from edges where src_type = ${srcType} and src_id = ${srcId}
     and rel = ${rel} and dst_type = ${dstType} and dst_id = ${dstId} limit 1`;
   return rows.length > 0;
 }
@@ -996,56 +1249,507 @@ export async function edgeExists(
 // ---------------------------------------------------------------- pages (brain sync)
 
 export async function upsertPage(
-  p: {
-    path: string;
-    title: string;
-    bodyMd: string;
-    contentHash: string;
-    tier?: number;
-  } & Std,
-): Promise<{ id: string; changed: boolean }> {
-  const [existing] = await sql`select id, content_hash, tier from pages where path = ${p.path}`;
-  if (existing && existing.content_hash === p.contentHash) {
-    const tier = p.tier ?? 1;
-    if (existing.tier !== tier) {
-      await sql`
-        update pages
-        set tier = ${tier}, status = 'active',
-            derived_from = coalesce(${p.derivedFrom ?? null}, derived_from)
-        where id = ${existing.id}`;
-      return { id: existing.id, changed: true };
-    }
-    await sql`update pages set status = 'active' where id = ${existing.id}`;
-    return { id: existing.id, changed: false };
+  p: UpsertPageInput,
+  options: {
+    provenanceMode?: "preserve" | "replace";
+    contentHashMode?: "replace" | "preserve-existing";
+    tierMode?: "replace" | "promote";
+  } = {},
+): Promise<{ id: string; changed: boolean; created: boolean }> {
+  const incomingTier = p.tier ?? 1;
+  assertProseTier(incomingTier);
+  const provenanceMode = options.provenanceMode ?? "preserve";
+  const contentHashMode = options.contentHashMode ?? "replace";
+  const tierMode = options.tierMode ?? "replace";
+  const [existing] = await db()`
+    select id, title, body_md, content_hash, tier, status, created_by, source, derived_from
+    from pages where path = ${p.path}`;
+  if (!existing) {
+    const id = crypto.randomUUID();
+    await db()`
+      insert into pages (id, path, title, body_md, content_hash, tier, created_by, source, derived_from)
+      values (${id}, ${p.path}, ${p.title}, ${p.bodyMd}, ${p.contentHash}, ${incomingTier},
+              ${p.createdBy ?? "human"}, ${p.source ?? "brain-sync"}, ${p.derivedFrom ?? null})`;
+    return { id, changed: true, created: true };
   }
-  if (existing) {
-    const [row] = await sql`
-      update pages set title = ${p.title}, body_md = ${p.bodyMd}, content_hash = ${p.contentHash},
-                       tier = ${p.tier ?? 1}, status = 'active',
-                       derived_from = coalesce(${p.derivedFrom ?? null}, derived_from)
-      where id = ${existing.id} returning id`;
-    return { id: row!.id, changed: true };
+  const existingTier = Number(existing.tier);
+  assertProseTier(existingTier);
+  const nextTier = tierMode === "promote" ? Math.max(existingTier, incomingTier) : incomingTier;
+  const nextHash = contentHashMode === "preserve-existing" ? existing.content_hash : p.contentHash;
+  const provenanceChanged =
+    provenanceMode === "replace" &&
+    (existing.created_by !== (p.createdBy ?? "human") ||
+      existing.source !== (p.source ?? "brain-sync") ||
+      (existing.derived_from ?? null) !== (p.derivedFrom ?? null));
+  const changed =
+    existing.title !== p.title ||
+    existing.body_md !== p.bodyMd ||
+    existing.content_hash !== nextHash ||
+    Number(existing.tier) !== nextTier ||
+    existing.status !== "active" ||
+    provenanceChanged;
+  if (!changed) return { id: existing.id, changed: false, created: false };
+  if (provenanceMode === "replace") {
+    await db()`
+      update pages set title = ${p.title}, body_md = ${p.bodyMd}, content_hash = ${nextHash},
+        tier = ${nextTier}, status = 'active', created_by = ${p.createdBy ?? "human"},
+        source = ${p.source ?? "brain-sync"}, derived_from = ${p.derivedFrom ?? null}
+      where id = ${existing.id}`;
+  } else {
+    await db()`
+      update pages set title = ${p.title}, body_md = ${p.bodyMd}, content_hash = ${nextHash},
+        tier = ${nextTier}, status = 'active'
+      where id = ${existing.id}`;
   }
-  const [row] = await sql`
-    insert into pages (path, title, body_md, content_hash, tier, created_by, source, derived_from)
-    values (${p.path}, ${p.title}, ${p.bodyMd}, ${p.contentHash}, ${p.tier ?? 1},
-            ${p.createdBy ?? "human"}, ${p.source ?? "brain-sync"}, ${p.derivedFrom ?? null})
-    returning id`;
-  return { id: row!.id, changed: true };
+  return { id: existing.id, changed: true, created: false };
 }
 
-export async function softDeletePagesNotIn(paths: string[]): Promise<string[]> {
-  const rows = await sql`
+export type GeneratedPageQuarantineResult =
+  | { status: "missing" }
+  | { status: "protected"; pageId: string }
+  | { status: "quarantined"; pageId: string };
+
+// Tier-zero quarantine is deliberately separate from ordinary upsert/index paths. It preserves
+// prose/archive bytes and row identity while making every generated representation inert.
+export async function quarantineGeneratedPageByPath(
+  path: string,
+): Promise<GeneratedPageQuarantineResult> {
+  try {
+    return await withDbTransaction(async (tx) => {
+      const [page] = await tx`
+        select id, source, created_by from pages where path = ${path} for update`;
+      if (!page) return { status: "missing" } as const;
+      const generated =
+        page.source === "brain-sync" ||
+        (page.source === COMPILED_NOTE_SOURCE && page.created_by === "system:dream");
+      if (!generated) return { status: "protected", pageId: page.id } as const;
+      const chunks = await tx`
+        select id from chunks
+        where parent_type = 'page' and parent_id = ${page.id}
+        for update`;
+      const chunkIds = chunks.map((row: any) => row.id as string);
+      await tx`
+        select id from edges
+        where (source_table = 'pages' and source_id = ${page.id})
+           or (src_type = 'page' and src_id = ${page.id})
+           or (${chunkIds.length > 0}
+               and source_table = 'chunks' and source_id = any(${chunkIds}::uuid[]))
+        for update`;
+      await tx`update pages set tier = 0, status = 'deleted' where id = ${page.id}`;
+      await tx`
+        update chunks set tier = 0, embedding = null, embed_model = null
+        where parent_type = 'page' and parent_id = ${page.id}`;
+      await tx`
+        update edges set tier = 0
+        where (source_table = 'pages' and source_id = ${page.id})
+           or (src_type = 'page' and src_id = ${page.id})
+           or (${chunkIds.length > 0}
+               and source_table = 'chunks' and source_id = any(${chunkIds}::uuid[]))`;
+      return { status: "quarantined", pageId: page.id } as const;
+    });
+  } catch {
+    throw new Error("TIER0_QUARANTINE_FAILED");
+  }
+}
+
+export async function softDeletePagesNotIn(
+  paths: string[],
+  options: { preserveSources?: string[]; preservePageIds?: string[] } = {},
+): Promise<string[]> {
+  const preserveSources = options.preserveSources ?? [];
+  const preservePageIds = options.preservePageIds ?? [];
+  const rows = await db()`
     update pages set status = 'deleted'
-    where status = 'active' and not (path = any(${paths}))
+    where status = 'active'
+      and not (path = any(${paths}))
+      and not (source = any(${preserveSources}))
+      and not (id = any(${preservePageIds}))
     returning id`;
   return rows.map((r: any) => r.id);
 }
 
+export async function setPageContentHash(pageId: string, hash: string): Promise<void> {
+  await db()`update pages set content_hash = ${hash} where id = ${pageId}`;
+}
+
+export async function setPageTier(pageId: string, tier: 1 | 2): Promise<boolean> {
+  assertProseTier(tier);
+  return withDbTransaction(async (tx) => {
+    await tx`select id from pages where id = ${pageId} for update`;
+    const [page] = await tx`select tier from pages where id = ${pageId}`;
+    if (page) assertProseTier(Number(page.tier));
+    const rows = await tx`
+      update pages set tier = greatest(tier, ${tier})
+      where id = ${pageId} and tier < ${tier}
+      returning id`;
+    return rows.length > 0;
+  });
+}
+
+export async function setPageChunkTiers(pageId: string, tier: 1 | 2): Promise<number> {
+  assertProseTier(tier);
+  return withDbTransaction(async (tx) => {
+    await tx`select id from pages where id = ${pageId} for update`;
+    const [page] = await tx`select tier from pages where id = ${pageId}`;
+    if (page) assertProseTier(Number(page.tier));
+    const existing = await tx`
+      select tier from chunks where parent_type = 'page' and parent_id = ${pageId} for update`;
+    for (const chunk of existing) assertProseTier(Number(chunk.tier));
+    const rows = await tx`
+      update chunks set tier = greatest(tier, ${tier})
+      where parent_type = 'page' and parent_id = ${pageId} and tier < ${tier}
+      returning id`;
+    return rows.length;
+  });
+}
+
+export async function retierPageEdges(pageId: string, tier: 1 | 2): Promise<number> {
+  assertProseTier(tier);
+  return withDbTransaction(async (tx) => {
+    await tx`select id from pages where id = ${pageId} for update`;
+    const [page] = await tx`select tier from pages where id = ${pageId}`;
+    if (page) assertProseTier(Number(page.tier));
+    const existing = await tx`
+      select tier from edges
+      where ((source_table = 'pages' and source_id = ${pageId})
+          or (src_type = 'page' and src_id = ${pageId}))
+      for update`;
+    for (const edge of existing) assertProseTier(Number(edge.tier));
+    const rows = await tx`
+      update edges set tier = greatest(tier, ${tier})
+      where ((source_table = 'pages' and source_id = ${pageId})
+          or (src_type = 'page' and src_id = ${pageId}))
+        and tier < ${tier}
+      returning id`;
+    return rows.length;
+  });
+}
+
+export async function compiledRepresentationTierEvidence(
+  pageId: string,
+): Promise<CompiledRepresentationTierEvidence> {
+  const [row] = await db()`
+    with target_page as (
+      select id, tier from pages where id = ${pageId}
+    ), page_chunks as (
+      select c.id, c.tier
+      from chunks c join target_page p on c.parent_type = 'page' and c.parent_id = p.id
+    ), relevant_edges as (
+      select e.tier,
+        case
+          when e.dst_type = 'person' then pp.tier
+          when e.dst_type = 'org' then oo.tier
+          else null
+        end as entity_tier,
+        (e.dst_type in ('person', 'org') and coalesce(pp.id, oo.id) is null) as entity_unresolved
+      from edges e
+      cross join target_page p
+      left join people pp on e.dst_type = 'person' and e.dst_id = pp.id
+      left join orgs oo on e.dst_type = 'org' and e.dst_id = oo.id
+      where (e.source_table = 'pages' and e.source_id = p.id)
+         or (e.src_type = 'page' and e.src_id = p.id)
+         or (e.source_table = 'chunks'
+             and e.source_id = any(coalesce((select array_agg(id) from page_chunks), array[]::uuid[])))
+    )
+    select p.tier as page_tier,
+      (select min(tier) from page_chunks) as chunk_min_tier,
+      (select max(tier) from page_chunks) as chunk_max_tier,
+      (select min(tier) from relevant_edges) as edge_min_tier,
+      (select max(tier) from relevant_edges) as edge_max_tier,
+      (select min(entity_tier) from relevant_edges) as entity_min_tier,
+      (select max(entity_tier) from relevant_edges) as entity_max_tier,
+      coalesce((select bool_or(entity_unresolved) from relevant_edges), false)
+        as evidence_unresolved,
+      (select count(*)::int from relevant_edges) as edge_count
+    from target_page p`;
+  const pageTier = Number(row?.page_tier ?? 1);
+  const chunkMin = row?.chunk_min_tier == null ? null : Number(row.chunk_min_tier);
+  const chunkMax = row?.chunk_max_tier == null ? null : Number(row.chunk_max_tier);
+  const edgeMax = row?.edge_max_tier == null ? null : Number(row.edge_max_tier);
+  const edgeMin = row?.edge_min_tier == null ? null : Number(row.edge_min_tier);
+  const entityMin = row?.entity_min_tier == null ? null : Number(row.entity_min_tier);
+  const entityMax = row?.entity_max_tier == null ? null : Number(row.entity_max_tier);
+  const tiers = evidenceTier(
+    [pageTier, chunkMin, chunkMax, edgeMin, edgeMax, entityMin, entityMax].filter(
+      (tier): tier is number => tier !== null,
+    ),
+  );
+  return {
+    page_tier: pageTier,
+    chunk_min_tier: chunkMin,
+    chunk_max_tier: chunkMax,
+    edge_max_tier: edgeMax,
+    edge_min_tier: edgeMin,
+    entity_min_tier: entityMin,
+    entity_max_tier: entityMax,
+    evidence_unresolved: Boolean(row?.evidence_unresolved),
+    min_tier: tiers.min ?? pageTier,
+    max_tier: tiers.max ?? pageTier,
+    edge_count: Number(row?.edge_count ?? 0),
+  };
+}
+
+export async function compiledSourceEvidence(sourceIds: string[]): Promise<CompiledSourceEvidence> {
+  const requested_ids = [...new Set(sourceIds.map((id) => id.toLowerCase()))];
+  if (requested_ids.length === 0) {
+    return {
+      requested_ids,
+      resolved: [],
+      unresolved_ids: [],
+      owner_entities: [],
+      min_tier: null,
+      max_tier: null,
+      latest_mention_at: null,
+      representative_parent_id: null,
+    };
+  }
+  const chunks = (await db()`
+    select requested.ord, requested.id as requested_id,
+           c.id, c.tier, c.parent_type, c.parent_id, c.ord as chunk_ord,
+           c.updated_at, c.text, ${COMPILED_PARENT_TIER(db())} as parent_tier
+    from unnest(${requested_ids}::uuid[]) with ordinality requested(id, ord)
+    left join chunks c on c.id = requested.id
+    order by requested.ord`) as any[];
+  const present = chunks.filter((row) => row.id);
+  const presentIds = present.map((row) => row.id as string);
+  const ownerRows =
+    presentIds.length === 0
+      ? []
+      : ((await db()`
+    select e.source_table, e.source_id, e.src_type, e.src_id, e.dst_type, e.dst_id,
+           e.created_at, e.tier,
+           coalesce(pp.canonical_name, oo.canonical_name) as entity_name,
+           pa.alias as person_alias, oa.alias as org_alias,
+           coalesce(pp.tier, oo.tier) as entity_tier
+    from edges e
+    left join people pp on e.dst_type = 'person' and e.dst_id = pp.id
+    left join person_aliases pa on pa.person_id = pp.id
+    left join orgs oo on e.dst_type = 'org' and e.dst_id = oo.id
+    left join org_aliases oa on oa.org_id = oo.id
+    where e.rel = 'mentions'
+      and ((e.source_table = 'chunks' and e.source_id = any(${presentIds}::uuid[]))
+       or exists (
+         select 1 from chunks pc where pc.id = any(${presentIds}::uuid[])
+           and e.src_type = pc.parent_type and e.src_id = pc.parent_id
+       ))`) as any[]);
+  const byChunk = new Map<
+    string,
+    {
+      entities: Map<string, CompiledNoteIdentity>;
+      latest: Date | null;
+      acceptedEdgeTiers: number[];
+      acceptedEntityTiers: number[];
+      unresolvedOwner: boolean;
+    }
+  >();
+  for (const row of present)
+    byChunk.set(row.id, {
+      entities: new Map(),
+      latest: null,
+      acceptedEdgeTiers: [],
+      acceptedEntityTiers: [],
+      unresolvedOwner: false,
+    });
+  for (const edge of ownerRows) {
+    if (edge.dst_type !== "person" && edge.dst_type !== "org") continue;
+    const entityName = edge.entity_name as string | null;
+    const entityTier = edge.entity_tier == null ? null : Number(edge.entity_tier);
+    const aliases = [entityName, edge.person_alias, edge.org_alias].filter(
+      (value): value is string => typeof value === "string" && value.trim().length > 0,
+    );
+    for (const chunk of present) {
+      const chunkAnchored = edge.source_table === "chunks" && edge.source_id === chunk.id;
+      const parentAnchored = edge.src_type === chunk.parent_type && edge.src_id === chunk.parent_id;
+      const literalOwner = aliases.some((name) => ownershipNameMatches(chunk.text, name));
+      if (parentAnchored && entityTier === null) byChunk.get(chunk.id)!.unresolvedOwner = true;
+      if (!chunkAnchored && !(parentAnchored && literalOwner)) continue;
+      const bucket = byChunk.get(chunk.id)!;
+      if (entityTier === null) {
+        bucket.unresolvedOwner = true;
+      } else {
+        const key = `${edge.dst_type}:${edge.dst_id}`;
+        bucket.entities.set(key, { kind: edge.dst_type, entityId: edge.dst_id });
+        bucket.acceptedEntityTiers.push(entityTier);
+      }
+      const at = edge.created_at ? new Date(edge.created_at) : null;
+      if (at && (!bucket.latest || at > bucket.latest)) bucket.latest = at;
+      bucket.acceptedEdgeTiers.push(Number(edge.tier));
+    }
+  }
+  const resolved = present.map((row) => {
+    const bucket = byChunk.get(row.id)!;
+    const parentTier = row.parent_tier == null ? null : Number(row.parent_tier);
+    const entityTiers = evidenceTier(bucket.acceptedEntityTiers);
+    const levels = [
+      Number(row.tier),
+      ...bucket.acceptedEdgeTiers,
+      ...bucket.acceptedEntityTiers,
+      ...(parentTier === null ? [] : [parentTier]),
+    ];
+    return {
+      id: row.id,
+      tier: Number(row.tier),
+      parent_type: row.parent_type as ParentType,
+      parent_id: row.parent_id,
+      chunk_ord: Number(row.chunk_ord),
+      chunk_updated_at: new Date(row.updated_at),
+      mention_created_at: bucket.latest,
+      entity_refs: [...bucket.entities.values()],
+      parent_tier: parentTier,
+      entity_min_tier: entityTiers.min,
+      entity_max_tier: entityTiers.max,
+      evidence_unresolved: parentTier === null || bucket.unresolvedOwner,
+      min_tier: Math.min(...levels),
+      max_tier: Math.max(...levels),
+    };
+  });
+  resolved.sort(
+    (a, b) =>
+      a.chunk_updated_at.getTime() - b.chunk_updated_at.getTime() ||
+      a.chunk_ord - b.chunk_ord ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+  const unresolved_ids = [
+    ...new Set([
+      ...chunks.filter((row) => !row.id).map((row) => row.requested_id as string),
+      ...resolved.filter((row) => row.evidence_unresolved).map((row) => row.id),
+    ]),
+  ];
+  const ownerMap = new Map<string, CompiledNoteIdentity>();
+  for (const row of resolved)
+    for (const entity of row.entity_refs) ownerMap.set(`${entity.kind}:${entity.entityId}`, entity);
+  const latest = resolved.reduce<Date | null>((max, row) => {
+    if (!row.mention_created_at) return max;
+    return !max || row.mention_created_at > max ? row.mention_created_at : max;
+  }, null);
+  const tiers = evidenceTier(resolved.flatMap((row) => [row.min_tier, row.max_tier]));
+  return {
+    requested_ids,
+    resolved,
+    unresolved_ids,
+    owner_entities: [...ownerMap.values()],
+    min_tier: tiers.min,
+    max_tier: tiers.max,
+    latest_mention_at: latest,
+    representative_parent_id: resolved[0]?.parent_id ?? null,
+  };
+}
+
+async function excludedDerivedPageIdsForCompiledNoteSources(): Promise<string[]> {
+  const pages = await activePagesForCompiledNoteReconciliation();
+  return pages
+    .filter(
+      (page) =>
+        page.source === "dream:decision-digest" ||
+        recognizeCompiledNote({ path: page.path, source: page.source, bodyMd: page.body_md })
+          .recognized,
+    )
+    .map((page) => page.id);
+}
+
+export async function compiledEntityClusterEvidence(identities: CompiledNoteIdentity[]): Promise<{
+  source_chunk_ids: string[];
+  min_tier: number | null;
+  max_tier: number | null;
+  evidence_unresolved: boolean;
+  latest_mention_at: Date | null;
+}> {
+  if (identities.length === 0)
+    return {
+      source_chunk_ids: [],
+      min_tier: null,
+      max_tier: null,
+      evidence_unresolved: true,
+      latest_mention_at: null,
+    };
+  const ids = [...new Set(identities.map((identity) => identity.entityId))];
+  const excluded = await excludedDerivedPageIdsForCompiledNoteSources();
+  const rows = (await db()`
+    select distinct c.id, c.text, c.tier, c.updated_at, e.created_at, e.tier as edge_tier,
+      e.dst_type, e.dst_id, e.source_table, e.source_id, e.src_type, e.src_id,
+      ${COMPILED_PARENT_TIER(db())} as parent_tier,
+      coalesce(p.tier, o.tier) as entity_tier,
+      coalesce(p.canonical_name, o.canonical_name) as entity_name,
+      pa.alias as person_alias, oa.alias as org_alias
+    from edges e
+    join chunks c on c.parent_type = e.src_type and c.parent_id = e.src_id
+    left join people p on e.dst_type = 'person' and e.dst_id = p.id
+    left join person_aliases pa on pa.person_id = p.id
+    left join orgs o on e.dst_type = 'org' and e.dst_id = o.id
+    left join org_aliases oa on oa.org_id = o.id
+    where e.rel = 'mentions' and e.dst_id = any(${ids}::uuid[])
+      and e.dst_type in ('person', 'org')
+      and (e.src_type <> 'page' or not (e.src_id = any(${excluded}::uuid[])))
+      and (c.parent_type <> 'page' or exists (
+        select 1 from pages pg where pg.id = c.parent_id and pg.status = 'active'
+      ))`) as any[];
+  const accepted = rows.filter((row) => {
+    const identity = identities.find((candidate) => candidate.entityId === row.dst_id);
+    if (!identity || identity.kind !== row.dst_type) return false;
+    const chunkAnchored = row.source_table === "chunks" && row.source_id === row.id;
+    const aliases = [row.entity_name, row.person_alias, row.org_alias].filter(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
+    return chunkAnchored || aliases.some((name) => ownershipNameMatches(row.text, name));
+  });
+  const source_chunk_ids = [...new Set(accepted.map((row) => row.id as string))];
+  const tierEvidence = evidenceTier(
+    accepted.flatMap((row) => [
+      Number(row.tier),
+      Number(row.edge_tier ?? row.tier),
+      ...(row.parent_tier == null ? [] : [Number(row.parent_tier)]),
+      ...(row.entity_tier == null ? [] : [Number(row.entity_tier)]),
+    ]),
+  );
+  const latest_mention_at = accepted.reduce<Date | null>((max, row) => {
+    const at = row.created_at ? new Date(row.created_at) : null;
+    return at && (!max || at > max) ? at : max;
+  }, null);
+  return {
+    source_chunk_ids,
+    min_tier: tierEvidence.min,
+    max_tier: tierEvidence.max,
+    evidence_unresolved: accepted.some((row) => row.parent_tier == null || row.entity_tier == null),
+    latest_mention_at,
+  };
+}
+
+async function withAdvisoryLease<T>(keySql: any, work: () => Promise<T>): Promise<T> {
+  return withReservedDb(async (connection) => {
+    await connection`select pg_advisory_lock(${keySql})`;
+    try {
+      return await work();
+    } finally {
+      await connection`select pg_advisory_unlock(${keySql})`;
+    }
+  });
+}
+
+export async function withCompiledNotesLease<T>(work: () => Promise<T>): Promise<T> {
+  return withReservedDb(async (connection) => {
+    await connection`select pg_advisory_lock(1296649541, 1)`;
+    try {
+      return await work();
+    } finally {
+      await connection`select pg_advisory_unlock(1296649541, 1)`;
+    }
+  });
+}
+
+export async function withCompiledNoteTargetLease<T>(
+  targetKey: string,
+  work: () => Promise<T>,
+): Promise<T> {
+  return withAdvisoryLease(
+    db()`hashtextextended('minime:compiled-note:' || ${targetKey}, 0)`,
+    work,
+  );
+}
+
 export async function listActivePages(actor?: AccessActor): Promise<any[]> {
   const allowed = await allowedTier(actor);
-  return sql`select id, path, title, content_hash, tier from pages
-             where status = 'active' and tier <= ${allowed}`;
+  return db()`select id, path, title, content_hash, tier from pages
+             where status = 'active' and tier >= 1 and tier <= ${allowed}`;
 }
 
 // ---------------------------------------------------------------- mirrors (importers write-only)
@@ -1058,10 +1762,10 @@ export async function upsertCalendarEvent(e: {
   location?: string | null;
   attendees?: unknown;
 }): Promise<boolean> {
-  const rows = await sql`
+  const rows = await db()`
     insert into calendar_events (uid, starts_at, ends_at, title, location, attendees, created_by, source, tier)
     values (${e.uid}, ${e.startsAt}, ${e.endsAt ?? null}, ${e.title}, ${e.location ?? null},
-            ${e.attendees ? sql.json(e.attendees as any) : null}, 'importer:calendar', 'importer:calendar', 1)
+            ${e.attendees ? db().json(e.attendees as any) : null}, 'importer:calendar', 'importer:calendar', 1)
     on conflict (uid) do update
       set starts_at = excluded.starts_at, ends_at = excluded.ends_at, title = excluded.title,
           location = excluded.location, attendees = excluded.attendees
@@ -1078,14 +1782,17 @@ export async function insertTransaction(t: {
   accountLabel: string;
   externalRef: string;
 }): Promise<boolean> {
-  const rows = await sql`
-    insert into transactions (occurred_at, amount_cents, currency, merchant, category,
-                              account_label, external_ref, created_by, source, tier)
-    values (${t.occurredAt}, ${String(t.amountCents)}::bigint, ${t.currency}, ${t.merchant ?? null}, ${t.category ?? null},
-            ${t.accountLabel}, ${t.externalRef}, 'importer:transactions', 'importer:transactions', 0)
-    on conflict (account_label, external_ref) do nothing
-    returning id`;
-  return rows.length > 0;
+  try {
+    await db()`
+      insert into transactions (occurred_at, amount_cents, currency, merchant, category,
+                                account_label, external_ref, created_by, source, tier)
+      values (${t.occurredAt}, ${String(t.amountCents)}::bigint, ${t.currency}, ${t.merchant ?? null}, ${t.category ?? null},
+              ${t.accountLabel}, ${t.externalRef}, 'importer:transactions', 'importer:transactions', 0)`;
+    return true;
+  } catch (error) {
+    if ((error as { code?: string }).code === "23505") return false;
+    throw error;
+  }
 }
 
 export async function insertHealthSample(h: {
@@ -1095,12 +1802,15 @@ export async function insertHealthSample(h: {
   unit: string;
   source?: string;
 }): Promise<boolean> {
-  const rows = await sql`
-    insert into health_samples (kind, at, value, unit, created_by, source, tier)
-    values (${h.kind}, ${h.at}, ${h.value}, ${h.unit}, 'importer:health', ${h.source ?? "importer:health"}, 0)
-    on conflict (kind, at, source) do nothing
-    returning id`;
-  return rows.length > 0;
+  try {
+    await db()`
+      insert into health_samples (kind, at, value, unit, created_by, source, tier)
+      values (${h.kind}, ${h.at}, ${h.value}, ${h.unit}, 'importer:health', ${h.source ?? "importer:health"}, 0)`;
+    return true;
+  } catch (error) {
+    if ((error as { code?: string }).code === "23505") return false;
+    throw error;
+  }
 }
 
 export async function upsertEmailMeta(m: {
@@ -1110,7 +1820,7 @@ export async function upsertEmailMeta(m: {
   subject?: string | null;
   threadId?: string | null;
 }): Promise<boolean> {
-  const rows = await sql`
+  const rows = await db()`
     insert into email_meta (message_id, at, from_addr, subject, thread_id, created_by, source, tier)
     values (${m.messageId}, ${m.at}, ${m.fromAddr}, ${m.subject ?? null}, ${m.threadId ?? null},
             'importer:email-meta', 'importer:email-meta', 2)
@@ -1123,7 +1833,7 @@ export async function upsertEmailMeta(m: {
 export async function tableCount(
   table: "calendar_events" | "transactions" | "health_samples" | "email_meta",
 ): Promise<number> {
-  const [r] = await sql`select count(*)::int as n from ${sql(table)}`;
+  const [r] = await db()`select count(*)::int as n from ${db()(table)}`;
   return r!.n;
 }
 
@@ -1132,7 +1842,7 @@ export async function tableCount(
 export async function insertInboxItem(
   i: { rawPath: string; mime?: string | null } & Std,
 ): Promise<{ id: string }> {
-  const [row] = await sql`
+  const [row] = await db()`
     insert into inbox_items (raw_path, mime, created_by, source, tier)
     values (${i.rawPath}, ${i.mime ?? "text/plain"}, ${i.createdBy ?? "human"}, ${i.source ?? "capture"}, 1)
     returning id`;
@@ -1140,18 +1850,18 @@ export async function insertInboxItem(
 }
 
 export async function getInboxItem(id: string): Promise<any | null> {
-  const rows = await sql`select * from inbox_items where id = ${id}`;
+  const rows = await db()`select * from inbox_items where id = ${id}`;
   return rows[0] ?? null;
 }
 
 export async function findInboxByPath(rawPath: string): Promise<any | null> {
   const rows =
-    await sql`select * from inbox_items where raw_path = ${rawPath} order by received_at desc limit 1`;
+    await db()`select * from inbox_items where raw_path = ${rawPath} order by received_at desc limit 1`;
   return rows[0] ?? null;
 }
 
 export async function pendingInboxItems(): Promise<any[]> {
-  return sql`select * from inbox_items where status = 'pending' order by received_at`;
+  return db()`select * from inbox_items where status = 'pending' order by received_at`;
 }
 
 export async function setInboxFiled(
@@ -1160,13 +1870,13 @@ export async function setInboxFiled(
   filedId: string,
   classifierOutput: unknown,
 ): Promise<void> {
-  await sql`update inbox_items set status = 'filed', filed_table = ${filedTable},
-            filed_id = ${filedId}, classifier_output = ${sql.json(classifierOutput as any)}
+  await db()`update inbox_items set status = 'filed', filed_table = ${filedTable},
+            filed_id = ${filedId}, classifier_output = ${db().json(classifierOutput as any)}
             where id = ${id}`;
 }
 
 export async function setInboxPending(id: string, classifierOutput: unknown): Promise<void> {
-  await sql`update inbox_items set classifier_output = ${sql.json(classifierOutput as any)} where id = ${id}`;
+  await db()`update inbox_items set classifier_output = ${db().json(classifierOutput as any)} where id = ${id}`;
 }
 
 // Mark an inbox row unfileable. Used for orphans whose raw_path no longer exists on this
@@ -1174,19 +1884,19 @@ export async function setInboxPending(id: string, classifierOutput: unknown): Pr
 // never landed here). Records the reason in classifier_output so the drop is auditable and
 // the row is never retried by drainStartup again.
 export async function setInboxRejected(id: string, reason: string): Promise<void> {
-  await sql`update inbox_items set status = 'rejected',
-            classifier_output = ${sql.json({ rejected: true, reason } as any)}
+  await db()`update inbox_items set status = 'rejected',
+            classifier_output = ${db().json({ rejected: true, reason } as any)}
             where id = ${id}`;
 }
 
 export async function insertReviewItem(kind: string, payload: unknown): Promise<{ id: string }> {
-  const [row] = await sql`
-    insert into review_queue (kind, payload) values (${kind}, ${sql.json(payload as any)}) returning id`;
+  const [row] = await db()`
+    insert into review_queue (kind, payload) values (${kind}, ${db().json(payload as any)}) returning id`;
   return row as any;
 }
 
 export async function openReviewItems(kind?: string): Promise<any[]> {
-  return sql`select * from review_queue where status = 'open'
+  return db()`select * from review_queue where status = 'open'
              and (${kind === undefined} or kind = ${kind ?? null}) order by created_at`;
 }
 
@@ -1194,7 +1904,7 @@ export async function resolveReviewItem(
   id: string,
   status: "resolved" | "dismissed",
 ): Promise<void> {
-  await sql`update review_queue set status = ${status}, resolved_at = ${now()} where id = ${id}`;
+  await db()`update review_queue set status = ${status}, resolved_at = ${now()} where id = ${id}`;
 }
 
 // ---------------------------------------------------------------- state snapshot
@@ -1211,34 +1921,34 @@ export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Pro
   const allowed = await allowedTier(actor);
   const [calendar, tasks, commitments, decisionsDue, openReview, anomalies, movedToday] =
     await Promise.all([
-      sql`select id, uid, starts_at, ends_at, title, location from calendar_events
+      db()`select id, uid, starts_at, ends_at, title, location from calendar_events
         where starts_at >= ${t}::timestamptz - interval '1 hour'
           and starts_at < ${t}::timestamptz + interval '2 days'
-          and tier <= ${allowed}
+          and tier >= 1 and tier <= ${allowed}
         order by starts_at`,
-      sql`select id, title, status, due from tasks
+      db()`select id, title, status, due from tasks
         where status in ('inbox','active','waiting') and due is not null and due <= ${today}::date
-          and tier <= ${allowed}
+          and tier >= 1 and tier <= ${allowed}
         order by due`,
-      sql`select id, what, to_whom, due from commitments
-        where status = 'open' and tier <= ${allowed}
+      db()`select id, what, to_whom, due from commitments
+        where status = 'open' and tier >= 1 and tier <= ${allowed}
         order by due nulls last`,
-      sql`select id, question, review_at, choice from decisions
+      db()`select id, question, review_at, choice from decisions
         where reviewed_at is null
-          and tier <= ${allowed}
+          and tier >= 1 and tier <= ${allowed}
           and ( (review_at is not null and review_at <= ${today}::date + 3)
                 or choice is null )
         order by review_at nulls last`,
-      sql`select count(*)::int as n from review_queue where status = 'open'`,
+      db()`select count(*)::int as n from review_queue where status = 'open'`,
       metricAnomalies(),
       // What MOVED today: tasks closed (done/dropped) on the owner's LOCAL calendar
       // day. minime_state otherwise reports only OPEN work, so same-day completions
       // were structurally invisible to the evening review's "what moved today".
       // Compare the local-date of updated_at (cast in the owner's TZ) to local today.
-      sql`select id, title, status, updated_at from tasks
+      db()`select id, title, status, updated_at from tasks
         where status in ('done','dropped')
           and (updated_at at time zone ${timeZone ?? "UTC"})::date = ${today}::date
-          and tier <= ${allowed}
+          and tier >= 1 and tier <= ${allowed}
         order by updated_at`,
     ]);
   return {
@@ -1258,11 +1968,11 @@ export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Pro
 // (open work), excludes done/dropped. Ordered by due date then title.
 export async function tasksInRange(from: string, to: string, actor?: AccessActor): Promise<any[]> {
   const allowed = await allowedTier(actor);
-  return sql`select id, title, status, due from tasks
+  return db()`select id, title, status, due from tasks
       where status in ('inbox','active','waiting')
         and due is not null
         and due >= ${from}::date and due <= ${to}::date
-        and tier <= ${allowed}
+        and tier >= 1 and tier <= ${allowed}
       order by due, title`;
 }
 
@@ -1274,7 +1984,7 @@ export async function tasksInRange(from: string, to: string, actor?: AccessActor
 export async function openTasksForDedup(): Promise<
   { id: string; title: string; due: string | null }[]
 > {
-  return sql`select id, title, due from tasks
+  return db()`select id, title, due from tasks
       where status in ('inbox','active','waiting')
       order by created_at desc
       limit 500` as any;
@@ -1283,7 +1993,7 @@ export async function openTasksForDedup(): Promise<
 // Latest daily value vs trailing-28-day mean ± 2σ, from metric_values only (never raw tier-0).
 export async function metricAnomalies(): Promise<any[]> {
   const t = now();
-  return sql`
+  return db()`
     with latest as (
       select distinct on (metric) metric, period_start, value
       from metric_values
@@ -1306,14 +2016,14 @@ export async function metricAnomalies(): Promise<any[]> {
 export async function metricDef(
   name: string,
 ): Promise<{ name: string; unit: string | null; description: string | null } | null> {
-  const rows = await sql`select name, unit, description from metric_defs where name = ${name}`;
+  const rows = await db()`select name, unit, description from metric_defs where name = ${name}`;
   return (rows[0] as any) ?? null;
 }
 
 export async function listMetricDefs(): Promise<
   { name: string; unit: string | null; agg_sql: string | null }[]
 > {
-  return sql`select name, unit, agg_sql from metric_defs order by name` as any;
+  return db()`select name, unit, agg_sql from metric_defs order by name` as any;
 }
 
 // The single door to whitelisted aggregate SQL (incl. tier-0 sources): the security definer
@@ -1326,7 +2036,7 @@ export async function runMetricAgg(
   const def = await metricDef(name);
   if (!def) throw Object.assign(new Error(`unknown metric: ${name}`), { code: "UNKNOWN_METRIC" });
   const rows =
-    await sql`select period_start, value::float, label from metric_agg(${name}, ${from}, ${to})`;
+    await db()`select period_start, value::float, label from metric_agg(${name}, ${from}, ${to})`;
   return rows.map((r: any) => ({
     period_start: toDateStr(r.period_start),
     value: Number(r.value),
@@ -1348,7 +2058,7 @@ export async function storedMetricValues(
   to: string,
   granularity: string,
 ): Promise<any[]> {
-  return sql`select period_start, value::float, source from metric_values
+  return db()`select period_start, value::float, source from metric_values
              where metric = ${name} and granularity = ${granularity}
                and period_start between ${from} and ${to}
              order by period_start`;
@@ -1361,7 +2071,7 @@ export async function upsertMetricValue(
   value: number,
   source: string,
 ): Promise<void> {
-  await sql`
+  await db()`
     insert into metric_values (metric, period_start, granularity, value, source, computed_at)
     values (${name}, ${periodStart}, ${granularity}, ${value}, ${source}, ${now()})
     on conflict (metric, granularity, period_start)
@@ -1377,7 +2087,8 @@ export async function getRow(
 ): Promise<any | null> {
   const allowed = await allowedTier(actor);
   const { table } = parentTable(type);
-  const rows = await sql`select * from ${sql(table)} where id = ${id} and tier <= ${allowed}`;
+  const rows =
+    await db()`select * from ${db()(table)} where id = ${id} and tier >= 1 and tier <= ${allowed}`;
   return rows[0] ?? null;
 }
 
@@ -1388,10 +2099,10 @@ export async function edgesAround(
   actor?: AccessActor,
 ): Promise<any[]> {
   const allowed = await allowedTier(actor);
-  return sql`
+  return db()`
     select * from edges
     where ((src_type = ${type} and src_id = ${id}) or (dst_type = ${type} and dst_id = ${id}))
-      and tier <= ${allowed}
+      and tier >= 1 and tier <= ${allowed}
     order by created_at desc limit ${limit}`;
 }
 
@@ -1401,8 +2112,8 @@ export async function recentInteractionsFor(
   actor?: AccessActor,
 ): Promise<any[]> {
   const allowed = await allowedTier(actor);
-  return sql`select id, kind, summary, occurred_at, created_by from interactions
-             where person_id = ${personId} and tier <= ${allowed}
+  return db()`select id, kind, summary, occurred_at, created_by from interactions
+             where person_id = ${personId} and tier >= 1 and tier <= ${allowed}
              order by occurred_at desc limit ${limit}`;
 }
 
@@ -1414,8 +2125,8 @@ export async function recentInteractionsForOrg(
   actor?: AccessActor,
 ): Promise<any[]> {
   const allowed = await allowedTier(actor);
-  return sql`select id, kind, summary, occurred_at, created_by from interactions
-             where org_id = ${orgId} and tier <= ${allowed}
+  return db()`select id, kind, summary, occurred_at, created_by from interactions
+             where org_id = ${orgId} and tier >= 1 and tier <= ${allowed}
              order by occurred_at desc limit ${limit}`;
 }
 
@@ -1424,18 +2135,19 @@ export async function openItemsFor(
   actor?: AccessActor,
 ): Promise<{ commitments: any[]; tasks: any[] }> {
   const allowed = await allowedTier(actor);
-  const commitments = await sql`
+  const commitments = await db()`
     select id, what, to_whom, due, status from commitments
-    where status = 'open' and lower(to_whom) = lower(${personName}) and tier <= ${allowed}`;
-  const tasks = await sql`
+    where status = 'open' and lower(to_whom) = lower(${personName})
+      and tier >= 1 and tier <= ${allowed}`;
+  const tasks = await db()`
     select id, title, status, due from tasks
     where status in ('inbox','active','waiting') and title ilike '%' || ${personName} || '%'
-      and tier <= ${allowed}`;
+      and tier >= 1 and tier <= ${allowed}`;
   return { commitments, tasks };
 }
 
 export async function journalCountSince(since: Date): Promise<number> {
-  const [r] = await sql`select count(*)::int as n from journal_entries where at >= ${since}`;
+  const [r] = await db()`select count(*)::int as n from journal_entries where at >= ${since}`;
   return r!.n;
 }
 
@@ -1443,7 +2155,7 @@ export async function journalCountSince(since: Date): Promise<number> {
 // page UUIDs for scoped search.
 export async function pagesByPaths(paths: string[]): Promise<{ id: string; path: string }[]> {
   if (paths.length === 0) return [];
-  return sql`select id, path from pages where path = any(${paths})` as any;
+  return db()`select id, path from pages where path = any(${paths})` as any;
 }
 
 // ---------------------------------------------------------------- dream support
@@ -1453,10 +2165,10 @@ export async function pagesByPaths(paths: string[]): Promise<{ id: string; path:
 export async function parentsNeedingExtraction(
   limit: number,
 ): Promise<{ parent_type: string; parent_id: string; text: string }[]> {
-  return sql`
+  return db()`
     select c.parent_type, c.parent_id, string_agg(c.text, e'\n\n' order by c.ord) as text
     from chunks c
-    where not exists (
+    where c.tier >= 1 and not exists (
       select 1 from edges e
       where e.src_type = c.parent_type and e.src_id = c.parent_id
         and e.extracted_by = 'system:extract'
@@ -1466,13 +2178,14 @@ export async function parentsNeedingExtraction(
 }
 
 export async function allPeopleWithAliases(): Promise<{ id: string; names: string[] }[]> {
-  const rows = await sql`
+  const rows = await db()`
     select p.id, array_agg(distinct x.name) as names
     from people p
     cross join lateral (
       select p.canonical_name as name
       union select a.alias from person_aliases a where a.person_id = p.id
     ) x
+    where p.tier >= 1
     group by p.id`;
   return rows.map((r: any) => ({ id: r.id, names: r.names }));
 }
@@ -1482,12 +2195,14 @@ export async function staleItems(
   untouchedDays: number,
 ): Promise<any[]> {
   const t = now();
-  return sql`
+  return db()`
     select 'page' as type, id, title as label, updated_at from pages
-    where status = 'active' and updated_at < ${t}::timestamptz - make_interval(days => ${untouchedDays})
+    where status = 'active' and tier >= 1
+      and updated_at < ${t}::timestamptz - make_interval(days => ${untouchedDays})
     union all
     select 'person' as type, id, canonical_name as label, updated_at from people
-    where coalesce(last_contact_at, updated_at) < ${t}::timestamptz - make_interval(days => ${untouchedDays})`;
+    where tier >= 1
+      and coalesce(last_contact_at, updated_at) < ${t}::timestamptz - make_interval(days => ${untouchedDays})`;
 }
 
 // Phantom-person watchdog candidates (dream step 3b). Surfaces person rows that actually
@@ -1506,7 +2221,7 @@ export async function phantomPersonCandidates(): Promise<
     has_human_signal: boolean;
   }[]
 > {
-  return sql`
+  return db()`
     with p as (
       select pe.id, pe.canonical_name, pe.relation,
              array_agg(distinct lower(x.name)) as names
@@ -1556,7 +2271,7 @@ export async function edgesForValidation(
   recentHours: number,
   limit: number,
 ): Promise<EdgeToValidate[]> {
-  return (await sql`
+  return (await db()`
     select e.id, e.src_type, e.src_id, e.rel, e.dst_type, e.dst_id, e.confidence, e.tier,
            e.source_table, e.source_id,
            coalesce(sp.canonical_name, so.canonical_name) as src_name,
@@ -1566,7 +2281,7 @@ export async function edgesForValidation(
     left join orgs   so on e.src_type = 'org'    and so.id = e.src_id
     left join people dp on e.dst_type = 'person' and dp.id = e.dst_id
     left join orgs   do_ on e.dst_type = 'org'   and do_.id = e.dst_id
-    where e.extracted_by = 'system:extract'
+    where e.extracted_by = 'system:extract' and e.tier >= 1
       and not exists (select 1 from edge_validations v
                       where v.edge_id = e.id and v.verdict <> 'unsure')
       and (select count(*) from edge_validations v2
@@ -1590,15 +2305,15 @@ export async function edgeAnchorTexts(
   if (!e.source_table || !e.source_id) return [];
   const shortType = Object.entries(PARENTS).find(([, v]) => v.table === e.source_table)?.[0];
   if (!shortType) return [];
-  const hits = (await sql`
+  const hits = (await db()`
     select text, tier from chunks
-    where parent_type = ${shortType} and parent_id = ${e.source_id}
+    where parent_type = ${shortType} and parent_id = ${e.source_id} and tier >= 1
       and text ilike ${`%${needle}%`}
     order by ord limit 3`) as unknown as { text: string; tier: number }[];
   if (hits.length > 0) return hits;
-  return (await sql`
+  return (await db()`
     select text, tier from chunks
-    where parent_type = ${shortType} and parent_id = ${e.source_id}
+    where parent_type = ${shortType} and parent_id = ${e.source_id} and tier >= 1
     order by ord limit 1`) as unknown as { text: string; tier: number }[];
 }
 
@@ -1610,12 +2325,12 @@ export async function insertEdgeValidation(v: {
   model: string;
   ruleKey: string;
 }): Promise<void> {
-  await sql`insert into edge_validations (edge_id, verdict, entity_type, reason, model, rule_key)
+  await db()`insert into edge_validations (edge_id, verdict, entity_type, reason, model, rule_key)
     values (${v.edgeId}, ${v.verdict}, ${v.entityType ?? null}, ${v.reason ?? null}, ${v.model}, ${v.ruleKey})`;
 }
 
 export async function edgeUnsureCount(edgeId: string): Promise<number> {
-  const [r] = await sql`select count(*)::int as n from edge_validations
+  const [r] = await db()`select count(*)::int as n from edge_validations
     where edge_id = ${edgeId} and verdict = 'unsure'`;
   return (r as { n: number }).n;
 }
@@ -1626,39 +2341,152 @@ export async function edgeUnsureCount(edgeId: string): Promise<number> {
 // tier (set_edge_tier trigger), making edges.tier the one check needed here.
 export async function edgeVisibleAtTier(edgeId: string, actor?: AccessActor): Promise<boolean> {
   const allowed = await allowedTier(actor);
-  const rows = await sql`select 1 from edges where id = ${edgeId} and tier <= ${allowed} limit 1`;
+  const rows =
+    await db()`select 1 from edges where id = ${edgeId} and tier >= 1 and tier <= ${allowed} limit 1`;
   return rows.length > 0;
 }
 
 export async function decisionsNeedingReview(): Promise<any[]> {
   const t = now();
-  return sql`select id, question, review_at from decisions
-             where review_at is not null and review_at <= ${t}::date and reviewed_at is null`;
+  return db()`select id, question, review_at from decisions
+             where tier >= 1 and review_at is not null
+               and review_at <= ${t}::date and reviewed_at is null`;
 }
 
-// Pairs of chunks linked (by the dream entity-link pass) to the same person, for the
-// contradiction scan. Chunk text stays inside the dream job — flagged pairs store IDs only.
-export async function chunkPairsSharingPerson(limit: number): Promise<
-  {
-    person_id: string;
-    a_id: string;
-    a_text: string;
-    a_tier: number;
-    b_id: string;
-    b_text: string;
-    b_tier: number;
-  }[]
-> {
-  return sql`
-    select e1.dst_id as person_id, c1.id as a_id, c1.text as a_text, c1.tier as a_tier,
-           c2.id as b_id, c2.text as b_text, c2.tier as b_tier
-    from edges e1
-    join edges e2 on e2.dst_type = 'person' and e2.dst_id = e1.dst_id
-      and e2.source_table = 'chunks' and e1.source_id < e2.source_id
-    join chunks c1 on c1.id = e1.source_id
-    join chunks c2 on c2.id = e2.source_id
-    where e1.dst_type = 'person' and e1.source_table = 'chunks'
-    limit ${limit}` as any;
+const COMPILED_NOTE_SOURCES_DELIMITER = "\n## Sources\n";
+const COMPILED_NOTE_UUID_BULLET_SQL_RE =
+  "(^|\n)- [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}($|\n)";
+
+export interface ContradictionChunkPair {
+  person_id: string;
+  a_id: string;
+  a_text: string;
+  a_tier: number;
+  b_id: string;
+  b_text: string;
+  b_tier: number;
+}
+
+export async function chunkPairsSharingPerson(limit: number): Promise<ContradictionChunkPair[]> {
+  return (await db()`
+    with canonical_parent_tiers(parent_type, parent_id, parent_tier) as (
+      select 'page'::text, id, tier from pages
+      union all
+      select 'journal', id, tier from journal_entries
+      union all
+      select 'interaction', id, tier from interactions
+      union all
+      select 'decision', id, tier from decisions
+      union all
+      select 'decision_branch', id, tier from decision_branches
+      union all
+      select 'task', id, tier from tasks
+      union all
+      select 'goal', id, tier from goals
+      union all
+      select 'value', id, tier from values_items
+      union all
+      select 'principle', id, tier from principles
+      union all
+      select 'person', id, tier from people
+      union all
+      select 'org', id, tier from orgs
+      union all
+      select 'commitment', id, tier from commitments
+    ),
+    normalized_pages as (
+      select pg.id, pg.source, pg.path,
+             E'\n' ||
+               replace(replace(coalesce(pg.body_md, ''), E'\r\n', E'\n'), E'\r', E'\n')
+               as normalized_body
+      from pages pg
+    ),
+    page_shape_parts as (
+      select np.*,
+             string_to_array(
+               np.normalized_body,
+               ${COMPILED_NOTE_SOURCES_DELIMITER}
+             ) as sources_parts
+      from normalized_pages np
+    ),
+    excluded_page_parents as (
+      select ps.id
+      from page_shape_parts ps
+      where ps.source in ('dream:notes', 'dream:decision-digest')
+         or ps.path ~ ${COMPILED_NOTE_UUID_PATH_SQL_RE}
+         or (
+           ${COMPILED_NOTE_MARKER} =
+             any(string_to_array(ps.normalized_body, E'\n'))
+           and cardinality(ps.sources_parts) > 1
+           and ps.sources_parts[cardinality(ps.sources_parts)]
+             ~* ${COMPILED_NOTE_UUID_BULLET_SQL_RE}
+         )
+    ),
+    mention_chunks as (
+      select distinct e.dst_id as person_id, e.src_type, e.src_id,
+             c.id as chunk_id, c.text, c.tier, c.updated_at
+      from edges e
+      join people p on p.id = e.dst_id
+      join chunks c on c.parent_type = e.src_type and c.parent_id = e.src_id
+      join canonical_parent_tiers cp
+        on cp.parent_type = e.src_type and cp.parent_id = e.src_id
+      where e.rel = 'mentions' and e.dst_type = 'person'
+        and e.tier >= 1
+        and p.tier >= 1
+        and c.tier >= 1
+        and cp.parent_tier >= 1
+        and (
+          c.parent_type <> 'page'
+          or exists (
+            select 1 from pages live_page
+            where live_page.id = c.parent_id and live_page.status = 'active'
+          )
+        )
+        and (
+          (
+            btrim(p.canonical_name) <> ''
+            and strpos(lower(c.text), lower(p.canonical_name)) > 0
+          )
+          or exists (
+            select 1 from person_aliases a
+            where a.person_id = p.id
+              and btrim(a.alias) <> ''
+              and strpos(lower(c.text), lower(a.alias)) > 0
+          )
+        )
+        and not (
+          e.src_type = 'page' and exists (
+            select 1 from excluded_page_parents excluded
+            where excluded.id = e.src_id
+          )
+        )
+    ),
+    raw_pairs as (
+      select x.person_id,
+             case when x.chunk_id < y.chunk_id then x.chunk_id else y.chunk_id end as a_id,
+             case when x.chunk_id < y.chunk_id then x.text else y.text end as a_text,
+             case when x.chunk_id < y.chunk_id then x.tier else y.tier end as a_tier,
+             case when x.chunk_id < y.chunk_id then y.chunk_id else x.chunk_id end as b_id,
+             case when x.chunk_id < y.chunk_id then y.text else x.text end as b_text,
+             case when x.chunk_id < y.chunk_id then y.tier else x.tier end as b_tier,
+             greatest(x.updated_at, y.updated_at) as newest_at
+      from mention_chunks x
+      join mention_chunks y on y.person_id = x.person_id
+       and (
+         x.src_type < y.src_type
+         or (x.src_type = y.src_type and x.src_id < y.src_id)
+       )
+    ),
+    deduplicated as (
+      select distinct on (person_id, a_id, b_id)
+             person_id, a_id, a_text, a_tier, b_id, b_text, b_tier, newest_at
+      from raw_pairs
+      order by person_id, a_id, b_id, newest_at desc
+    )
+    select person_id, a_id, a_text, a_tier, b_id, b_text, b_tier
+    from deduplicated
+    order by newest_at desc, a_id asc, b_id asc, person_id asc
+    limit ${limit}`) as unknown as ContradictionChunkPair[];
 }
 
 export async function reviewItemExists(
@@ -1666,7 +2494,7 @@ export async function reviewItemExists(
   payloadKey: string,
   payloadValue: string,
 ): Promise<boolean> {
-  const rows = await sql`select 1 from review_queue where kind = ${kind} and status = 'open'
+  const rows = await db()`select 1 from review_queue where kind = ${kind} and status = 'open'
     and payload ->> ${payloadKey} = ${payloadValue} limit 1`;
   return rows.length > 0;
 }
@@ -1674,16 +2502,18 @@ export async function reviewItemExists(
 // ---------------------------------------------------------------- compiled notes (dream step)
 // System-job reads (like chunkPairsSharingPerson): chunk text stays on-box and the resulting
 // note page carries the inherited tier, so agent reads are tier-gated at the page. No
-// allowedTier predicate here — the dream job is not an agent context. The entity-link pass
-// anchors `mentions` edges at the chunk (source_table='chunks', source_id=chunk.id), so a
-// candidate's source chunks are exactly those edges' chunks.
+// allowedTier predicate here — the dream job is not an agent context. Production mention
+// edges are parent-anchored at (src_type, src_id); noteSourceChunks() resolves the chunks
+// through that typed parent and ignores historical source_table/source_id metadata.
 
 export interface NoteCandidate {
   kind: "person";
   id: string;
   name: string;
   chunk_count: number;
+  min_tier: number;
   max_tier: number;
+  evidence_unresolved: boolean;
   latest_mention_at: Date;
 }
 
@@ -1693,17 +2523,21 @@ export interface NoteCandidate {
 // are joined via the edge's src parent. Note pages themselves are excluded so a note never
 // feeds itself.
 export async function noteCandidates(minChunks: number): Promise<NoteCandidate[]> {
-  const rows = (await sql`
+  const excluded = await excludedDerivedPageIdsForCompiledNoteSources();
+  const rows = (await db()`
     select 'person'::text as kind, e.dst_id as id, p.canonical_name as name,
            count(distinct c.id)::int as chunk_count,
-           max(c.tier)::int as max_tier,
+           min(least(c.tier, e.tier, p.tier, ${COMPILED_PARENT_TIER(db())}))::int as min_tier,
+           max(greatest(c.tier, e.tier, p.tier, ${COMPILED_PARENT_TIER(db())}))::int as max_tier,
+           bool_or(${COMPILED_PARENT_TIER(db())} is null) as evidence_unresolved,
            max(e.created_at) as latest_mention_at
     from edges e
     join chunks c on c.parent_type = e.src_type and c.parent_id = e.src_id
     join people p on p.id = e.dst_id
     where e.rel = 'mentions' and e.dst_type = 'person'
-      and not (e.src_type = 'page' and exists (
-        select 1 from pages pg where pg.id = e.src_id and pg.source = 'dream:notes'))
+      and not (e.src_type = 'page' and e.src_id = any(${excluded}::uuid[]))
+      and (c.parent_type <> 'page' or exists (
+        select 1 from pages pg where pg.id = c.parent_id and pg.status = 'active'))
     group by e.dst_id, p.canonical_name
     having count(distinct c.id) >= ${minChunks}
     order by chunk_count desc`) as any;
@@ -1717,21 +2551,45 @@ export async function noteCandidates(minChunks: number): Promise<NoteCandidate[]
 export async function noteSourceChunks(
   _kind: "person",
   id: string,
-): Promise<{ id: string; parent_type: string; parent_id: string; text: string; tier: number }[]> {
-  return sql`
-    select c.id, c.parent_type, c.parent_id, c.text, c.tier
+): Promise<
+  {
+    id: string;
+    parent_type: string;
+    parent_id: string;
+    text: string;
+    tier: number;
+    edge_tier: number;
+    min_tier: number;
+    max_tier: number;
+    evidence_unresolved: boolean;
+  }[]
+> {
+  const excluded = await excludedDerivedPageIdsForCompiledNoteSources();
+  const names = await db()`
+    select p.canonical_name, array_remove(array_agg(distinct a.alias), null) as aliases
+    from people p left join person_aliases a on a.person_id = p.id
+    where p.id = ${id}
+    group by p.id, p.canonical_name`;
+  const aliases = names[0]
+    ? [names[0].canonical_name, ...(names[0].aliases ?? [])].filter(
+        (value): value is string => typeof value === "string" && value.length > 0,
+      )
+    : [];
+  const rows = (await db()`
+    select distinct c.id, c.parent_type, c.parent_id, c.text, c.tier, e.tier as edge_tier,
+      least(c.tier, e.tier, p.tier, ${COMPILED_PARENT_TIER(db())})::int as min_tier,
+      greatest(c.tier, e.tier, p.tier, ${COMPILED_PARENT_TIER(db())})::int as max_tier,
+      (${COMPILED_PARENT_TIER(db())} is null) as evidence_unresolved,
+      c.updated_at, c.ord
     from edges e
     join chunks c on c.parent_type = e.src_type and c.parent_id = e.src_id
+    join people p on p.id = e.dst_id
     where e.rel = 'mentions' and e.dst_type = 'person' and e.dst_id = ${id}
-      and not (e.src_type = 'page' and exists (
-        select 1 from pages pg where pg.id = e.src_id and pg.source = 'dream:notes'))
-      and exists (
-        select 1 from people p
-        left join person_aliases a on a.person_id = p.id
-        where p.id = ${id}
-          and (c.text ilike '%' || p.canonical_name || '%'
-               or (a.alias is not null and c.text ilike '%' || a.alias || '%')))
-    order by c.updated_at, c.ord, c.id` as any;
+      and not (e.src_type = 'page' and e.src_id = any(${excluded}::uuid[]))
+      and (c.parent_type <> 'page' or exists (
+        select 1 from pages pg where pg.id = c.parent_id and pg.status = 'active'))
+    order by c.updated_at, c.ord, c.id`) as any[];
+  return rows.filter((row) => aliases.some((name) => ownershipNameMatches(row.text, name))) as any;
 }
 
 // The note page's last-compiled marker. updated_at advances only when the body changed
@@ -1740,7 +2598,7 @@ export async function notePageFreshness(
   path: string,
 ): Promise<{ id: string; updated_at: Date } | null> {
   const rows =
-    await sql`select id, updated_at from pages where path = ${path} and status = 'active'`;
+    await db()`select id, updated_at from pages where path = ${path} and status = 'active'`;
   return (rows[0] as any) ?? null;
 }
 
@@ -1784,15 +2642,15 @@ export function decisionDigestPath(id: string): string {
 }
 
 export async function decisionDigestInput(id: string): Promise<DecisionDigestInput | null> {
-  const rows = await sql`select * from decisions where id = ${id}`;
+  const rows = await db()`select * from decisions where id = ${id}`;
   const d = rows[0] as any;
   if (!d) return null;
-  const transcript = (await sql`
+  const transcript = (await db()`
     select id, question_key, prompt, answer, tier
     from decision_transcripts
     where decision_id = ${id}
     order by ord`) as any[];
-  const branches = (await sql`
+  const branches = (await db()`
     select id, label, status, note, would_be_right_if, tier
     from decision_branches
     where decision_id = ${id}
@@ -1806,7 +2664,7 @@ export async function decisionDigestInput(id: string): Promise<DecisionDigestInp
 }
 
 export async function decisionDigestCandidates(): Promise<DecisionDigestInput[]> {
-  const rows = (await sql`
+  const rows = (await db()`
     select d.id
     from decisions d
     left join pages pg on pg.path = ${"derived/decisions/"} || d.id::text || '.md'

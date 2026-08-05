@@ -2,16 +2,25 @@
 // events append-only enforced, one round-trip per table.
 
 import { beforeAll, describe, expect, test } from "bun:test";
+import postgres from "postgres";
 import { migrate } from "../src/db/migrate";
+import { logEvent } from "../src/db/repo";
+import { eventAuditSink } from "../src/mcp/audit";
 import { expectSqlReject, resetDb, testSql as sql } from "./helpers";
+import { activeTestDatabaseName, testDatabaseUrl } from "./setup";
+import { dropTestAppRole, mintTestAppRole } from "./support/app-role";
 
 beforeAll(async () => {
+  const [current] = await sql`select current_database() as name`;
+  expect(current!.name).toMatch(/^minime_test_[a-z0-9_]+$/);
+  expect(current!.name).not.toBe("minime_test");
+  expect(current!.name).toBe(activeTestDatabaseName());
   await resetDb();
 });
 
 describe("migrations", () => {
   test("runner is idempotent: second run applies nothing", async () => {
-    const second = await migrate();
+    const second = await migrate({ kind: "test" });
     expect(second).toEqual([]);
   });
 
@@ -49,6 +58,12 @@ describe("migrations", () => {
     ]) {
       expect(tables).toContain(t);
     }
+  });
+
+  test("preload retains one guarded database selection", () => {
+    expect(testDatabaseUrl()).toMatch(/\/minime_test_[a-z0-9_]+$/);
+    expect(activeTestDatabaseName()).toMatch(/^minime_test_[a-z0-9_]+$/);
+    expect(activeTestDatabaseName()).not.toBe("minime_test");
   });
 });
 
@@ -216,21 +231,28 @@ describe("decision interview schema", () => {
     ).toBeGreaterThanOrEqual(3);
   });
 
-  test("minime_app can write tier-2 interview rows without a read unlock", async () => {
+  test("unique scratch app role can write tier-2 interview rows without a read unlock", async () => {
     await sql`delete from session_unlocks`;
     const decisionId = crypto.randomUUID();
-    await sql.begin(async (tx) => {
-      await tx`set local role minime_app`;
-      await tx`
-        insert into decisions (id, question, options, tier)
-        values (${decisionId}, 'app role tier-2 decision?', ${sql.json(["yes", "no"])}, 2)`;
-      await tx`
-        insert into decision_transcripts (decision_id, ord, question_key, prompt, answer, tier)
-        values (${decisionId}, 1, 'fork', 'Q', 'private answer', 2)`;
-      await tx`
-        insert into decision_branches (decision_id, label, status, tier)
-        values (${decisionId}, 'yes', 'chosen', 2)`;
-    });
+    const role = await mintTestAppRole(testDatabaseUrl());
+    const app = postgres(role.databaseUrl, { max: 1, onnotice: () => {} });
+    try {
+      await app.begin(async (tx) => {
+        await tx`select set_config('minime.actor', 'agent:m1', true)`;
+        await tx`
+          insert into decisions (id, question, options, tier)
+          values (${decisionId}, 'app role tier-2 decision?', ${app.json(["yes", "no"])}, 2)`;
+        await tx`
+          insert into decision_transcripts (decision_id, ord, question_key, prompt, answer, tier)
+          values (${decisionId}, 1, 'fork', 'Q', 'private answer', 2)`;
+        await tx`
+          insert into decision_branches (decision_id, label, status, tier)
+          values (${decisionId}, 'yes', 'chosen', 2)`;
+      });
+    } finally {
+      await app.end({ timeout: 2 });
+      await dropTestAppRole(role);
+    }
   });
 });
 
@@ -245,6 +267,67 @@ describe("events append-only (I8)", () => {
     );
     await expectSqlReject(sql`delete from events where id = ${row!.id}`, /append-only/);
     await expectSqlReject(sql`truncate events`, /append-only/);
+  });
+
+  test("logEvent exposes lossless decimal text IDs and disposition rows are unique", async () => {
+    const eventId = await logEvent({ actor: "human", verb: "test:identity" });
+    expect(typeof eventId).toBe("string");
+    const [row] = await sql`select id::text as id from events where id = ${eventId}`;
+    expect(row!.id).toBe(eventId);
+
+    await sql.unsafe(
+      "select setval(pg_get_serial_sequence('events', 'id'), 9007199254740991, true)",
+    );
+    const largeId = await logEvent({ actor: "human", verb: "test:large-identity" });
+    expect(largeId).toBe("9007199254740992");
+    const [largeRow] = await sql`select id::text as id from events where id = ${largeId}`;
+    expect(largeRow!.id).toBe(largeId);
+
+    const result = await eventAuditSink.result("agent:test", "minime_get_context", "a".repeat(16), {
+      returnedIds: [crypto.randomUUID()],
+      returnedCount: 1,
+      delivery: "transport",
+    });
+    expect(result.eventId).toBeString();
+    await eventAuditSink.disposition("agent:test", "minime_get_context", result.eventId, {
+      status: "released",
+    });
+    await expectSqlReject(
+      eventAuditSink.disposition("agent:test", "minime_get_context", result.eventId, {
+        status: "send_uncertain",
+      }),
+      /events_tool_disposition_result_event_uidx/,
+    );
+
+    const indexes = await sql`
+      select c.relname as name, i.indisunique as is_unique,
+             pg_get_expr(i.indpred, i.indrelid) as predicate
+      from pg_index i
+      join pg_class c on c.oid = i.indexrelid
+      where c.relname in (
+        'events_tool_disposition_result_event_uidx',
+        'events_get_context_released_disposition_idx'
+      )
+      order by c.relname`;
+    expect(
+      indexes.map((row: any) => ({
+        name: row.name,
+        is_unique: row.is_unique,
+        predicate: row.predicate,
+      })),
+    ).toEqual([
+      {
+        name: "events_get_context_released_disposition_idx",
+        is_unique: false,
+        predicate:
+          "((verb = 'tool:minime_get_context:disposition'::text) AND ((payload ->> 'status'::text) = 'released'::text))",
+      },
+      {
+        name: "events_tool_disposition_result_event_uidx",
+        is_unique: true,
+        predicate: "((verb ~~ 'tool:%:disposition'::text) AND (payload ? 'result_event_id'::text))",
+      },
+    ]);
   });
 });
 

@@ -1,22 +1,30 @@
 # Minime — agent instructions
 
-Minime is a local-first personal life database with agent access (MCP). The full spec is
-[minime-build-plan.md](minime-build-plan.md) — **read it before implementing anything; it is the
-source of truth.** This file is only the distilled guardrails.
+Minime is a local-first personal life database with agent access (MCP). This file contains the
+product and safety guardrails for code changes. The active single-owner workflow and completion
+roadmap are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). The original
+[minime-build-plan.md](minime-build-plan.md) is the historical v1 foundation, not an execution
+checklist.
 
-## Workflow rules (spec §0, §13)
+## Workflow rules
 
-- Implement milestones **M0 → M6 in order**. Each ships a `make verify-mN` target that must stay green.
-- One milestone per branch/PR. Never start M(n+1) while `verify-m(n)` is red.
-- Record every deviation from the spec in `DECISIONS.md` (use `/log-decision`). When the spec is
-  ambiguous, ask the human — do not invent scope.
-- TDD where cheap: write the verify target's failing test first for each acceptance criterion.
-- **Complexity budget (W2):** a new subsystem lands only with (a) a `docs/SUBSYSTEMS.md` row,
-  (b) a justifying eval with a committed floor, and (c) an explicit statement of what existing
-  subsystem it replaces or why net surface must grow. `make check-subsystems` (in `verify` and
-  CI) enforces structural coverage.
+- Take the owner's requested task from inspection through implementation and proportionate
+  verification. Do not pause for routine plan, branch, commit, or review approval.
+- Use a short outcome-level plan when helpful. Repository-local skills, worktrees, branches, PRs,
+  and subagents are optional tools, not mandatory stages.
+- Make conservative, reversible assumptions and continue. Ask only at the high-impact boundaries
+  listed in `docs/DEVELOPMENT.md` (publication, destructive/live-data actions, privacy/egress
+  changes, paid external services, or a materially divergent product choice).
+- Use focused tests while iterating and the risk-based verification ladder in
+  `docs/DEVELOPMENT.md`. Do not rerun historical milestone chains.
+- Record only durable contract decisions in `DECISIONS.md`: invariants, privacy/egress, schema
+  meaning, public interfaces, dependencies, and recovery semantics. Routine fixes and plan drift
+  do not need an entry or human ratification.
+- **Complexity budget (W2):** keep `docs/SUBSYSTEMS.md` structurally current for long-lived
+  subsystems and explain why net surface grows. Add a committed quantitative floor only when the
+  subsystem has meaningful measurable behavior. `make check-subsystems` enforces path coverage.
 
-## Non-negotiable invariants (spec §1 — every PR is checked against these)
+## Non-negotiable invariants (preserve in every change)
 
 - **I1 Local-first**: no cloud DB, no SaaS APIs, no telemetry. Default runtime network =
   localhost Postgres + localhost Ollama. Amendment (DECISIONS.md 2026-06-11 + W3): optional
@@ -46,7 +54,7 @@ raw SQL, **no ORM** · plain numbered `.sql` migrations in `db/migrations/` ·
 ## Code conventions (spec §14)
 
 - Plain SQL strings live **only** in `src/db/repo.ts`, migrations, and `metric_defs.agg_sql`.
-  Everything parameterized — string-interpolated SQL is a review-blocker.
+  Everything is parameterized; never ship string-interpolated SQL.
 - `repo.ts` is the only place SQL runs; it appends the tier predicate to every content read.
 - Functions under ~60 lines; no clever metaprogramming; comments explain *why*, not *what*.
 - Prefer boring code: small modules, plain SQL, few dependencies — maintainable by one person for
@@ -62,13 +70,19 @@ raw SQL, **no ORM** · plain numbered `.sql` migrations in `db/migrations/` ·
 
 ```
 make up            # start Postgres (+extensions), check Ollama models
-make verify-mN     # acceptance gate for milestone N
-make verify        # all milestones + the retrieval-regression gate (eval-search)
+make verify-mN     # focused legacy area suite when useful
+make verify-offline # fast offline development gate: mocked M0, full tests, lint, typecheck, subsystem check
+make verify        # release/search gate: verify-offline plus retrieval regression
 make eval-search   # offline MinimeBench vs committed floors (fixtures/qrels/baseline.ndjson)
 make eval-search-live          # live embeddings, N=3 (owner-run; writes docs/benchmarks/)
 make eval-snapshot ROUND=vX    # dated release scorecard for the stability streak
 bun test           # test suite (offline; Ollama mocked)
-bunx biome check --write .   # lint + format
+bun run lint       # non-mutating lint
+bun run format     # format files
+bun run typecheck  # strict TypeScript check
 ```
 
-Before claiming a milestone done, run its `verify-mN` target **and** all previous ones.
+During development, run focused tests. Use `make verify-offline` once at the end of cross-module
+or safety-sensitive work. Use `make verify` for ranking changes and release candidates; it already
+includes `verify-offline`. Recovery changes also need their relevant scratch restore E2E. See
+`docs/DEVELOPMENT.md` for the complete risk-based table.

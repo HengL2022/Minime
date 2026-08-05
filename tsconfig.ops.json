@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [
+    "scripts/libpq-service.ts",
+    "scripts/pick-snapshot.ts",
+    "scripts/snapshot-manifest.ts",
+    "scripts/validate-recovery-endpoints.ts",
+    "src/ops/recovery-endpoints.ts",
+    "src/ops/snapshot-manifest.ts",
+    "src/util/config.ts",
+    "src/util/libpq-service.ts"
+  ]
+}

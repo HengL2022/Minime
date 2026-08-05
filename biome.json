@@ -16,6 +16,12 @@
     }
   },
   "files": {
-    "ignore": ["node_modules", "data", "db-dump"]
+    "ignore": [
+      "node_modules",
+      "data",
+      "db-dump",
+      ".claude/worktrees",
+      "fixtures/mcp-tools-list-sdk-1.29.json"
+    ]
   }
 }

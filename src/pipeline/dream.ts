@@ -167,9 +167,13 @@ export async function dream(): Promise<Record<string, unknown>> {
   await step("1_embed_backlog", () => drainEmbedBacklog());
   await step("2_entity_link", () => entityLinkPass());
   await step("2b_compile_notes", async () => {
-    const { compileNotes } = await import("./notes");
-    const { candidates, compiled, skipped } = await compileNotes();
-    return { candidates, compiled, skipped };
+    try {
+      const { compileNotes } = await import("./notes");
+      const { candidates, created, updated, repaired, unchanged, failed } = await compileNotes();
+      return { candidates, created, updated, repaired, unchanged, failed };
+    } catch {
+      return { candidates: 0, created: 0, updated: 0, repaired: 0, unchanged: 0, failed: 1 };
+    }
   });
   await step("2c_compile_decision_digests", async () => {
     const { compileDecisionDigests } = await import("./decision-digest");

@@ -1,9 +1,16 @@
 // Local Ollama provider — the default; the only provider that keeps inference on-box.
 
 import { config } from "../util/config";
+import { ollamaApiUrl, validateOllamaUrl } from "../util/ollama-url";
+import { ollamaRequest } from "./ollama-http";
 import type { FetchFn, LlmProvider } from "./types";
 
-export function ollamaProvider(fetchFn: FetchFn = fetch): LlmProvider {
+export function ollamaProvider(fetchFn?: FetchFn): LlmProvider {
+  const endpoint = validateOllamaUrl(config.ollamaUrl);
+  const request = async (apiPath: `/${string}`, init?: RequestInit): Promise<Response> => {
+    if (fetchFn) return fetchFn(ollamaApiUrl(endpoint, apiPath), init);
+    return ollamaRequest(endpoint, apiPath, init);
+  };
   return {
     name: "ollama",
     model: `${config.embedModel}+${config.classifyModel}`,
@@ -13,12 +20,12 @@ export function ollamaProvider(fetchFn: FetchFn = fetch): LlmProvider {
       const out: number[][] = [];
       for (let i = 0; i < texts.length; i += 32) {
         const batch = texts.slice(i, i + 32);
-        const res = await fetchFn(`${config.ollamaUrl}/api/embed`, {
+        const res = await request("/api/embed", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ model: config.embedModel, input: batch }),
         });
-        if (!res.ok) throw new Error(`ollama embed failed: ${res.status} ${await res.text()}`);
+        if (!res.ok) throw new Error(`ollama embed failed: ${res.status}`);
         const json = (await res.json()) as { embeddings: number[][] };
         out.push(...json.embeddings);
       }
@@ -26,7 +33,7 @@ export function ollamaProvider(fetchFn: FetchFn = fetch): LlmProvider {
     },
 
     async completeJson(prompt: string): Promise<string> {
-      const res = await fetchFn(`${config.ollamaUrl}/api/generate`, {
+      const res = await request("/api/generate", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({

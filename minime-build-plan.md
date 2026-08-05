@@ -1,18 +1,27 @@
-# Minime — System Build Plan v1.0
+# Minime — System Build Plan v1.0 (historical foundation)
 
-**Audience:** a coding agent (Claude Code / OpenClaw / Hermes) implementing this system end to end.
-**This document is the spec.** Read it fully before writing code. Work milestone by milestone (§13). Do not invent scope; when the spec is ambiguous, ask the human and record the resolution in `DECISIONS.md`.
+**Status:** this records the original v1 product design and M0–M6 acceptance baseline. The system
+has since grown beyond it. For current code guardrails read `CLAUDE.md`; for the active workflow
+and remaining roadmap read `docs/DEVELOPMENT.md`. Later code, migrations, tests, and durable
+entries in `DECISIONS.md` supersede stale implementation detail here.
 
 ---
 
-## 0. How to use this plan (instructions to the coding agent)
+## 0. How to use this plan
 
-1. Implement milestones **M0 → M6 in order**. Each milestone has acceptance criteria and a `make verify-mN` target you must create and keep green.
-2. One milestone per branch/PR. Never start M(n+1) while `verify-m(n)` is red.
-3. Record every deviation from this spec, with reasoning, in `DECISIONS.md` at repo root.
-4. **No new external network dependencies.** The only network calls allowed at runtime are to `localhost` Postgres and `localhost` Ollama. CI/tests must run fully offline (mock Ollama).
-5. Never log, print, or include in test snapshots the *contents* of tier-0 rows (transactions, health). Logging row IDs is fine.
-6. Prefer boring code: small modules, plain SQL, few dependencies. This system must be maintainable by one person for a decade.
+1. Use the mission, invariants, architecture, and data model as historical design context, then
+   confirm current behavior in code, migrations, tests, and `CLAUDE.md`.
+2. Do not execute M0–M6 sequentially, create a branch/PR per milestone, or rerun all prior
+   milestone targets. Those are completed baseline areas and remain useful as focused suites.
+3. Follow `docs/DEVELOPMENT.md` for autonomous execution, planning, review, and verification.
+4. Add a `DECISIONS.md` entry only for a durable contract change, not every implementation
+   deviation or ambiguity.
+5. **No unapproved external network dependency.** CI/tests run offline except localhost
+   PostgreSQL, and runtime egress remains constrained by the current provider/tier contract.
+6. Never log, print, or include in test snapshots the *contents* of tier-0 rows (transactions,
+   health). Logging row IDs is fine.
+7. Prefer boring code: small modules, plain SQL, few dependencies. This system must be
+   maintainable by one person for a decade.
 
 ---
 
@@ -20,7 +29,8 @@
 
 Minime is a **local-first personal life database with agent access**. It captures the owner's data (journal, decisions, tasks, people, calendar, money, health), stores it queryably on hardware the owner controls, and exposes it to AI agents through one audited door so they can help the owner decide.
 
-Non-negotiable invariants — every PR is checked against these:
+Non-negotiable invariants — every current change must preserve these unless the owner explicitly
+changes the product contract:
 
 - **I1. Local-first.** All storage and indexing happens on the owner's machine. No cloud database, no third-party SaaS API, no telemetry.
 - **I2. One door.** Agents reach data only through the Minime MCP server. No agent ever gets a database connection string.
@@ -341,9 +351,11 @@ Markdown prompt files the owner pastes into Claude Code / OpenClaw. Each states 
 - **At rest:** rely on full-disk encryption (owner's responsibility, documented in README); `RESTIC_PASSWORD_FILE` perms 0600; `.env` never committed.
 - **Threat model honesty (README section):** anything an agent reads transits that agent's model provider. Tiers minimize and audit that surface; they don't eliminate it.
 
-## 13. Milestones & acceptance criteria
+## 13. Original v1 milestones & acceptance criteria (completed baseline)
 
-Each milestone ships a `make verify-mN` target; AC = what that target proves.
+These milestones explain the original build sequence. They no longer impose branch order or
+approval gates. Their `make verify-mN` targets are focused area suites; `make verify-offline` owns
+the complete offline development gate and `make verify` adds retrieval regression.
 
 **M0 — Environment.** Compose file (Postgres16+pgvector), Ollama check script, migration runner, CI (offline). *AC:* `make up && make verify-m0` → DB reachable, extensions present, required Ollama models listed (or mocked in CI).
 
@@ -359,15 +371,20 @@ Each milestone ships a `make verify-mN` target; AC = what that target proves.
 
 **M6 — Trust & ops.** Tier-2 unlock flow, RLS hardening, dream job (all 8 steps), restic backup + **restore drill script** (`make restore-drill` restores latest snapshot into a scratch DB and runs verify-m1 against it), `minime audit`. *AC:* **leak test suite** — 200 fuzzed tool calls (incl. SQL-injection-shaped metric names, sneaky search queries, tier-2 reads without unlock) return zero tier-0 content and zero tier-2 content while locked; unlock expiry honored; restore drill green.
 
-**Definition of done (whole project):** all verify targets green; `README.md` covers install on a fresh box in ≤ 15 steps; `agents/skills/` files tested manually with Claude Code; `DECISIONS.md` current.
+**Original v1 definition of done:** all listed capabilities existed, the verification targets
+were green, install was documented, and the initial agent skills were usable. Current work uses
+the outcome and risk-based definition of done in `docs/DEVELOPMENT.md`.
 
 ## 14. Working conventions for the coding agent
 
-- TDD where cheap: write the verify target's failing test first for each AC.
-- Plain SQL strings live only in `repo.ts`, migrations, and `metric_defs.agg_sql`. Everything is parameterized; string-interpolated SQL is a review-blocker.
+- Use TDD for regressions and subtle/risky behavior when it shortens the feedback loop; it is not
+  a ceremony for prose, mechanical refactors, or obvious configuration.
+- Plain SQL strings live only in `repo.ts`, migrations, and `metric_defs.agg_sql`. Everything is
+  parameterized; never ship string-interpolated SQL.
 - Keep functions under ~60 lines; no clever metaprogramming; comments explain *why*, not *what*.
 - Fixtures are realistic but fictional — never use the owner's real data in tests.
-- Update this plan only via `DECISIONS.md` entries; the spec stays the source of truth.
+- Treat this file as history. Update current guardrails or roadmap directly when behavior changes,
+  and use `DECISIONS.md` only for the durable contract choices listed in `docs/DEVELOPMENT.md`.
 
 ## 15. Deliberately deferred (do not build in v1)
 

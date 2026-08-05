@@ -1,13 +1,17 @@
 # Improvement program 2026-07 — orchestration plan
 
-Source: `~/Downloads/minime-improvement-plan.md` (owner-reviewed proposal, 2026-07-18), grounded
-against main @ `2c49cb2` by four read-only reconnaissance passes (provider layer, dream/extract/
-review-queue, DB/infra/conventions, search/ingest/eval). This document is the shared contract for
-executing workstreams W1–W9; per-workstream task cards live in sibling `improve-w*.md` plans.
+> **Roadmap history.** The technical workstream ideas remain useful, but the role matrix,
+> Superpowers requirements, worktree/branch choreography, per-wave gates, two-strike escalation,
+> and owner veto checkpoints are superseded by `docs/DEVELOPMENT.md`. Resume W5–W9 as ordinary
+> outcome-sized work only after the active release-closure list is complete.
 
-> **For agentic workers:** the orchestrator dispatches one fresh executor subagent per task card
-> using superpowers:subagent-driven-development; executors follow superpowers:test-driven-development.
-> Steps in the per-workstream plans use checkbox (`- [ ]`) syntax for tracking.
+Historical source: `~/Downloads/minime-improvement-plan.md` (owner-reviewed proposal, 2026-07-18), grounded
+against main @ `2c49cb2` by four read-only reconnaissance passes (provider layer, dream/extract/
+review-queue, DB/infra/conventions, search/ingest/eval). This document was the shared contract for
+workstreams W1–W9; it is now roadmap reference only.
+
+> Historical instruction: the original program dispatched a fresh executor per task card through
+> Superpowers. That model is inactive; use the multi-agent rules in `docs/DEVELOPMENT.md`.
 
 ## Roles and models (owner directive 2026-07-18)
 

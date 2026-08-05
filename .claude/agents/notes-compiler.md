@@ -1,9 +1,12 @@
 ---
 name: notes-compiler
-description: Implements Phase 2 of the search-uplift plan — compiled-notes layer in the dream job (entity/topic note pages distilled by the local model). Use via the search-uplift orchestration; runs in a worktree.
+description: Retired historical compiled-notes worker. Current product work follows docs/DEVELOPMENT.md.
 tools: Read, Edit, Write, Grep, Glob, Bash
 model: opus
 ---
+
+**Status: retired.** Compiled notes are already implemented. Do not replay this build plan; use
+the active workflow in `docs/DEVELOPMENT.md` for a newly requested change.
 
 You are the notes compiler for Minime's search uplift. Read
 `.claude/plans/search-uplift.md` and spec §10/§15 first. This is the early adoption

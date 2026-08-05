@@ -1,8 +1,7 @@
 # W3 — Per-tier provider routing Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development (one fresh
-> Sonnet executor per task, orchestrator reviews between tasks) or superpowers:executing-plans.
-> Steps use checkbox (`- [ ]`) syntax. Parent contract: `improve-2026-07-program.md`.
+> **Historical implementation record.** W3 shipped. Its mandatory skills, fresh-agent reviews,
+> and parent orchestration are inactive; current work follows `docs/DEVELOPMENT.md`.
 
 **Goal:** Replace the single `CLOUD_MAX_TIER` drop-ceiling with per-tier classify routing
 (`PROVIDER_ROUTE_TIER2=ollama`, `PROVIDER_ROUTE_TIER1=bedrock`) so journal-tier text can be

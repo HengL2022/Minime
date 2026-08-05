@@ -11,4 +11,4 @@ Start: DEFICIENT skill from fixtures/skill-tasks/deficient-query.md (loop-valida
 | 1 | ACCEPTED | 4/4 | 4/5 |
 | 2 | converged — train is perfect, nothing to learn from | — | — |
 
-Accepted candidate written to /Users/heng/Minime/agents/skills/candidates/query-2026-06-12-cat30.md — review and apply manually; live skills are never auto-modified.
+Accepted candidate written to <ABS_REPO_PATH>/agents/skills/candidates/query-2026-06-12-cat30.md — review and apply manually; live skills are never auto-modified.

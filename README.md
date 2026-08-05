@@ -4,7 +4,8 @@ A **local-first personal life database with agent access**. Your journal, decisi
 people, calendar, money and health — stored queryably on hardware you control, exposed to AI
 agents through one audited MCP door so they can help you decide.
 
-Spec: [minime-build-plan.md](minime-build-plan.md) · Deviations: [DECISIONS.md](DECISIONS.md)
+Development: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) · Guardrails: [CLAUDE.md](CLAUDE.md) ·
+Original v1 plan: [minime-build-plan.md](minime-build-plan.md)
 
 ## Install (one command)
 
@@ -55,9 +56,11 @@ make setup     # interactive; the local-Ollama defaults need no credentials at a
 7. `cp .env.example .env` and adjust (defaults work for local Docker/brew setups).
 8. `make up` — starts Postgres, creates databases + extensions, checks Ollama models.
 9. `make migrate` — applies `db/migrations/*.sql`.
-10. (optional) `bun run src/cli.ts seed` — loads a fictional demo dataset to explore with.
-11. `make verify-m0 && make test` — prove the environment end to end.
-12. Register the MCP server with your agent:
+10. `make provision-runtime-role` — creates the restricted resident-app login and writes its
+    private endpoint to `.env` (the one-command installer does this automatically).
+11. (optional) `bun run src/cli.ts seed` — loads a fictional demo dataset to explore with.
+12. `make verify-offline` — run the fast offline development gate end to end.
+13. Register the MCP server with your agent:
     `claude mcp add minime -- bun run /absolute/path/to/minime/src/cli.ts serve`
 
 </details>
@@ -104,8 +107,9 @@ the unlock gate). Confirmation-gated install, backs up `~/.claude/settings.json`
 - **Files are the archive, rows are the state, Postgres is the index.** Prose lives as
   markdown in `data/brain/` (its own git repo); structured state lives as rows; everything is
   chunked, embedded (local Ollama) and hybrid-searchable.
-- **One door.** Agents only reach data through the `minime` MCP server; every call is audited
-  to an append-only `events` table, every output is redacted (card/IBAN/account numbers) and
+- **One door.** Agents only reach data through the `minime` MCP server. `serve` supervises an
+  app-only stdio child, so the MCP-reachable process never receives the owner database or backup
+  credential. Every call is audited to an append-only `events` table; outputs are redacted and
   wrapped in an envelope carrying sources, staleness and gaps.
 - **Tiers.** 0 = never leaves the DB (transactions, health) — aggregates only via whitelisted
   SQL in `metric_defs.agg_sql`. 1 = agent-readable default. 2 = journal/interactions/email
@@ -116,6 +120,7 @@ the unlock gate). Confirmation-gated install, backs up `~/.claude/settings.json`
 ## Verification
 
 ```
+make verify-offline # fast offline development gate: mocked M0, full tests, lint, typecheck, subsystem check
 make verify-m0   # environment: DB, extensions, Ollama models
 make verify-m1   # schema, seed, append-only audit
 make verify-m2   # MCP tools, audit rows, redaction
@@ -126,8 +131,8 @@ make verify-m6   # leak suite (200 fuzzed calls), unlock expiry, RLS
 make verify-m7   # typed-edge knowledge graph (orgs, works_at, relations)
 make verify-m8   # CJK-aware FTS + chunker (bigram fold)
 make verify-m9   # fusion / eval-harness / notes / reranker suites
-make verify      # all of the above + the retrieval-regression gate (eval-search)
-make restore-drill  # restore latest backup into a scratch DB and validate
+make verify      # release/search gate: offline gate + retrieval regression (eval-search)
+make restore-drill  # restore a dump+manifest pair into a scratch DB and validate it
 ```
 
 Tests run fully offline: Ollama is mocked (`MINIME_MOCK_OLLAMA=1`), the DB is local.
@@ -149,7 +154,7 @@ only — it punishes returning extras for the model to sort out; the reranker + 
 move it from 6.5% to 52.3%, and we publish the bad default because optimizing for it alone
 would hurt the common case (recall). `make eval-longmemeval`, `make eval-pmb`.
 
-**MinimeBench** — eight in-house areas with committed bars, run live each integration
+**MinimeBench** — eight in-house areas with committed bars, run live before search releases
 ([latest](docs/benchmarks/2026-06-12-live-qwen3-minimebench.md)): retrieval-en 97% hit@3,
 retrieval-zh 100% (bilingual zh/en/mixed), graph/identity/time 100% hit@3, provenance 100%,
 robustness 100% (22 adversarial inputs, no crash, no tier leak). `make eval-search-live`.
@@ -163,7 +168,8 @@ gated against contamination and held-out regression so it cannot cheat. `make ev
 `make optimize-skill SUITE=<name>`.
 
 Kept honest: sealed answer keys (loaded only by the scorer), a CI regression gate on every
-push (`make eval-search` vs committed floors), fictional corpora, N=3 live runs — scorecards
+push (`make eval-search` vs committed floors), fictional corpora, and N=3 live runs for search
+releases — scorecards
 in [docs/benchmarks/](docs/benchmarks/) publish the weak numbers too.
 
 Honest weak spots, on purpose: PrecisionMemBench scope-disambiguation (3/12) and

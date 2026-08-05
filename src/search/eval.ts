@@ -13,8 +13,8 @@
 // (entitiesNamedIn / oneHopNeighbors / parentMeta / getRow) — never new SQL, never the LLM.
 
 import { readFileSync } from "node:fs";
-import { type ParentType, entitiesNamedIn, getRow, oneHopNeighbors, parentMeta } from "../db/repo";
-import { type Hit, hybridSearch } from "./hybrid";
+import type { ParentType } from "../db/repo";
+import type { Hit } from "./hybrid";
 
 // ---------------------------------------------------------------- pure IR metrics
 //
@@ -209,6 +209,7 @@ function percentile(values: number[], p: number): number {
 // the same reads hybridSearch uses for its 1-hop boost. No new SQL, no LLM.
 
 async function namesOf(refs: { type: "person" | "org"; id: string }[]): Promise<string[]> {
+  const { parentMeta } = await import("../db/repo");
   const out: string[] = [];
   const byType = new Map<ParentType, string[]>();
   for (const r of refs) byType.set(r.type, [...(byType.get(r.type) ?? []), r.id]);
@@ -219,6 +220,7 @@ async function namesOf(refs: { type: "person" | "org"; id: string }[]): Promise<
 }
 
 async function graphNeighborNames(query: string): Promise<string[]> {
+  const { entitiesNamedIn, oneHopNeighbors } = await import("../db/repo");
   const named = await entitiesNamedIn(query);
   if (named.length === 0) return [];
   const neighbors = await oneHopNeighbors(named);
@@ -262,6 +264,7 @@ export async function runQrels(opts: RunOpts): Promise<AreaReport> {
     let hits: Hit[] = [];
     let crashed = false;
     try {
+      const { hybridSearch } = await import("./hybrid");
       hits = await hybridSearch({ query: entry.query, limit: Math.max(limit, 5) });
     } catch (e) {
       crashed = true;
@@ -315,6 +318,7 @@ export async function runQrels(opts: RunOpts): Promise<AreaReport> {
       let provOk = false;
       let detail = "no-top-hit";
       if (top) {
+        const { getRow } = await import("../db/repo");
         const row = await getRow(top.type, top.id).catch(() => null);
         const idOk = row !== null;
         provOk =
@@ -361,8 +365,7 @@ export async function runQrels(opts: RunOpts): Promise<AreaReport> {
 // A "measurement" is one (area, metric, value) triple. Higher is better for every metric
 // except those flagged lowerBetter (latency). The baseline file commits the floor; a run
 // regresses when a metric drops below baseline − tolerance (or, for latency, rises above
-// baseline + tolerance). NEW-area bars from the plan ship as `provisional` until the first
-// real run replaces them.
+// baseline + tolerance).
 
 export interface Measurement {
   area: string;
@@ -417,20 +420,52 @@ export interface BaselineLine {
   bar?: number; // committed plan bar, for reference in the scorecard
 }
 
+/** Load the committed floor strictly; an absent or malformed floor must fail closed. */
 export function loadBaseline(path: string): Map<string, BaselineLine> {
   const out = new Map<string, BaselineLine>();
   let text: string;
   try {
     text = readFileSync(path, "utf8");
-  } catch {
-    return out; // no baseline yet → first run establishes it
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") throw new Error(`baseline missing: ${path}`);
+    throw new Error(`baseline unreadable: ${path}`);
   }
+  if (!text.trim()) throw new Error(`baseline empty: ${path}`);
   for (const line of text.split("\n")) {
     const t = line.trim();
     if (!t) continue;
-    const obj = JSON.parse(t) as BaselineLine;
-    out.set(`${obj.area}::${obj.metric}`, obj);
+    let obj: unknown;
+    try {
+      obj = JSON.parse(t);
+    } catch {
+      throw new Error(`baseline malformed: ${path}`);
+    }
+    if (
+      obj === null ||
+      typeof obj !== "object" ||
+      typeof (obj as BaselineLine).area !== "string" ||
+      (obj as BaselineLine).area.length === 0 ||
+      typeof (obj as BaselineLine).metric !== "string" ||
+      (obj as BaselineLine).metric.length === 0 ||
+      typeof (obj as BaselineLine).value !== "number" ||
+      !Number.isFinite((obj as BaselineLine).value) ||
+      ((obj as BaselineLine).lowerBetter !== undefined &&
+        typeof (obj as BaselineLine).lowerBetter !== "boolean") ||
+      ((obj as BaselineLine).provisional !== undefined &&
+        typeof (obj as BaselineLine).provisional !== "boolean") ||
+      ((obj as BaselineLine).bar !== undefined &&
+        (typeof (obj as BaselineLine).bar !== "number" ||
+          !Number.isFinite((obj as BaselineLine).bar)))
+    ) {
+      throw new Error(`baseline malformed: ${path}`);
+    }
+    const lineValue = obj as BaselineLine;
+    const key = `${lineValue.area}::${lineValue.metric}`;
+    if (out.has(key)) throw new Error(`baseline malformed: duplicate ${key}`);
+    out.set(key, lineValue);
   }
+  if (out.size === 0) throw new Error(`baseline empty: ${path}`);
   return out;
 }
 
@@ -519,6 +554,15 @@ export interface ScorecardInput {
   reports: AreaReport[];
   regressions: Regression[];
   baselineExisted: boolean;
+  /** All raw repeat results; reports is the median view used for the gate. */
+  runs?: AreaReport[][];
+  evaluatedCommit?: string;
+  datasetHash?: string;
+  configuration?: {
+    provider: string;
+    model: string;
+    reranker: { enabled: boolean; model: string; topIn: number };
+  };
 }
 
 /** Full markdown scorecard — ALL numbers, including misses and known-weak areas. */
@@ -532,7 +576,29 @@ export function buildScorecard(input: ScorecardInput): string {
     `Mode: **${input.mode}** (${input.mode === "mock" ? "MINIME_MOCK_OLLAMA=1, deterministic N=1" : "configured embed provider, N=3 min/median/max"}). ` +
       `Seed(s): ${seeds}. Judges: none (all deterministic, MinimeBench v1).`,
   );
+  if (input.evaluatedCommit) lines.push(`Evaluated commit: \`${input.evaluatedCommit}\`.`);
+  if (input.datasetHash) lines.push(`Dataset hash: \`${input.datasetHash}\`.`);
+  if (input.configuration) {
+    const c = input.configuration;
+    lines.push(`Provider: \`${c.provider}\`.`);
+    lines.push(`Model: \`${c.model}\`.`);
+    lines.push(
+      `Reranker: ${c.reranker.enabled ? `enabled (${c.reranker.model}, top-in ${c.reranker.topIn})` : "disabled"}.`,
+    );
+  }
   lines.push("");
+
+  if (input.runs && input.runs.length > 0) {
+    lines.push("## Per-run results");
+    lines.push("");
+    for (const [index, run] of input.runs.entries()) {
+      const seeds = [...new Set(run.map((r) => r.seed))].join(", ");
+      lines.push(`### Run ${index + 1} (seed ${seeds})`);
+      lines.push("");
+      lines.push(areaTable(run));
+      lines.push("");
+    }
+  }
   lines.push("## Area table");
   lines.push("");
   lines.push(areaTable(reports));

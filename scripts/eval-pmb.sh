@@ -6,16 +6,18 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PMB_DIR="${PMB_DIR:-$HOME/datasets/precisionmembench}"
-EVAL_PMB_DATABASE_URL="${EVAL_PMB_DATABASE_URL:-postgres://minime:minime@localhost:5432/minime_eval_pmb}"
 PORT="${PMB_PORT:-8077}"
 ROUND="${ROUND:-r1}"
+
+if [ -z "${DATABASE_URL:-}" ] || [ -z "${EVAL_PMB_DATABASE_URL:-}" ] || [ "$DATABASE_URL" != "$EVAL_PMB_DATABASE_URL" ]; then
+  echo "ERROR: eval-pmb requires the owned wrapper database" >&2
+  exit 2
+fi
 
 if [ ! -d "$PMB_DIR" ]; then
   echo "ERROR: harness not found — git clone https://github.com/tenurehq/precisionmembench $PMB_DIR" >&2
   exit 2
 fi
-
-createdb "${EVAL_PMB_DATABASE_URL##*/}" 2>/dev/null || true
 
 # register the provider in the (scratch, uncommitted) harness clone — idempotent
 python3 - "$PMB_DIR/providers.config.json" <<'EOF'

@@ -230,6 +230,20 @@ describe("egress audit + tier gate", () => {
     expect(after[0]!.n).toBe(before[0]!.n);
   });
 
+  test("injected local Ollama still produces zero cloud-egress rows", async () => {
+    const before = await sql`select count(*)::int n from events where verb like 'egress:%'`;
+    const { fn } = fakeFetch((capture) =>
+      Array.isArray(capture.body?.input)
+        ? { embeddings: capture.body.input.map(() => [0.1]) }
+        : { response: '{"ok":true}' },
+    );
+    const provider = ollamaProvider(fn);
+    await provider.completeJson("fictional local prompt");
+    await provider.embed!(["fictional local text"]);
+    const after = await sql`select count(*)::int n from events where verb like 'egress:%'`;
+    expect(after[0]!.n).toBe(before[0]!.n);
+  });
+
   test("CLOUD_MAX_TIER=1 keeps tier-2 chunks out of a cloud embed backlog", async () => {
     const { chunksMissingEmbedding } = await import("../src/db/repo");
     // two journal-ish chunks: tier 1 and tier 2, both unembedded

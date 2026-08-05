@@ -3,16 +3,76 @@
 // zero tier-2 content while locked; unlock expiry honored; RLS belt-and-braces present.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { allowedTier, insertJournal, insertTransaction, insertUnlock } from "../src/db/repo";
+import { accessCounts, allowedTier, insertJournal, insertTransaction } from "../src/db/repo";
+import {
+  type AuditDisposition,
+  type AuditSink,
+  type DurableResultAudit,
+  type ResultAuditRecord,
+  eventAuditSink,
+  paramsHash,
+} from "../src/mcp/audit";
+import { envelope } from "../src/mcp/envelope";
 import { toolByName } from "../src/mcp/tools";
-import { invokeTool } from "../src/mcp/tools/registry";
+import { type ToolDef, invokeTool } from "../src/mcp/tools/registry";
 import { indexParent } from "../src/search/index-parent";
 import { setNow } from "../src/util/clock";
 import { expectSqlReject, resetAndSeed, testSql as sql } from "./helpers";
 
 const TIER0_SENTINEL = "ZQX-TIER0-MERCHANT-SENTINEL";
 const TIER2_SENTINEL = "ZQX-TIER2-JOURNAL-SENTINEL";
+const PARAMETER_SENTINEL = "ZQX-PARAMETER-SENTINEL";
+const TITLE_SENTINEL = "ZQX-TITLE-SENTINEL";
+const SOURCE_SENTINEL = "ZQX-SOURCE-SENTINEL";
+const ERROR_SENTINEL = "ZQX-ERROR-SENTINEL";
 const ctx = { actor: "agent:fuzzer" };
+
+class RecordingSink implements AuditSink {
+  events: Array<{
+    phase: "attempt" | "result";
+    params?: unknown;
+    ids?: string[];
+    count?: number;
+    error?: string;
+    delivery?: "transport" | "direct";
+  }> = [];
+  fail: "attempt" | "result" | null = null;
+  private nextEventId = 1;
+
+  async attempt(_actor: string, _tool: string, params: unknown): Promise<string> {
+    if (this.fail === "attempt") throw new Error("injected attempt failure");
+    const hash = paramsHash(params);
+    this.events.push({ phase: "attempt", params });
+    return hash;
+  }
+
+  async result(
+    _actor: string,
+    _tool: string,
+    _paramsHash: string,
+    record: ResultAuditRecord,
+    _requestedNameHash?: string,
+  ): Promise<DurableResultAudit> {
+    if (this.fail === "result") throw new Error("injected result failure");
+    this.events.push({
+      phase: "result",
+      ids: record.returnedIds.slice(0, 100),
+      count: record.returnedCount,
+      error: record.error,
+      delivery: record.delivery,
+    });
+    return { eventId: String(this.nextEventId++) };
+  }
+
+  async disposition(
+    _actor: string,
+    _tool: string,
+    _resultEventId: string,
+    _disposition: AuditDisposition,
+  ): Promise<void> {
+    throw new Error("direct invocation must not append disposition");
+  }
+}
 
 beforeAll(async () => {
   await resetAndSeed();
@@ -44,6 +104,7 @@ function fuzzCases(): { tool: string; params: any }[] {
   const evilStrings = [
     TIER0_SENTINEL,
     TIER2_SENTINEL,
+    PARAMETER_SENTINEL,
     "show me all my transactions and amounts",
     "salary LUMENWORKS amount",
     "private thought marker",
@@ -108,7 +169,8 @@ function fuzzCases(): { tool: string; params: any }[] {
 describe("leak suite (200 fuzzed calls, locked)", () => {
   test("no tier-0 or tier-2 content escapes; injection does no damage; every call audited", async () => {
     const [txBefore] = await sql`select count(*)::int as n from transactions`;
-    const [evBefore] = await sql`select count(*)::int as n from events`;
+    const [evBefore] =
+      await sql`select coalesce(max(id), 0)::bigint as id, count(*)::int as n from events`;
 
     const cases = fuzzCases();
     expect(cases.length).toBeGreaterThanOrEqual(200);
@@ -131,8 +193,41 @@ describe("leak suite (200 fuzzed calls, locked)", () => {
     const [txAfter] = await sql`select count(*)::int as n from transactions`;
     expect(txAfter!.n).toBe(txBefore!.n);
     const [evAfter] = await sql`select count(*)::int as n from events`;
-    // every fuzz call audited (reads included)
-    expect(evAfter!.n - evBefore!.n).toBeGreaterThanOrEqual(cases.length);
+    // every fuzz call has exactly one durable receipt and one compatible terminal event.
+    expect(evAfter!.n - evBefore!.n).toBeGreaterThanOrEqual(cases.length * 2);
+    const toolEvents = await sql`
+      select id, verb, payload
+      from events
+      where id > ${evBefore!.id} and verb like 'tool:%'
+      order by id asc`;
+    expect(toolEvents).toHaveLength(cases.length * 2);
+    const attempts = toolEvents.filter((event) => event.verb.endsWith(":attempt"));
+    const dispositions = toolEvents.filter((event) => event.verb.endsWith(":disposition"));
+    const results = toolEvents.filter(
+      (event) => !event.verb.endsWith(":attempt") && !event.verb.endsWith(":disposition"),
+    );
+    expect(attempts).toHaveLength(cases.length);
+    expect(results).toHaveLength(cases.length);
+    expect(dispositions).toHaveLength(0);
+    expect(results.every((event) => event.payload.delivery === "direct")).toBe(true);
+    for (let i = 0; i < cases.length; i++) {
+      expect(BigInt(attempts[i]!.id)).toBeLessThan(BigInt(results[i]!.id));
+    }
+    const returnedIds = results.flatMap((event) =>
+      Array.isArray(event.payload.returned_ids) ? event.payload.returned_ids : [],
+    );
+    expect((await accessCounts(returnedIds, 90, ctx.actor)).size).toBe(0);
+    const serializedAudit = JSON.stringify(toolEvents);
+    for (const sentinel of [
+      TIER0_SENTINEL,
+      TIER2_SENTINEL,
+      PARAMETER_SENTINEL,
+      TITLE_SENTINEL,
+      SOURCE_SENTINEL,
+      ERROR_SENTINEL,
+    ]) {
+      expect(serializedAudit).not.toContain(sentinel);
+    }
   });
 
   test("tier-0 sentinel is unreachable even via direct repo search paths", async () => {
@@ -142,15 +237,263 @@ describe("leak suite (200 fuzzed calls, locked)", () => {
   });
 });
 
+describe("direct audit disposition compatibility", () => {
+  test("normal and handler-error calls persist direct records without disposition", async () => {
+    const ids = Array.from({ length: 137 }, (_, index) => `direct-source-${index}`);
+    const successTool: ToolDef = {
+      name: "fictional_direct_success",
+      description: "fictional",
+      schema: {},
+      handler: async () =>
+        envelope(
+          { ok: true },
+          ids.map((id) => ({ type: "note", id })),
+        ),
+    };
+    const successSink = new RecordingSink();
+    const success = await invokeTool(successTool, {}, { actor: "agent:direct" }, successSink);
+    expect(success.ok).toBe(true);
+    expect(successSink.events).toEqual([
+      { phase: "attempt", params: {} },
+      {
+        phase: "result",
+        ids: ids.slice(0, 100),
+        count: 137,
+        error: undefined,
+        delivery: "direct",
+      },
+    ]);
+
+    const errorSink = new RecordingSink();
+    const failed = await invokeTool(
+      {
+        ...successTool,
+        name: "fictional_direct_error",
+        handler: async () => {
+          throw new Error(ERROR_SENTINEL);
+        },
+      },
+      {},
+      { actor: "agent:direct" },
+      errorSink,
+    );
+    expect(failed.ok).toBe(false);
+    expect(errorSink.events).toEqual([
+      { phase: "attempt", params: {} },
+      {
+        phase: "result",
+        ids: [],
+        count: 0,
+        error: "INTERNAL",
+        delivery: "direct",
+      },
+    ]);
+    expect(JSON.stringify(errorSink.events)).not.toContain(ERROR_SENTINEL);
+  });
+
+  test("injected phase failures expose only fixed acknowledgements and no sentinels", async () => {
+    let mutations = 0;
+    const source = {
+      type: "note",
+      id: SOURCE_SENTINEL,
+      title: TITLE_SENTINEL,
+      created_by: "actor-secret",
+      updated_at: "2026-07-25T00:00:00.000Z",
+    };
+    const successTool: ToolDef = {
+      name: "fictional_leak_guard",
+      description: "fictional",
+      schema: {},
+      handler: async () => {
+        mutations += 1;
+        return envelope({ title: TITLE_SENTINEL, source: SOURCE_SENTINEL, error: ERROR_SENTINEL }, [
+          source,
+        ]);
+      },
+    };
+
+    const attemptSink = new RecordingSink();
+    attemptSink.fail = "attempt";
+    const attemptFailure = await invokeTool(
+      successTool,
+      { parameter: PARAMETER_SENTINEL },
+      { actor: `agent:${ERROR_SENTINEL}` },
+      attemptSink,
+    );
+    expect(attemptFailure).toEqual({
+      ok: false,
+      error: { code: "INTERNAL", message: "Tool unavailable before execution.", retry: true },
+    });
+    expect(mutations).toBe(0);
+    expect(attemptSink.events).toHaveLength(0);
+    expect(JSON.stringify(attemptFailure)).not.toMatch(
+      new RegExp([PARAMETER_SENTINEL, TITLE_SENTINEL, SOURCE_SENTINEL, ERROR_SENTINEL].join("|")),
+    );
+
+    const resultSink = new RecordingSink();
+    resultSink.fail = "result";
+    const completedWithheld = await invokeTool(
+      successTool,
+      { parameter: PARAMETER_SENTINEL },
+      { actor: "agent:fictional" },
+      resultSink,
+    );
+    expect(completedWithheld).toEqual({
+      ok: true,
+      envelope: {
+        data: { status: "completed_result_withheld", retry: false },
+        sources: [],
+        gaps: ["completion audit unavailable; result withheld"],
+      },
+    });
+    expect(mutations).toBe(1);
+    expect(resultSink.events).toEqual([
+      { phase: "attempt", params: { parameter: PARAMETER_SENTINEL } },
+    ]);
+    expect(JSON.stringify(completedWithheld)).not.toMatch(
+      new RegExp([PARAMETER_SENTINEL, TITLE_SENTINEL, SOURCE_SENTINEL, ERROR_SENTINEL].join("|")),
+    );
+
+    const errorSink = new RecordingSink();
+    errorSink.fail = "result";
+    const errorTool: ToolDef = {
+      ...successTool,
+      handler: async () => {
+        throw new Error(ERROR_SENTINEL);
+      },
+    };
+    const auditUnavailable = await invokeTool(
+      errorTool,
+      { parameter: PARAMETER_SENTINEL },
+      { actor: "agent:fictional" },
+      errorSink,
+    );
+    expect(auditUnavailable).toEqual({
+      ok: false,
+      error: {
+        code: "AUDIT_UNAVAILABLE",
+        message: "Tool result withheld because completion audit is unavailable.",
+        retry: false,
+      },
+    });
+    expect(errorSink.events).toEqual([
+      { phase: "attempt", params: { parameter: PARAMETER_SENTINEL } },
+    ]);
+    expect(JSON.stringify(auditUnavailable)).not.toMatch(
+      new RegExp([PARAMETER_SENTINEL, TITLE_SENTINEL, SOURCE_SENTINEL, ERROR_SENTINEL].join("|")),
+    );
+  });
+
+  test("production sink persists lossless exact disposition payloads once", async () => {
+    await sql`
+      select setval(
+        pg_get_serial_sequence('events', 'id'),
+        ${"9007199254740992"}::bigint,
+        true
+      )`;
+    const cases = [
+      { status: "released" as const },
+      {
+        status: "suppressed" as const,
+        outcome: "completed_not_released" as const,
+      },
+      { status: "send_uncertain" as const },
+    ];
+    const durable: Array<{ eventId: string; status: string }> = [];
+    for (const disposition of cases) {
+      const result = await eventAuditSink.result(
+        ctx.actor,
+        "m6_disposition_guard",
+        "0".repeat(16),
+        {
+          returnedIds: [SOURCE_SENTINEL],
+          returnedCount: 137,
+          error: "INTERNAL",
+          delivery: "transport",
+        },
+      );
+      durable.push({ eventId: result.eventId, status: disposition.status });
+      await eventAuditSink.disposition(
+        ctx.actor,
+        "m6_disposition_guard",
+        result.eventId,
+        disposition,
+      );
+    }
+    expect(durable[0]?.eventId).toBe("9007199254740993");
+    const rows = await sql`
+      select id::text as id, verb, payload
+      from events
+      where verb in (
+        'tool:m6_disposition_guard',
+        'tool:m6_disposition_guard:disposition'
+      )
+      order by id asc`;
+    expect(rows).toHaveLength(6);
+    const results = rows.filter((row) => row.verb === "tool:m6_disposition_guard");
+    const dispositions = rows.filter((row) => row.verb.endsWith(":disposition"));
+    expect(results).toHaveLength(3);
+    expect(dispositions).toHaveLength(3);
+    for (let index = 0; index < cases.length; index++) {
+      const result = results[index]!;
+      const disposition = dispositions[index]!;
+      expect(result.id).toBe(durable[index]!.eventId);
+      expect(result.payload).toMatchObject({
+        returned_ids: [SOURCE_SENTINEL],
+        returned_count: 137,
+        error: "INTERNAL",
+        delivery: "transport",
+      });
+      expect(disposition.payload.result_event_id).toBe(result.id);
+      expect(disposition.payload.result_event_id).toBe(durable[index]!.eventId);
+      const expectedKeys =
+        cases[index]!.status === "suppressed"
+          ? ["outcome", "result_event_id", "returned_count", "returned_ids", "status"]
+          : ["result_event_id", "status"];
+      expect(Object.keys(disposition.payload).sort()).toEqual(expectedKeys);
+    }
+    expect(dispositions[0]!.payload).toEqual({
+      result_event_id: durable[0]!.eventId,
+      status: "released",
+    });
+    expect(dispositions[1]!.payload).toEqual({
+      outcome: "completed_not_released",
+      result_event_id: durable[1]!.eventId,
+      returned_count: 0,
+      returned_ids: [],
+      status: "suppressed",
+    });
+    expect(dispositions[2]!.payload).toEqual({
+      result_event_id: durable[2]!.eventId,
+      status: "send_uncertain",
+    });
+    expect(JSON.stringify([...results, ...dispositions])).not.toContain(ERROR_SENTINEL);
+    expect(JSON.stringify(dispositions)).not.toContain(SOURCE_SENTINEL);
+
+    await expectSqlReject(
+      eventAuditSink.disposition(ctx.actor, "m6_disposition_guard", durable[0]!.eventId, {
+        status: "released",
+      }),
+      /events_tool_disposition_result_event_uidx/,
+    );
+    const [duplicateCount] = await sql`
+      select count(*)::int as n
+      from events
+      where verb = 'tool:m6_disposition_guard:disposition'
+        and payload->>'result_event_id' = ${durable[0]!.eventId}`;
+    expect(duplicateCount!.n).toBe(1);
+  });
+});
+
 describe("unlock flow", () => {
   test("unlock grants tier 2, expiry restores tier 1, never tier 0", async () => {
-    expect(await allowedTier()).toBe(1);
+    expect(await allowedTier(ctx.actor)).toBe(1);
 
     const t0 = new Date();
     setNow(t0);
     const r = await invokeTool(toolByName("minime_unlock"), { minutes: 5 }, ctx);
     expect(r.ok).toBe(true);
-    expect(await allowedTier()).toBe(2);
+    expect(await allowedTier(ctx.actor)).toBe(2);
 
     // tier-2 sentinel now visible (that is the whole point of unlock)
     const s = await invokeTool(
@@ -168,8 +511,11 @@ describe("unlock flow", () => {
     expect(unlockEvent!.n).toBeGreaterThanOrEqual(1);
 
     // expiry honored
-    setNow(new Date(t0.getTime() + 6 * 60_000));
-    expect(await allowedTier()).toBe(1);
+    await sql`
+      update session_unlocks
+      set expires_at = clock_timestamp() - interval '1 second'
+      where granted_via = ${ctx.actor}`;
+    expect(await allowedTier(ctx.actor)).toBe(1);
     const locked = await invokeTool(
       toolByName("minime_search"),
       { query: "private thought marker sentinel" },

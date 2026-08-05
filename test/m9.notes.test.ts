@@ -11,6 +11,7 @@ import { entityLinkPass } from "../src/pipeline/dream";
 import { compileNotes, heuristicDistill } from "../src/pipeline/notes";
 import { indexParent } from "../src/search/index-parent";
 import { setNow } from "../src/util/clock";
+import { compiledNotePath } from "../src/util/compiled-note-archive";
 import { resetDb, testSql as sql } from "./helpers";
 
 // Create a page + chunks + (chunk-anchored) mention edges for `person`.
@@ -31,9 +32,13 @@ async function pageMentioning(
   return id;
 }
 
-async function notePage(personSlug: string): Promise<any | null> {
+async function notePage(
+  kind: "person" | "org",
+  name: string,
+  entityId: string,
+): Promise<any | null> {
   const [row] =
-    await sql`select * from pages where path = ${`derived/notes/person/${personSlug}.md`}`;
+    await sql`select * from pages where path = ${compiledNotePath(kind, name, entityId)}`;
   return row ?? null;
 }
 
@@ -94,10 +99,10 @@ describe("compileNotes provenance and tier", () => {
     expect(edges!.n).toBeGreaterThanOrEqual(3);
 
     const res = await compileNotes();
-    expect(res.compiled).toBe(1);
+    expect(res.created + res.updated).toBe(1);
     expect(res.results[0]!.status).toBe("created");
 
-    const note = await notePage("ingrid-solberg");
+    const note = await notePage("person", "Ingrid Solberg", personId);
     expect(note).not.toBeNull();
     expect(note.source).toBe("dream:notes");
     expect(note.created_by).toBe("system:dream");
@@ -117,47 +122,47 @@ describe("compileNotes provenance and tier", () => {
   });
 
   test("tier-2 sources never produce a tier-1 note", async () => {
-    await ensurePerson("Marek Dvorak", "test");
+    const { id: marekId } = await ensurePerson("Marek Dvorak", "test");
     await pageMentioning("journal/a.md", "A", "Marek Dvorak fixed the rig.", 1);
     await pageMentioning("journal/b.md", "B", "Marek Dvorak called about the audit.", 2);
     await pageMentioning("journal/c.md", "C", "Marek Dvorak is travelling next week.", 2);
     await entityLinkPass();
 
     const res = await compileNotes();
-    expect(res.compiled).toBe(1);
-    const note = await notePage("marek-dvorak");
+    expect(res.created + res.updated).toBe(1);
+    const note = await notePage("person", "Marek Dvorak", marekId);
     expect(note.tier).toBe(2); // max(1,2,2)
   });
 });
 
 describe("staleness", () => {
   test("idempotent: a second run with no new mentions makes no change", async () => {
-    await ensurePerson("Sofia Reyes", "test");
+    const { id: sofiaId } = await ensurePerson("Sofia Reyes", "test");
     await pageMentioning("journal/1.md", "1", "Sofia Reyes joined the choir.", 1);
     await pageMentioning("journal/2.md", "2", "Sofia Reyes baked the bread.", 1);
     await pageMentioning("journal/3.md", "3", "Sofia Reyes ran the half marathon.", 1);
     await entityLinkPass();
 
     const first = await compileNotes();
-    expect(first.compiled).toBe(1);
-    const before = await notePage("sofia-reyes");
+    expect(first.created + first.updated).toBe(1);
+    const before = await notePage("person", "Sofia Reyes", sofiaId);
 
     const second = await compileNotes();
-    expect(second.compiled).toBe(0);
-    expect(second.results[0]!.status).toBe("skipped");
-    const after = await notePage("sofia-reyes");
+    expect(second.created + second.updated).toBe(0);
+    expect(second.results[0]!.status).toBe("unchanged");
+    const after = await notePage("person", "Sofia Reyes", sofiaId);
     expect(after.updated_at.getTime()).toBe(before.updated_at.getTime());
   });
 
   test("recompiles when the entity gains a new mention", async () => {
-    await ensurePerson("Yuki Tanaka", "test");
+    const { id: yukiId } = await ensurePerson("Yuki Tanaka", "test");
     await pageMentioning("journal/x.md", "X", "Yuki Tanaka planted the garden.", 1);
     await pageMentioning("journal/y.md", "Y", "Yuki Tanaka tuned the piano.", 1);
     await pageMentioning("journal/z.md", "Z", "Yuki Tanaka cycled to work.", 1);
     await entityLinkPass();
     const first = await compileNotes();
-    expect(first.compiled).toBe(1);
-    const before = await notePage("yuki-tanaka");
+    expect(first.created + first.updated).toBe(1);
+    const before = await notePage("person", "Yuki Tanaka", yukiId);
 
     // a new mention arrives later — edges.created_at uses DB now(), so advancing the app
     // clock keeps the assertion meaningful; the new edge is newer than the note.
@@ -166,20 +171,20 @@ describe("staleness", () => {
     await entityLinkPass();
 
     const second = await compileNotes();
-    expect(second.compiled).toBe(1);
-    expect(second.results.find((r) => r.path.includes("yuki-tanaka"))!.status).toBe("updated");
-    const after = await notePage("yuki-tanaka");
+    expect(second.created + second.updated).toBe(1);
+    expect(second.results.find((r) => r.status === "updated")!.status).toBe("updated");
+    const after = await notePage("person", "Yuki Tanaka", yukiId);
     expect(after.body_md).toContain("Mochi"); // the new claim is now distilled in
     expect(after.updated_at.getTime()).toBeGreaterThan(before.updated_at.getTime());
   });
 
   test("fewer than 3 mentioning chunks → no note", async () => {
-    await ensurePerson("Lone Source", "test");
+    const { id: loneId } = await ensurePerson("Lone Source", "test");
     await pageMentioning("journal/only.md", "Only", "Lone Source appeared once.", 1);
     await pageMentioning("journal/twice.md", "Twice", "Lone Source appeared again.", 1);
     await entityLinkPass();
     const res = await compileNotes();
     expect(res.candidates).toBe(0);
-    expect(await notePage("lone-source")).toBeNull();
+    expect(await notePage("person", "Lone Source", loneId)).toBeNull();
   });
 });

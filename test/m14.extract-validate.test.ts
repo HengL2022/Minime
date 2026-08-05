@@ -17,6 +17,7 @@ import { expectSqlReject, resetDb, testSql } from "./helpers";
 // W3 provider-routing test seam (copied locally from test/m13.provider-routing.test.ts — test
 // files stay self-contained, no cross-file imports).
 const saved = {
+  ollamaUrl: config.ollamaUrl,
   classifyProvider: config.classifyProvider,
   cloudMaxTier: config.cloudMaxTier,
   r1: config.providerRouteTier1,
@@ -25,6 +26,7 @@ const saved = {
   mockOllama: config.mockOllama,
 };
 afterEach(() => {
+  config.ollamaUrl = saved.ollamaUrl;
   config.classifyProvider = saved.classifyProvider;
   config.cloudMaxTier = saved.cloudMaxTier;
   config.providerRouteTier1 = saved.r1;
@@ -33,28 +35,6 @@ afterEach(() => {
   config.mockOllama = saved.mockOllama;
   Reflect.deleteProperty(process.env, "PROVIDER_ROUTE_TIER0");
 });
-
-/** Patch fetch: localhost Ollama gets a canned answer; ANY other host trips the leak wire. */
-function patchFetch(ollamaResponder: () => unknown) {
-  const real = globalThis.fetch;
-  const cloudCalls: string[] = [];
-  globalThis.fetch = (async (url: any, init?: any) => {
-    const u = String(url);
-    if (u.startsWith(config.ollamaUrl))
-      return new Response(JSON.stringify(ollamaResponder()), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    cloudCalls.push(u);
-    throw new Error(`LEAK: unexpected non-local egress to ${u}`);
-  }) as typeof fetch;
-  return {
-    cloudCalls,
-    restore: () => {
-      globalThis.fetch = real;
-    },
-  };
-}
 
 describe("migration 017", () => {
   beforeAll(async () => {
@@ -241,22 +221,53 @@ describe("validateEdges provider routing", () => {
     config.mockOllama = false;
     config.classifyProvider = "bedrock";
     config.cloudMaxTier = 1;
-    const patched = patchFetch(() => ({
-      response: '{"verdict":"deny","entity_type":"person","reason":"bare first name"}',
-    }));
+    config.ollamaUrl = "http://127.0.0.1:9";
+    const originalFetch = globalThis.fetch;
+    const cloudCalls: string[] = [];
+    const cannedOllamaFetch = (async (url: any) => {
+      const u = String(url);
+      if (!u.startsWith(config.ollamaUrl)) {
+        cloudCalls.push(u);
+        throw new Error(`LEAK: unexpected non-local egress to ${u}`);
+      }
+      return new Response(
+        JSON.stringify({
+          response: '{"verdict":"deny","entity_type":"person","reason":"bare first name"}',
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
     try {
       const skip = await validateEdges();
       expect(skip.checked).toBe(0); // legacy: skipped, never sent
       config.providerRouteTier2 = "ollama";
-      const run = await validateEdges();
-      expect(run.checked).toBe(1);
-      expect(run.flagged).toBe(1);
-      expect(patched.cloudCalls).toEqual([]);
+      const beforeDefault = await testSql`select count(*)::int as n from edge_validations`;
+      const defaultPath = await validateEdges();
+      expect(defaultPath).toEqual({
+        checked: 0,
+        confirmed: 0,
+        denied: 0,
+        unsure: 0,
+        flagged: 0,
+        byRule: {},
+      });
+      const afterDefault = await testSql`select count(*)::int as n from edge_validations`;
+      expect(afterDefault[0]!.n).toBe(beforeDefault[0]!.n);
+      const run = await validateEdges(200, { fetchFn: cannedOllamaFetch });
+      expect(run).toEqual({
+        checked: 1,
+        confirmed: 0,
+        denied: 1,
+        unsure: 0,
+        flagged: 1,
+        byRule: { "mentions@0.8": { checked: 1, denied: 1 } },
+      });
+      expect(globalThis.fetch).toBe(originalFetch);
+      expect(cloudCalls).toEqual([]);
       const egress =
         await testSql`select count(*)::int as n from events where verb like 'egress:%'`;
       expect(egress[0]!.n).toBe(0);
     } finally {
-      patched.restore();
       config.mockOllama = true;
       config.cloudMaxTier = saved.cloudMaxTier;
       config.providerRouteTier2 = undefined;

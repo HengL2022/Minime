@@ -16,7 +16,9 @@ alter table decisions add constraint decisions_tier_check check (tier in (1,2));
 
 do $$
 begin
-  execute format('grant minime_app to %I', current_user);
+  if current_database() = 'minime' then
+    execute format('grant minime_app to %I', current_user);
+  end if;
 end $$;
 
 create table decision_transcripts (

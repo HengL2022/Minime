@@ -18,8 +18,9 @@ When `minime_state` is thin, or to add a short "Suggested focus", gather context
    - `"open decisions active projects current focus"`
    - `"due waiting active follow up"`
    - `"open questions blocked next steps"`
-4. If tier-2 gaps block relevant interaction/journal-derived context, take a
-   short audited `minime_unlock` (≤5 minutes), then re-read. Only when needed.
+4. If tier-2 gaps block relevant interaction/journal-derived context, tell the owner what is
+   locked and ask whether they want a short audited unlock. Call `minime_unlock` only after an
+   explicit yes, then re-read.
 
 ## Output
 
@@ -39,12 +40,10 @@ A brief, in this order:
 
 ## Answer rules
 
-- **Timestamps are UTC.** Every datetime Minime returns (calendar times, task
-  `due`, `created_at`, review timestamps, the trailing `Z` in ISO strings) is
-  UTC. Before stating any clock time or time-of-day word ("this morning",
-  "tonight"), convert to the owner's local timezone (resolve it from owner
-  context; do not hardcode). A `08:42Z` time is 16:42 for a UTC+8 owner. When
-  the owner's timezone is unknown, state times in UTC explicitly.
+- Pass the owner's current IANA `time_zone` on every read when it is known. Minime then renders
+  timestamps with that timezone's offset, so use the returned clock time directly and do not
+  convert it again. When the timezone is unknown and a timestamp is returned in UTC, label it as
+  UTC rather than guessing a local time-of-day.
 - No fluff, no motivational copy. Keep "Suggested focus" concrete and grounded —
   no generic advice.
 - Do not expose secret values or internal implementation details.

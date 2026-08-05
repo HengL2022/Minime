@@ -3,11 +3,10 @@
 
 import { beforeAll, describe, expect, test } from "bun:test";
 import evalQueries from "../fixtures/eval-queries.json";
-import { insertUnlock, upsertPage } from "../src/db/repo";
+import { insertUnlock, upsertPage, withActorDbSession } from "../src/db/repo";
 import { chunkMarkdown } from "../src/search/chunker";
 import { hybridSearch } from "../src/search/hybrid";
 import { indexParent } from "../src/search/index-parent";
-import { setNow } from "../src/util/clock";
 import { resetAndSeed, testSql as sql } from "./helpers";
 
 beforeAll(async () => {
@@ -80,32 +79,83 @@ describe("derived penalty", () => {
 
 describe("tier filter (I3)", () => {
   test("tier-2 journal content is invisible while locked, visible after unlock", async () => {
+    const actor = "test";
     const locked = await hybridSearch({
       query: "gratitude unprompted health work people",
       limit: 20,
+      actor,
     });
     expect(locked.every((h) => h.type !== "journal" && h.type !== "interaction")).toBe(true);
 
-    await insertUnlock(5, "test");
+    await withActorDbSession(actor, () => insertUnlock(5, actor));
     const unlocked = await hybridSearch({
       query: "gratitude unprompted health work people",
       limit: 20,
+      actor,
     });
     expect(unlocked.some((h) => h.type === "journal")).toBe(true);
 
-    // expire the unlock by moving the clock forward; tier 2 locks again
-    setNow(new Date(Date.now() + 10 * 60_000));
+    // Expiry is enforced by PostgreSQL's clock inside app_allowed_tier().
+    await sql`
+      update session_unlocks
+      set expires_at = clock_timestamp() - interval '1 second'
+      where granted_via = ${actor}`;
     const relocked = await hybridSearch({
       query: "gratitude unprompted health work people",
       limit: 20,
+      actor,
     });
     expect(relocked.every((h) => h.type !== "journal")).toBe(true);
-    setNow(null);
   });
 
   test("tier-0 content is never in the chunk index at all", async () => {
     const [r] = await sql`select count(*)::int as n from chunks where tier = 0`;
     expect(r!.n).toBe(0);
+  });
+
+  test("index and ordinary page write boundaries reject tier zero and invalid tiers before prose writes", async () => {
+    const parent = await upsertPage({
+      path: "test/tier-boundary-parent.md",
+      title: "Tier boundary parent",
+      bodyMd: "# Safe",
+      contentHash: "tier-boundary-safe",
+      tier: 1,
+    });
+    await expect(
+      indexParent("page", parent.id, "# Zero\n\nTIER0-INDEX-BOUNDARY-SENTINEL", "Zero", 0),
+    ).rejects.toThrow("TIER0_PROSE_BLOCKED");
+    await expect(
+      indexParent(
+        "page",
+        parent.id,
+        "# Invalid\n\nINVALID-INDEX-BOUNDARY-SENTINEL",
+        "Invalid",
+        1.5,
+      ),
+    ).rejects.toThrow("INVALID_CONTENT_TIER");
+    await expect(
+      upsertPage({
+        path: "test/tier-zero-upsert.md",
+        title: "Tier zero",
+        bodyMd: "TIER0-UPSERT-BOUNDARY-SENTINEL",
+        contentHash: "tier-zero-upsert",
+        tier: 0,
+      }),
+    ).rejects.toThrow("TIER0_PROSE_BLOCKED");
+    await expect(
+      upsertPage({
+        path: "test/tier-invalid-upsert.md",
+        title: "Tier invalid",
+        bodyMd: "INVALID-UPSERT-BOUNDARY-SENTINEL",
+        contentHash: "tier-invalid-upsert",
+        tier: 7,
+      }),
+    ).rejects.toThrow("INVALID_CONTENT_TIER");
+    const leaked = await sql`
+      select text from chunks
+      where text like '%INDEX-BOUNDARY-SENTINEL%'
+         or text like '%UPSERT-BOUNDARY-SENTINEL%'`;
+    expect(leaked).toHaveLength(0);
   });
 });
 

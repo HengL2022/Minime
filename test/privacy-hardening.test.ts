@@ -3,6 +3,15 @@
 // or review-queue payloads.
 
 import { beforeEach, describe, expect, test } from "bun:test";
+import {
+  chunkPairsSharingPerson,
+  chunksMissingEmbedding,
+  edgesAround,
+  entitiesNamedIn,
+  ftsCandidates,
+  listActivePages,
+  parentsNeedingExtraction,
+} from "../src/db/repo";
 import { toolByName } from "../src/mcp/tools";
 import { invokeTool } from "../src/mcp/tools/registry";
 import { resetDb, testSql as sql } from "./helpers";
@@ -277,5 +286,49 @@ describe("tier-2 privacy hardening", () => {
     const text = JSON.stringify(locked);
     expect(text).not.toContain(secretBranch);
     expect(text).not.toContain(String(branch!.id));
+  });
+
+  test("owner-role search, list, graph, extraction, embedding, and contradiction reads exclude tier-zero prose", async () => {
+    const sentinel = "OWNER-TIER0-PROSE-SENTINEL";
+    const [person] = await sql`
+      insert into people (canonical_name, tier) values ('Owner Zero Person', 0) returning id`;
+    const [page] = await sql`
+      insert into pages (path, title, body_md, content_hash, tier, status)
+      values ('owner-zero.md', 'Owner Zero', ${sentinel}, 'owner-zero', 0, 'active')
+      returning id`;
+    const chunks = await sql`
+      insert into chunks (parent_type, parent_id, ord, text, tier)
+      values
+        ('page', ${page!.id}, 0, ${`${sentinel} first`}, 0),
+        ('page', ${page!.id}, 1, ${`${sentinel} second`}, 0)
+      returning id`;
+    for (const chunk of chunks) {
+      await sql`
+        insert into edges
+          (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, tier, extracted_by)
+        values
+          ('page', ${page!.id}, 'mentions', 'person', ${person!.id},
+           'chunks', ${chunk.id}, 0, 'test:owner-tier-zero')`;
+    }
+
+    expect((await ftsCandidates(sentinel, null)).some((row) => row.text.includes(sentinel))).toBe(
+      false,
+    );
+    expect((await listActivePages()).some((row) => row.id === page!.id)).toBe(false);
+    expect((await entitiesNamedIn("Owner Zero Person")).some((row) => row.id === person!.id)).toBe(
+      false,
+    );
+    expect((await edgesAround("person", person!.id)).some((row) => row.tier === 0)).toBe(false);
+    expect((await chunksMissingEmbedding(100, 2)).some((row) => row.text.includes(sentinel))).toBe(
+      false,
+    );
+    expect((await parentsNeedingExtraction(100)).some((row) => row.text.includes(sentinel))).toBe(
+      false,
+    );
+    expect(
+      (await chunkPairsSharingPerson(100)).some(
+        (row) => row.a_text.includes(sentinel) || row.b_text.includes(sentinel),
+      ),
+    ).toBe(false);
   });
 });

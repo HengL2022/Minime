@@ -2,10 +2,12 @@
 // are usable — Ollama models listed for ollama-routed jobs (or mocked in CI), credentials
 // present for cloud-routed jobs (no cloud network calls during verify).
 
-import { closeDb, sql } from "../db/client";
+import { adminSql, closeDb } from "../db/client";
 import { classifyRouteForTier, validateProviderRoutes } from "../llm";
 import { hasAwsCredentials } from "../llm/bedrock";
+import { fetchOllamaTags } from "../llm/ollama-http";
 import { config } from "../util/config";
+import { ollamaPreflight } from "../util/ollama-url";
 
 let failed = false;
 const check = (name: string, ok: boolean, detail?: string) => {
@@ -13,10 +15,18 @@ const check = (name: string, ok: boolean, detail?: string) => {
   if (!ok) failed = true;
 };
 
+const ollama = ollamaPreflight(config.ollamaUrl);
+if (!ollama.ok) {
+  check("ollama url valid", false, ollama.rule);
+  await closeDb();
+  process.exit(1);
+}
+const ollamaEndpoint = ollama.endpoint;
+
 try {
-  const [r] = await sql`select 1 as ok`;
+  const [r] = await adminSql`select 1 as ok`;
   check("postgres reachable", r?.ok === 1, config.databaseUrl.replace(/:[^:@/]+@/, ":***@"));
-  const exts = (await sql`select extname from pg_extension`).map((e: any) => e.extname);
+  const exts = (await adminSql`select extname from pg_extension`).map((e: any) => e.extname);
   check("extension: vector", exts.includes("vector"));
   check("extension: pgcrypto", exts.includes("pgcrypto"));
 } catch (e) {
@@ -73,11 +83,7 @@ if (config.mockOllama) {
 
   if (needsOllama.size > 0) {
     try {
-      const res = await fetch(`${config.ollamaUrl}/api/tags`, {
-        signal: AbortSignal.timeout(3000),
-      });
-      const tags = (await res.json()) as { models: { name: string }[] };
-      const names = tags.models.map((m) => m.name);
+      const names = await fetchOllamaTags(ollamaEndpoint, { timeoutMs: 3_000 });
       const has = (model: string) => names.some((n) => n === model || n.startsWith(`${model}:`));
       for (const model of needsOllama) check(`ollama model: ${model}`, has(model));
     } catch (e) {

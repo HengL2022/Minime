@@ -1,6 +1,10 @@
 # Search uplift plan (2026-06-12, rev 2 — adds MinimeBench per gbrain-evals study)
 
-Shared contract for the search-quality uplift derived from the GBrain comparison and
+> **Historical implementation record.** The shipped search components and benchmark rationale
+> remain useful, but the model assignments, worktrees, orchestration, and gates are inactive.
+> Current search work follows `docs/DEVELOPMENT.md`.
+
+Original shared contract for the search-quality uplift derived from the GBrain comparison and
 the gbrain-evals benchmark methodology (github.com/garrytan/gbrain-evals). The
 orchestrator (main session, Fable 5) dispatches three Opus sub-agents in parallel
 with worktree isolation, then integrates, benchmarks, and verifies.

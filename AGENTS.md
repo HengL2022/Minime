@@ -33,6 +33,11 @@ git clone https://github.com/HengL2022/Minime minime && cd minime && bash script
 | `MINIME_PULL_MODELS` | both models | Override which Ollama models to pull |
 | `OLLAMA_URL` | http://localhost:11434 | Existing Ollama server to use |
 
+OLLAMA_URL is loopback-only. Minime validates it before every CLI/install/up action, connects
+directly without proxy environment or DNS for localhost, and never follows redirects.
+HTTPS/base-path endpoints are treated as existing local proxies; Minime will not launch a
+different plain ollama serve for them. Remote inference uses an explicit cloud provider.
+
 ## Reading the output
 
 One line per step: `[N/9] OK|SKIP|WARN|FAIL <step>: <detail>`. On failure the **last two
@@ -67,6 +72,11 @@ Everything works without Ollama except two features:
 | Classify model | Inbox captures queue for manual review instead of auto-filing | `ollama pull llama3.1:8b` |
 | Docker | Native Postgres instead: PG16 via PGDG on Linux, PG17 via Homebrew on macOS | nothing to do |
 
+OLLAMA_URL is loopback-only. Minime validates it before every CLI/install/up action, connects
+directly without proxy environment or DNS for localhost, and never follows redirects.
+HTTPS/base-path endpoints are treated as existing local proxies; Minime will not launch a
+different plain ollama serve for them. Remote inference uses an explicit cloud provider.
+
 ## Cloud LLM providers (optional, instead of Ollama)
 
 The three internal model jobs (embeddings, inbox classification, contradiction scan) default
@@ -79,7 +89,7 @@ to local Ollama but can route to cloud providers — set in `.env` and skip Olla
 | Anthropic | ✓ (`ANTHROPIC_MODEL`, default claude-opus-4-8) | — | `ANTHROPIC_API_KEY` |
 | OpenAI | ✓ (`OPENAI_MODEL`) | ✓ (text-embedding-3-* @ 768 dims) | `OPENAI_API_KEY` |
 | OpenRouter | ✓ (`OPENROUTER_MODEL`) | ✓ (`OPENROUTER_EMBED_MODEL`, default qwen/qwen3-embedding-8b @ 768 dims) | `OPENROUTER_API_KEY` |
-| Bedrock (IAM) | ✓ (`BEDROCK_MODEL`, required) | — | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` |
+| Bedrock (IAM) | ✓ (`BEDROCK_MODEL`, required) | — | resident: `BEDROCK_AWS_ACCESS_KEY_ID`, `BEDROCK_AWS_SECRET_ACCESS_KEY`, `BEDROCK_AWS_REGION` |
 
 **Switching the embedding provider/model invalidates existing vectors** (different models =
 different vector spaces). After changing `EMBED_PROVIDER`/`*_EMBED_MODEL`, run
@@ -101,8 +111,12 @@ unknown until classified) route as tier 2.
 
 ## Register the MCP server
 
-The server is stdio: `bun run <ABS_REPO_PATH>/src/cli.ts serve` (also starts the inbox
-watcher + nightly maintenance cron). Use **absolute paths** outside the repo.
+The server is stdio: `bun run <ABS_REPO_PATH>/src/cli.ts serve`. The command keeps owner-only
+maintenance in a supervisor and starts the inbox watcher plus MCP transport in a scrubbed
+app-role child; the MCP-reachable process does not receive the owner DB or backup credential.
+Use **absolute paths** outside the repo.
+Backup-only B2/AWS credentials stay in the supervisor. Bedrock uses separate `BEDROCK_AWS_*`
+variables and must be given a Bedrock-scoped IAM principal, never an S3-backup-capable key.
 
 - **Claude Code, inside the repo**: `.mcp.json` is auto-discovered — just start Claude Code
   in this directory.
@@ -111,6 +125,23 @@ watcher + nightly maintenance cron). Use **absolute paths** outside the repo.
   ```json
   { "command": "bun", "args": ["run", "<ABS_REPO_PATH>/src/cli.ts", "serve"] }
   ```
+
+The default archive is always the physical <ABS_REPO_PATH>/data, even when the MCP host
+launches Minime through a repository symlink or
+from another cwd. MINIME_DATA_DIR may be absolute or repository-relative. Persistent
+pg_dump/pre-image files are always staged in <ABS_REPO_PATH>/db-dump; restore extraction
+uses private temporary workspaces; cleanup is installed and attempted on every normal,
+failure, and signal exit and succeeds normally. If a persistent OS/trusted-rm refusal
+prevents deletion, the command fails with fixed content-free `cleanup_failed` and may leave
+only the validated private mode-0700 workspace/mode-0600 artifact for owner recovery.
+Service files are not guaranteed removed under that refusal; no path, URL, child output, or
+secret is printed. pg_dump credentials use short-lived mode-0600 libpq service files, never
+database URLs on argv or in PGDATABASE. Before replacement, backup retains a verified private
+`.previous` dump+manifest pair; the new dump and manifest are each fsynced and atomically renamed.
+Restore verifies the exact pair, rejects any non-local or wrongly named target before database
+commands, and checks the restored ledger/counts afterward. Output uses fixed content-free
+failures and never prints live or restore connection URLs.
+Changing MINIME_DATA_DIR does not move existing data.
 
 13 tools: `minime_search`, `minime_get_context`, `minime_state`, `minime_query_metric`,
 `minime_capture`, `minime_journal`, `minime_log_decision`, `minime_review_decision`,
@@ -153,14 +184,16 @@ Three sanctioned write paths during engineering, nothing else:
 
 ```
 bun run src/cli.ts serve            # resident: MCP + watcher + 3am dream job
-make verify                         # every milestone acceptance gate + retrieval-regression gate
+make verify-offline                 # fast offline development gate (mocked M0 + full tests/lint/typecheck)
+make verify                         # release/search gate: offline gate + retrieval regression
 bun run src/cli.ts audit --since 7d # what left the box, to which client
 bun run src/cli.ts import:calendar export.ics       # and the other importers
 ```
 
 Agent workflow prompts live in `agents/skills/*.md`; start with `agents/skills/RESOLVER.md`
-and let it route to the right skill. Project conventions for agents *working on the code* are in
-`CLAUDE.md`; the spec is `minime-build-plan.md`. After installing, point the owner at
+and let it route to the right skill. For agents *working on the code*, product/safety guardrails
+are in `CLAUDE.md` and the active single-owner workflow is in `docs/DEVELOPMENT.md`;
+`minime-build-plan.md` is the historical v1 foundation. After installing, point the owner at
 `docs/GUIDE.md` (the human-facing usage guide) and offer two interactive first-run steps —
 both run in *their* terminal, not yours: `make onboard` (the seeding interview: values,
 goals, people, projects) and `make setup` (cloud model providers / off-site backups).
@@ -174,18 +207,21 @@ write the answers through the MCP tools (`minime_capture` with clear phrasing,
 make update        # = bash scripts/update.sh [--skip-verify]
 ```
 
-Fast-forwards to origin, syncs deps, takes a restic `db-snap` first (when configured),
-applies pending migrations (forward-only, idempotent), runs the offline suite, and warns
+Runs a clean tracked-tree preflight, takes a restic `db-snap` with the checked-out code
+first (when configured), then fast-forwards to origin, syncs deps, applies pending
+migrations (forward-only, idempotent), runs the offline suite, and warns
 if a resident `serve` still runs old code. **Never touches `.env*`, `data/`, or backups**
 — they are gitignored, so `git pull` cannot write them. Same output contract as the
-installer: `[N/6] OK|SKIP|WARN|FAIL` lines, `ERROR:`/`FIX:` on failure, machine-parsable
+installer: `[N/7] OK|SKIP|WARN|FAIL` lines, `ERROR:`/`FIX:` on failure, machine-parsable
 `==== MINIME UPDATE SUMMARY ====` block (parse `status:` / `version:`). Exit codes:
-`0` ok, `2` bad flag, `30` git (dirty tree / diverged / no network), `11` deps,
+`0` ok, `1` pre-update backup, `2` bad flag, `30` git (dirty tree / diverged / no network), `11` deps,
 `50` migrate, `70` verify.
 
-Refuses to run over local modifications to tracked files (FIX: stash). Rollback:
-`git checkout <old-commit>`, and if a migration misbehaved, `make restore-pitr` from the
-pre-update snapshot — promotion stays a deliberate owner step.
+Refuses to run over local modifications to tracked files (FIX: stash). Existing installs that
+predate the restricted resident role run `make migrate && make provision-runtime-role` once before
+restarting `serve`. Rollback: `git checkout <old-commit>`, and if a migration misbehaved, use
+`make restore-pitr` to select the logical snapshot at or before the requested time (the command
+name is compatibility wording, not a WAL/PITR claim). Promotion stays a deliberate owner step.
 
 ## Uninstall / reset
 

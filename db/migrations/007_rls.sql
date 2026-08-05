@@ -3,6 +3,8 @@
 -- Tier-0 tables have no SELECT grant; the only aggregate path is the security definer fn below.
 
 do $$ begin
+  -- Fresh scratch/CI clusters still need the policy target to exist. This only creates a
+  -- credential-less NOLOGIN role when absent; scratch replay never changes an existing role.
   if not exists (select 1 from pg_roles where rolname = 'minime_app') then
     create role minime_app nologin;
   end if;
