@@ -1,8 +1,7 @@
 # W4 — Structural agent/live-data separation Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development or
-> superpowers:executing-plans. Parent contract: `improve-2026-07-program.md`. Independent of
-> W3/W1 (parallel-safe, wave 1).
+> **Historical implementation record.** W4 shipped. Its mandatory skills, wave rules, review
+> gates, and parent orchestration are inactive; current work follows `docs/DEVELOPMENT.md`.
 
 **Goal:** Engineering sessions can no longer write the live DB by accident: a SELECT-only
 `minime_engineer_ro` login role becomes the default engineering DSN, and every sanctioned live

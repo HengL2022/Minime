@@ -5,17 +5,25 @@
 //      (the same Regression[] that drives the runner's non-zero exit).
 
 import { beforeAll, describe, expect, test } from "bun:test";
-import { readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  aggregateReports,
+  assertCleanWorkingTree,
+  parseEvalArgs,
+  parseWorkerResult,
+} from "../scripts/eval-search";
 import { upsertPage } from "../src/db/repo";
 import {
+  type AreaReport,
   type BaselineLine,
   type Measurement,
   buildScorecard,
   diffBaseline,
   hitAtK,
+  loadBaseline,
   loadQrels,
   missingBaselineMeasurements,
   mrr,
@@ -84,6 +92,75 @@ describe("seeded shuffle is deterministic and a permutation", () => {
     expect(a).not.toEqual(c);
     expect(a.slice().sort((x, y) => x - y)).toEqual(items); // still a permutation
     expect(items[0]).toBe(0); // input untouched (pure)
+  });
+});
+
+describe("read-only evaluator coordinator contracts", () => {
+  const report = (area: string, seed: number, hit3: number, corpus = "fictional"): AreaReport => ({
+    area,
+    corpus,
+    seed,
+    n: 1,
+    metrics: { n: 1, hit1: hit3, hit3, hit5: hit3, mrr: hit3, ndcg5: hit3, recall3: hit3 },
+    byBucket: {},
+    latencyP50: seed,
+    latencyP95: seed + 1,
+    accuracy: hit3,
+    perQuery: [],
+    violations: [],
+  });
+
+  test("mode and repeat validation fails closed", () => {
+    expect(() => parseEvalArgs(["--mode", "unknown"])).toThrow(/eval_mode_invalid/);
+    expect(() => parseEvalArgs(["--mode", "mock", "--repeats", "2"])).toThrow(
+      /eval_repeats_invalid/,
+    );
+    expect(() => parseEvalArgs(["--mode", "live", "--repeats", "2"])).toThrow(
+      /eval_repeats_invalid/,
+    );
+    expect(parseEvalArgs(["--mode", "live", "--round", "live-r1"])).toMatchObject({
+      mode: "live",
+      repeats: 3,
+    });
+  });
+
+  test("aggregation is area-keyed and median-stable even when worker results are unsorted", () => {
+    const runs = [
+      [report("zeta", 2654435771, 0.2), report("alpha", 2654435771, 1)],
+      [report("alpha", 2654435769, 0.4), report("zeta", 2654435769, 0.8)],
+      [report("zeta", 2654435770, 0.6), report("alpha", 2654435770, 0.6)],
+    ];
+    const median = aggregateReports(runs);
+    expect(median.map((r) => r.area)).toEqual(["alpha", "zeta"]);
+    expect(median.map((r) => r.seed)).toEqual([2654435770, 2654435770]);
+    expect(median.map((r) => r.metrics.hit3)).toEqual([0.6, 0.6]);
+  });
+
+  test("worker result parsing requires one corpus and an explicit seed", () => {
+    const valid = JSON.stringify({
+      protocol: 1,
+      kind: "minime-eval-result",
+      mode: "mock",
+      round: "mock",
+      repeat: 0,
+      corpus: "persona-en",
+      seed: 2654435769,
+      reports: [report("retrieval-en", 2654435769, 1, "persona-en")],
+    });
+    expect(parseWorkerResult(valid).corpus).toBe("persona-en");
+    expect(() => parseWorkerResult(valid.replace('"seed":2654435769', '"seed":null'))).toThrow(
+      /eval_worker_result_invalid/,
+    );
+    expect(() =>
+      parseWorkerResult(valid.replace('"reports":[', '"reports":[{"area":"other"},')),
+    ).toThrow(/eval_worker_result_invalid/);
+  });
+
+  test("scorecard publication refuses a dirty working tree", () => {
+    expect(() => assertCleanWorkingTree(() => " M src/search/hybrid.ts\n")).toThrow(
+      /eval_working_tree_dirty/,
+    );
+    expect(() => assertCleanWorkingTree(() => "")).not.toThrow();
   });
 });
 
@@ -246,6 +323,81 @@ describe("baseline regression detection", () => {
     const lines = text.trim().split("\n");
     expect(lines.length).toBe(baseline.size);
     expect(JSON.parse(lines[0]!)).toHaveProperty("area");
+  });
+
+  test("missing, empty, unreadable, and malformed baselines fail closed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "minimebench-baseline-validation-"));
+    const missing = join(dir, "missing.ndjson");
+    expect(() => loadBaseline(missing)).toThrow(/baseline.*missing/i);
+    expect(existsSync(missing)).toBe(false);
+
+    const empty = join(dir, "empty.ndjson");
+    writeFileSync(empty, "\n");
+    expect(() => loadBaseline(empty)).toThrow(/baseline.*empty/i);
+
+    const malformed = join(dir, "malformed.ndjson");
+    writeFileSync(malformed, '{"area":"retrieval-en"}\n');
+    expect(() => loadBaseline(malformed)).toThrow(/baseline.*malformed/i);
+
+    const unreadable = join(dir, "unreadable.ndjson");
+    mkdirSync(unreadable);
+    expect(() => loadBaseline(unreadable)).toThrow(/baseline.*unreadable/i);
+  });
+
+  test("published scorecards retain evaluated metadata and every run result", () => {
+    const report = (seed: number, hit3: number): AreaReport => ({
+      area: "retrieval-en",
+      corpus: "persona-en",
+      seed,
+      n: 1,
+      metrics: { n: 1, hit1: hit3, hit3, hit5: 1, mrr: hit3, ndcg5: hit3, recall3: hit3 },
+      byBucket: {},
+      latencyP50: seed,
+      latencyP95: seed + 1,
+      accuracy: hit3,
+      perQuery: [
+        {
+          id: `q-${seed}`,
+          query: "q",
+          rank: hit3 === 1 ? 0 : -1,
+          hit1: hit3 === 1,
+          hit3: hit3 === 1,
+          hit5: hit3 === 1,
+          reciprocalRank: hit3,
+          ndcg5: hit3,
+          latencyMs: seed,
+          topTitle: hit3 === 1 ? "answer" : null,
+          ok: hit3 === 1,
+        },
+      ],
+      violations: [],
+    });
+    const md = buildScorecard({
+      date: "2026-08-05",
+      round: "release-v1",
+      mode: "live",
+      baselineExisted: true,
+      regressions: [],
+      reports: [report(12, 0.5)],
+      runs: [[report(11, 1)], [report(12, 0.5)]],
+      evaluatedCommit: "abc1234",
+      datasetHash: "sha256:deadbeef",
+      configuration: {
+        provider: "openrouter",
+        model: "qwen/qwen3-embedding-8b",
+        reranker: { enabled: true, model: "bge-reranker-v2-m3", topIn: 20 },
+      },
+    });
+
+    expect(md).toContain("Evaluated commit: `abc1234`");
+    expect(md).toContain("Dataset hash: `sha256:deadbeef`");
+    expect(md).toContain("Provider: `openrouter`");
+    expect(md).toContain("Model: `qwen/qwen3-embedding-8b`");
+    expect(md).toContain("Reranker: enabled (bge-reranker-v2-m3, top-in 20)");
+    expect(md).toContain("Run 1 (seed 11)");
+    expect(md).toContain("Run 2 (seed 12)");
+    expect(md).toContain("50.0%");
+    expect(md).toContain("100.0%");
   });
 
   test("scorecard publishes regressions, never headline-only", () => {

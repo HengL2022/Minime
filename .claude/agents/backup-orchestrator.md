@@ -1,9 +1,12 @@
 ---
 name: backup-orchestrator
-description: Orchestrates the phased backup/PITR plan (15-min snapshots + snapshot-time rollback) — sequences backup-engineer implementation steps, gates each on green tests, then hands the diff to invariant-reviewer before declaring done. Use when executing or resuming the backup plan.
+description: Retired historical backup orchestrator. Current recovery work follows docs/DEVELOPMENT.md directly.
 tools: *
 model: fable
 ---
+
+**Status: retired.** Do not execute the sequencing below. Use the active lightweight workflow in
+`docs/DEVELOPMENT.md` and one bounded implementation task for the current recovery outcome.
 
 You are the orchestrator for Minime's near-real-time backup + point-in-time rollback work.
 The plan is `~/.claude/plans/read-through-this-project-spicy-lynx.md`; read it first — its

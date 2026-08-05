@@ -1,7 +1,5 @@
 # Retrieval-regression gate: the offline MinimeBench (deterministic mock embeddings) runs
 # against the committed baseline floors in fixtures/qrels/baseline.ndjson on every push.
-# A drop beyond tolerance fails the build — new features must not quietly make retrieval
-# worse. Fully offline (I1): no model provider, no network beyond the local pg service.
 name: eval
 on:
   push:
@@ -15,12 +13,12 @@ jobs:
       postgres:
         image: pgvector/pgvector:pg16
         env:
-          POSTGRES_USER: minime
-          POSTGRES_PASSWORD: minime
-          POSTGRES_DB: minime
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U minime" --health-interval 5s
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
           --health-timeout 5s --health-retries 10
     env:
       PGHOST: localhost
@@ -32,20 +30,28 @@ jobs:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
-      - name: create test + eval scratch DBs
+      - name: bootstrap Minime databases as service administrator
+        env:
+          PGUSER: postgres
+          PGPASSWORD: postgres
         run: |
-          createdb minime_test || true
-          createdb minime_eval || true
-      - name: full offline suite
-        run: bun test
-      - name: Subsystem inventory gate
-        run: bun run scripts/check-subsystems.ts
-      - name: retrieval-regression gate (MinimeBench vs committed floors)
-        run: make eval-search
-      - name: upload scorecard
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: minimebench-scorecard
-          path: docs/benchmarks/*-mock-minimebench.md
-          if-no-files-found: ignore
+          psql -X -v ON_ERROR_STOP=1 --dbname=postgres \
+            -c "create role minime login password 'minime' nosuperuser createdb createrole"
+          createdb --owner=minime minime
+          createdb --owner=minime minime_test
+          psql -X -v ON_ERROR_STOP=1 --dbname=minime \
+            -c "create extension if not exists vector" \
+            -c "create extension if not exists pgcrypto"
+          psql -X -v ON_ERROR_STOP=1 --dbname=minime_test \
+            -c "create extension if not exists vector" \
+            -c "create extension if not exists pgcrypto"
+      - name: assert child database role posture
+        run: |
+          test "$(psql -X -qAt -v ON_ERROR_STOP=1 --dbname=postgres \
+            -c "select current_user")" = "minime"
+          test "$(psql -X -qAt -v ON_ERROR_STOP=1 --dbname=postgres \
+            -c "select rolsuper, rolcreatedb, rolcreaterole from pg_roles where rolname = current_user")" = "f|t|t"
+      - name: establish production schema and global runtime role
+        run: bun run src/cli.ts migrate --context direct
+      - name: authoritative offline gate
+        run: make verify

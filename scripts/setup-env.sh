@@ -78,10 +78,10 @@ if [ "$REPLY" = "2" ]; then
     *) set_kv CLASSIFY_PROVIDER bedrock
        ask "BEDROCK_MODEL (see: aws bedrock list-inference-profiles)" "us.anthropic.claude-opus-4-8"
        set_kv BEDROCK_MODEL "$REPLY"
-       ask "AWS_REGION" "${AWS_REGION:-us-east-1}"; set_kv AWS_REGION "$REPLY"
-       echo "AWS credentials: leave empty to use ~/.aws (recommended)"
-       ask_secret "AWS_ACCESS_KEY_ID"; [ -n "$REPLY" ] && set_kv AWS_ACCESS_KEY_ID "$REPLY"
-       ask_secret "AWS_SECRET_ACCESS_KEY"; [ -n "$REPLY" ] && set_kv AWS_SECRET_ACCESS_KEY "$REPLY" ;;
+       ask "BEDROCK_AWS_REGION" "${BEDROCK_AWS_REGION:-${AWS_REGION:-us-east-1}}"; set_kv BEDROCK_AWS_REGION "$REPLY"
+       echo "Use a Bedrock-only IAM principal; resident serve will not inherit ~/.aws or S3 backup keys."
+       ask_secret "BEDROCK_AWS_ACCESS_KEY_ID"; [ -n "$REPLY" ] && set_kv BEDROCK_AWS_ACCESS_KEY_ID "$REPLY"
+       ask_secret "BEDROCK_AWS_SECRET_ACCESS_KEY"; [ -n "$REPLY" ] && set_kv BEDROCK_AWS_SECRET_ACCESS_KEY "$REPLY" ;;
   esac
   echo
   echo "Embedding provider (768 dims pinned): 1) openrouter (qwen3-embedding-8b)  2) openai  3) keep local ollama"

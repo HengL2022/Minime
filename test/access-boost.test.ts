@@ -5,45 +5,76 @@
 
 import { beforeAll, describe, expect, test } from "bun:test";
 import { accessCounts, logEvent, upsertPage } from "../src/db/repo";
+import { eventAuditSink } from "../src/mcp/audit";
 import { hybridSearch } from "../src/search/hybrid";
 import { indexParent } from "../src/search/index-parent";
 import { resetDb, testSql as sql } from "./helpers";
+import { activeTestDatabaseName } from "./setup";
 
 const ACTOR = "agent:test";
 
 async function drillInto(id: string, times: number): Promise<void> {
   for (let i = 0; i < times; i++) {
-    await logEvent({
-      actor: ACTOR,
-      verb: "tool:minime_get_context",
-      payload: { params_hash: "0".repeat(16), returned_ids: [id], returned_count: 1 },
+    const result = await eventAuditSink.result(ACTOR, "minime_get_context", "0".repeat(16), {
+      returnedIds: [id],
+      returnedCount: 1,
+      delivery: "transport",
+    });
+    await eventAuditSink.disposition(ACTOR, "minime_get_context", result.eventId, {
+      status: "released",
     });
   }
 }
 
 beforeAll(async () => {
+  const [current] = await sql`select current_database() as name`;
+  expect(current!.name).toMatch(/^minime_test_[a-z0-9_]+$/);
+  expect(current!.name).not.toBe("minime_test");
+  expect(current!.name).toBe(activeTestDatabaseName());
   await resetDb();
 });
 
 describe("accessCounts", () => {
-  test("counts get_context returns per id inside the window", async () => {
-    const a = crypto.randomUUID();
-    const b = crypto.randomUUID();
-    await drillInto(a, 3);
-    await drillInto(b, 1);
-    const counts = await accessCounts([a, b, crypto.randomUUID()], 90);
-    expect(counts.get(a)).toBe(3);
-    expect(counts.get(b)).toBe(1);
-    expect(counts.size).toBe(2); // never-drilled id is simply absent
-  });
-
-  test("only the primary returned id counts — dossier fan-out rows do not", async () => {
-    const primary = crypto.randomUUID();
-    const related = crypto.randomUUID();
+  test("historical exact results lacking delivery do not count", async () => {
+    const id = crypto.randomUUID();
     await logEvent({
       actor: ACTOR,
       verb: "tool:minime_get_context",
-      payload: { returned_ids: [primary, related], returned_count: 2 },
+      payload: { returned_ids: [id], returned_count: 1 },
+    });
+    expect((await accessCounts([id], 90)).size).toBe(0);
+  });
+
+  test("direct exact results do not count as transport access", async () => {
+    const id = crypto.randomUUID();
+    await logEvent({
+      actor: ACTOR,
+      verb: "tool:minime_get_context",
+      payload: { delivery: "direct", returned_ids: [id], returned_count: 1 },
+    });
+    expect((await accessCounts([id], 90)).size).toBe(0);
+  });
+
+  test("transport results without a disposition do not count", async () => {
+    const id = crypto.randomUUID();
+    await logEvent({
+      actor: ACTOR,
+      verb: "tool:minime_get_context",
+      payload: { delivery: "transport", returned_ids: [id], returned_count: 1 },
+    });
+    expect((await accessCounts([id], 90)).size).toBe(0);
+  });
+
+  test("only the primary returned id of a released result counts", async () => {
+    const primary = crypto.randomUUID();
+    const related = crypto.randomUUID();
+    const result = await eventAuditSink.result(ACTOR, "minime_get_context", "1".repeat(16), {
+      returnedIds: [primary, related],
+      returnedCount: 2,
+      delivery: "transport",
+    });
+    await eventAuditSink.disposition(ACTOR, "minime_get_context", result.eventId, {
+      status: "released",
     });
     const counts = await accessCounts([primary, related], 90);
     expect(counts.get(primary)).toBe(1);
@@ -60,12 +91,63 @@ describe("accessCounts", () => {
     expect((await accessCounts([id], 90)).size).toBe(0);
   });
 
+  test("attempt and disposition verbs never contribute their own IDs", async () => {
+    const attemptId = crypto.randomUUID();
+    const dispositionId = crypto.randomUUID();
+    await logEvent({
+      actor: ACTOR,
+      verb: "tool:minime_get_context:attempt",
+      payload: { returned_ids: [attemptId], returned_count: 1 },
+    });
+    await logEvent({
+      actor: ACTOR,
+      verb: "tool:minime_get_context:disposition",
+      payload: { result_event_id: dispositionId, returned_ids: [dispositionId], returned_count: 1 },
+    });
+    const counts = await accessCounts([attemptId, dispositionId], 90);
+    expect(counts.size).toBe(0);
+  });
+
+  test("suppressed and send-uncertain transport results do not count", async () => {
+    const ids = [crypto.randomUUID(), crypto.randomUUID()];
+    for (const [id, status] of ids.map(
+      (id, index) => [id, index === 0 ? "suppressed" : "send_uncertain"] as const,
+    )) {
+      const result = await eventAuditSink.result(ACTOR, "minime_get_context", "2".repeat(16), {
+        returnedIds: [id],
+        returnedCount: 1,
+        delivery: "transport",
+      });
+      await eventAuditSink.disposition(ACTOR, "minime_get_context", result.eventId, {
+        status,
+      });
+    }
+    expect((await accessCounts(ids, 90)).size).toBe(0);
+  });
+
+  test("released transport results count once and actor filters remain unchanged", async () => {
+    const released = crypto.randomUUID();
+    await drillInto(released, 1);
+    await logEvent({
+      actor: "agent:other",
+      verb: "tool:minime_get_context",
+      payload: { delivery: "transport", returned_ids: [released], returned_count: 1 },
+    });
+    const counts = await accessCounts([released], 90, ACTOR);
+    expect(counts.get(released)).toBe(1);
+    expect((await accessCounts([released], 90, "agent:other")).size).toBe(0);
+  });
+
   test("events outside the window are excluded", async () => {
     const id = crypto.randomUUID();
     // raw insert (test scaffolding) so the event can sit beyond the 90-day window
-    await sql`insert into events (at, actor, verb, payload)
+    const [historical] = await sql`insert into events (at, actor, verb, payload)
               values (now() - interval '120 days', ${ACTOR}, 'tool:minime_get_context',
-                      ${sql.json({ returned_ids: [id] })})`;
+                      ${sql.json({ delivery: "transport", returned_ids: [id] })})
+              returning id::text as id`;
+    await eventAuditSink.disposition(ACTOR, "minime_get_context", historical!.id, {
+      status: "released",
+    });
     expect((await accessCounts([id], 90)).size).toBe(0);
     expect((await accessCounts([id], 365)).get(id)).toBe(1);
   });

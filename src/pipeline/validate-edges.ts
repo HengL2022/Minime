@@ -11,6 +11,7 @@ import {
   insertReviewItem,
   reviewItemExists,
 } from "../db/repo";
+import type { FetchFn } from "../llm/types";
 import { config } from "../util/config";
 import { orgCue } from "./classify";
 
@@ -34,6 +35,19 @@ type Verdict = {
   entity_type: "person" | "org" | "neither";
   reason: string;
 };
+
+export interface ValidateEdgesOptions {
+  fetchFn?: FetchFn;
+}
+
+export interface ValidateEdgesStats {
+  checked: number;
+  confirmed: number;
+  denied: number;
+  unsure: number;
+  flagged: number;
+  byRule: Record<string, { checked: number; denied: number }>;
+}
 
 /** Deterministic offline verdicts (CI): re-detects the three historical archetypes from the
  * edge shape + anchor text. The live model replaces this under real runs; the archetypes are
@@ -79,10 +93,11 @@ async function modelVerdict(
   e: EdgeToValidate,
   anchor: string,
   tier: 1 | 2,
+  fetchFn?: FetchFn,
 ): Promise<Verdict | null> {
   try {
     const { classifyProviderForTier } = await import("../llm");
-    const raw = await classifyProviderForTier(tier).completeJson(prompt(e, anchor));
+    const raw = await classifyProviderForTier(tier, fetchFn).completeJson(prompt(e, anchor));
     const p = JSON.parse(raw);
     const verdict = ["confirm", "deny", "unsure"].includes(p.verdict) ? p.verdict : "unsure";
     const entity_type = ["person", "org", "neither"].includes(p.entity_type)
@@ -117,7 +132,10 @@ async function flagSuspect(
   return true;
 }
 
-export async function validateEdges(budget = 200) {
+export async function validateEdges(
+  budget = 200,
+  options: ValidateEdgesOptions = {},
+): Promise<ValidateEdgesStats> {
   const { classifyIsCloudForTier } = await import("../llm");
   const edges = await edgesForValidation(RECENT_HOURS, budget);
   const out = {
@@ -137,7 +155,9 @@ export async function validateEdges(budget = 200) {
     const tier = (Math.max(e.tier, ...anchors.map((a) => a.tier), 1) >= 2 ? 2 : 1) as 1 | 2;
     // legacy ceiling semantics (only reachable with no route set): skip rather than send
     if (!config.mockOllama && classifyIsCloudForTier(tier) && tier > config.cloudMaxTier) continue;
-    const v = config.mockOllama ? heuristicVerdict(e, anchor) : await modelVerdict(e, anchor, tier);
+    const v = config.mockOllama
+      ? heuristicVerdict(e, anchor)
+      : await modelVerdict(e, anchor, tier, options.fetchFn);
     if (!v) continue;
     const ruleKey = `${e.rel}@${e.confidence}`;
     const model = config.mockOllama ? "mock" : (await import("../llm")).classifyRouteForTier(tier);

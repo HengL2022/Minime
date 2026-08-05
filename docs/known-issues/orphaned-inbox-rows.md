@@ -13,7 +13,7 @@ re-scanned on every `serve` start.
 
 The rows' `raw_path` pointed at files that do not exist on this host:
 
-- 20 rows: `/Users/hlbot/.hermes/data/inbox/...` (macOS paths — captured on a
+- 20 rows: `/fictional-owner/.hermes/data/inbox/...` (macOS paths — captured on a
   different machine, user `hlbot`, then the Postgres DB was synced to this Linux box)
 - 1 row: `/home/ubuntu/.hermes/data/inbox/...` (the old MINIME_DATA_DIR mismatch,
   file already gone)

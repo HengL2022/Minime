@@ -1,6 +1,6 @@
 ---
 name: log-decision
-description: Record a spec deviation, ambiguity resolution, or technical decision in DECISIONS.md (required by spec §0.3 for every deviation from minime-build-plan.md).
+description: Record a durable Minime contract decision in DECISIONS.md when it changes an invariant, privacy/egress rule, schema meaning, public interface, dependency, or recovery contract.
 ---
 
 Append an entry to `DECISIONS.md` at the repo root. Never rewrite or delete existing entries —
@@ -11,15 +11,18 @@ Entry format (newest at the bottom):
 ```markdown
 ## YYYY-MM-DD — <short title>
 
-- **Context:** what part of the spec / which milestone this touches (cite the § if applicable)
+- **Context:** what durable contract or behavior this touches
 - **Decision:** what was decided or how the ambiguity was resolved
 - **Why:** reasoning, alternatives considered
-- **Approved by:** human / agent-proposed (pending human review)
+- **Approved by:** owner request / agent within the requested implementation scope
 ```
 
 Rules:
 - Use today's real date.
-- If the decision deviates from the pinned tech stack (spec §4) or changes search weights
-  (spec §9), say so explicitly in **Context**.
-- If the human hasn't confirmed the decision yet, mark it "agent-proposed (pending human review)"
-  and tell the user it needs their sign-off.
+- Do not log routine bug fixes, test details, branch mechanics, reviewer findings, implementation
+  choices, or plan adjustments. Put those in the commit or task handoff.
+- If the decision changes the pinned stack, privacy/egress, live-data semantics, or recovery
+  contract, say so explicitly in **Context** and follow the owner boundary in
+  `docs/DEVELOPMENT.md`.
+- Do not create a pending entry as a substitute for progress. Ask only when the decision itself
+  crosses a high-impact boundary; otherwise choose a conservative reversible default and finish.

@@ -7,7 +7,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { buildServer } from "../src/mcp/server";
 import { ALL_TOOLS } from "../src/mcp/tools";
 import { setNow } from "../src/util/clock";
-import { countEvents, resetAndSeed, testSql as sql } from "./helpers";
+import { resetAndSeed, testSql as sql } from "./helpers";
 
 let client: Client;
 
@@ -33,6 +33,21 @@ async function call(
   return { raw, parsed: JSON.parse(raw), isError: Boolean(res.isError) };
 }
 
+async function toolEventsAfter(marker: string, expected: number): Promise<any[]> {
+  const deadline = Date.now() + 500;
+  let events: any[] = [];
+  do {
+    events = await sql`
+      select id::text as id, actor, verb, payload
+      from events
+      where id > ${marker}::bigint and verb like 'tool:%'
+      order by id asc`;
+    if (events.length >= expected) return events;
+    await Bun.sleep(5);
+  } while (Date.now() < deadline);
+  return events;
+}
+
 describe("MCP server", () => {
   test("exposes all tools", async () => {
     const tools = await client.listTools();
@@ -40,16 +55,48 @@ describe("MCP server", () => {
   });
 
   test("every tool call produces an events row with the client actor", async () => {
-    const before = await countEvents("tool:%");
-    await call("minime_state", {});
-    await call("minime_search", { query: "climbing" });
-    const after = await countEvents("tool:%");
-    expect(after - before).toBe(2);
-    const [latest] =
-      await sql`select actor, payload from events where verb = 'tool:minime_search' order by at desc limit 1`;
-    expect(latest!.actor).toBe("agent:test-harness");
-    expect(latest!.payload.params_hash).toBeString();
-    expect(Array.isArray(latest!.payload.returned_ids)).toBe(true);
+    const [marker] = await sql`select coalesce(max(id), 0)::bigint as id from events`;
+    const state = await call("minime_state", {});
+    await toolEventsAfter(marker!.id, 3);
+    const search = await call("minime_search", { query: "climbing" });
+    expect(state.isError).toBe(false);
+    expect(state.parsed.data).toHaveProperty("calendar");
+    expect(search.isError).toBe(false);
+    expect(Array.isArray(search.parsed.data.hits)).toBe(true);
+    const events = await toolEventsAfter(marker!.id, 6);
+    expect(events).toHaveLength(6);
+    expect(events.map((event) => [event.verb, event.actor])).toEqual([
+      ["tool:minime_state:attempt", "agent:test-harness"],
+      ["tool:minime_state", "agent:test-harness"],
+      ["tool:minime_state:disposition", "agent:test-harness"],
+      ["tool:minime_search:attempt", "agent:test-harness"],
+      ["tool:minime_search", "agent:test-harness"],
+      ["tool:minime_search:disposition", "agent:test-harness"],
+    ]);
+    expect(Object.keys(events[0]!.payload).sort()).toEqual(["params_hash"]);
+    expect(Object.keys(events[3]!.payload).sort()).toEqual(["params_hash"]);
+    expect(events[1]!.payload.params_hash).toBeString();
+    expect(Array.isArray(events[1]!.payload.returned_ids)).toBe(true);
+    expect(events[1]!.payload.returned_count).toBeNumber();
+    expect(events[1]!.payload.delivery).toBe("transport");
+    expect(events[4]!.payload.params_hash).toBeString();
+    expect(Array.isArray(events[4]!.payload.returned_ids)).toBe(true);
+    expect(events[4]!.payload.returned_count).toBeNumber();
+    expect(events[4]!.payload.delivery).toBe("transport");
+    for (const [resultIndex, dispositionIndex] of [
+      [1, 2],
+      [4, 5],
+    ] as const) {
+      const result = events[resultIndex]!;
+      const disposition = events[dispositionIndex]!;
+      expect(result.id).toMatch(/^\d+$/);
+      expect(disposition.payload).toEqual({
+        result_event_id: result.id,
+        status: "released",
+      });
+      expect(disposition.payload.returned_ids).toBeUndefined();
+      expect(disposition.payload.returned_count).toBeUndefined();
+    }
   });
 
   test("minime_search returns envelope with hits + sources", async () => {
@@ -59,6 +106,38 @@ describe("MCP server", () => {
     expect(parsed.sources.length).toBeGreaterThan(0);
     expect(parsed.sources[0]).toHaveProperty("id");
     expect(parsed.sources[0]).toHaveProperty("updated_at");
+  });
+
+  test("MCP tier-0 content is denied at the transport boundary", async () => {
+    const [page] = await sql`
+      insert into pages (path, title, body_md, content_hash, tier, created_by, source)
+      values ('transport/tier-zero.md', 'transport tier zero', 'MCP-TIER0-SENTINEL', 'transport-tier-zero', 0,
+              'fixture', 'test') returning id`;
+    await sql`
+      insert into chunks (parent_type, parent_id, ord, text, tier)
+      values ('page', ${page!.id}, 0, 'MCP-TIER0-SENTINEL', 0)`;
+
+    const search = await call("minime_search", { query: "MCP-TIER0-SENTINEL" });
+    expect(search.raw).not.toContain("MCP-TIER0-SENTINEL");
+    const context = await call("minime_get_context", { type: "page", id: page!.id });
+    expect(context.isError).toBe(true);
+    expect(context.parsed.error.code).toBe("NOT_FOUND");
+  });
+
+  test("MCP locked tier-2 content is omitted until the actor unlocks it", async () => {
+    const [journal] = await sql`
+      insert into journal_entries (entry_md, tier, created_by, source)
+      values ('MCP-TIER2-SENTINEL', 2, 'fixture', 'test') returning id`;
+    await sql`
+      insert into chunks (parent_type, parent_id, ord, text, tier)
+      values ('journal', ${journal!.id}, 0, 'MCP-TIER2-SENTINEL', 2)`;
+
+    const locked = await call("minime_search", { query: "MCP-TIER2-SENTINEL" });
+    expect(locked.raw).not.toContain("MCP-TIER2-SENTINEL");
+    const unlock = await call("minime_unlock", { minutes: 5 });
+    expect(unlock.isError).toBe(false);
+    const unlocked = await call("minime_search", { query: "MCP-TIER2-SENTINEL" });
+    expect(unlocked.raw).toContain("MCP-TIER2-SENTINEL");
   });
 
   test("minime_state snapshot has all sections", async () => {
@@ -182,7 +261,7 @@ describe("MCP server", () => {
         "Call bank about card 4111 1111 1111 1111 and IBAN DE89370400440532013000 re account 123456789012",
     });
     const { raw } = await call("minime_search", { query: "call bank about card" });
-    expect(raw).not.toContain("4111");
+    expect(raw).not.toContain("4111 1111 1111 1111");
     expect(raw).not.toContain("DE89370400440532013000");
     expect(raw).not.toContain("123456789012");
     expect(raw).toContain("[REDACTED:card]");

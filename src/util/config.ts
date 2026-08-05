@@ -8,9 +8,100 @@
 // overrides a var the caller already set, and is skipped under tests so the suite stays
 // hermetic (the dev repo has its own .env we must not leak into bun test).
 
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { lstat, mkdir, realpath } from "node:fs/promises";
+import { dirname, isAbsolute, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+export const REPO_ROOT = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), "..", ".."));
+export const DB_DUMP_DIR = resolve(REPO_ROOT, "db-dump");
+
+export function resolveDataDir(value: string | undefined): string {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) return resolve(REPO_ROOT, "data");
+  return isAbsolute(trimmed) ? normalize(trimmed) : resolve(REPO_ROOT, trimmed);
+}
+
+export type PrivateDumpDirRule =
+  | "symlink"
+  | "not_directory"
+  | "not_canonical"
+  | "mode"
+  | "filesystem";
+
+export class PrivateDumpDirError extends Error {
+  constructor(readonly rule: PrivateDumpDirRule) {
+    super(`private dump root rejected (${rule})`);
+  }
+}
+
+export async function ensurePrivateDumpDir(path: string): Promise<void> {
+  const intended = resolve(path);
+  const parent = dirname(intended);
+  let component = parent;
+  while (true) {
+    let parentStat: Awaited<ReturnType<typeof lstat>>;
+    try {
+      parentStat = await lstat(component);
+    } catch {
+      throw new PrivateDumpDirError("filesystem");
+    }
+    if (parentStat.isSymbolicLink()) throw new PrivateDumpDirError("symlink");
+    if (!parentStat.isDirectory()) throw new PrivateDumpDirError("not_directory");
+    const next = dirname(component);
+    if (next === component) break;
+    component = next;
+  }
+  try {
+    if ((await realpath(parent)) !== parent) throw new PrivateDumpDirError("not_canonical");
+  } catch (error) {
+    throw error instanceof PrivateDumpDirError ? error : new PrivateDumpDirError("filesystem");
+  }
+
+  let initial: Awaited<ReturnType<typeof lstat>>;
+  try {
+    initial = await lstat(intended);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+      throw new PrivateDumpDirError("filesystem");
+    try {
+      await mkdir(intended, { mode: 0o700 });
+    } catch {
+      throw new PrivateDumpDirError("filesystem");
+    }
+    try {
+      initial = await lstat(intended);
+    } catch {
+      throw new PrivateDumpDirError("filesystem");
+    }
+  }
+  if (initial.isSymbolicLink()) throw new PrivateDumpDirError("symlink");
+  if (!initial.isDirectory()) throw new PrivateDumpDirError("not_directory");
+  if ((initial.mode & 0o777) !== 0o700) throw new PrivateDumpDirError("mode");
+
+  let finalCheck: Awaited<ReturnType<typeof lstat>>;
+  try {
+    finalCheck = await lstat(intended);
+  } catch {
+    throw new PrivateDumpDirError("filesystem");
+  }
+  if (finalCheck.isSymbolicLink() || !finalCheck.isDirectory())
+    throw new PrivateDumpDirError(finalCheck.isSymbolicLink() ? "symlink" : "not_directory");
+  try {
+    if ((await realpath(intended)) !== intended) throw new PrivateDumpDirError("not_canonical");
+  } catch (error) {
+    throw error instanceof PrivateDumpDirError ? error : new PrivateDumpDirError("filesystem");
+  }
+  let lastCheck: Awaited<ReturnType<typeof lstat>>;
+  try {
+    lastCheck = await lstat(intended);
+  } catch {
+    throw new PrivateDumpDirError("filesystem");
+  }
+  if (lastCheck.isSymbolicLink() || !lastCheck.isDirectory())
+    throw new PrivateDumpDirError(lastCheck.isSymbolicLink() ? "symlink" : "not_directory");
+  if ((lastCheck.mode & 0o777) !== 0o700) throw new PrivateDumpDirError("mode");
+}
 
 function env(name: string, fallback: string): string {
   return process.env[name] ?? fallback;
@@ -61,7 +152,7 @@ function loadRepoDotenv(): void {
   if (process.env.NODE_ENV === "test" || process.env.MINIME_SKIP_REPO_DOTENV === "1") return;
   try {
     // src/util/config.ts → repo root is two directories up.
-    const envPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", ".env");
+    const envPath = resolve(REPO_ROOT, ".env");
     if (!existsSync(envPath)) return;
     fillMissingEnv(parseDotenv(readFileSync(envPath, "utf8")), process.env);
   } catch {
@@ -71,6 +162,12 @@ function loadRepoDotenv(): void {
 
 // Must run before the config object below reads process.env.
 loadRepoDotenv();
+
+const databaseUrl = env("DATABASE_URL", "postgres://minime:minime@localhost:5432/minime");
+// DATABASE_URL remains the owner/control-plane DSN for migrations and maintenance.  The
+// restricted runtime role is cut over independently by the installer. One-shot owner commands
+// may use this fallback; resident `serve` refuses to start until the app endpoint is provisioned.
+const runtimeDatabaseUrl = env("MINIME_APP_DATABASE_URL", databaseUrl);
 
 export type ProviderName = "ollama" | "anthropic" | "openai" | "openrouter" | "bedrock";
 
@@ -82,7 +179,8 @@ function routeEnv(name: string): ProviderName | undefined {
 }
 
 export const config = {
-  databaseUrl: env("DATABASE_URL", "postgres://minime:minime@localhost:5432/minime"),
+  databaseUrl,
+  runtimeDatabaseUrl,
   ollamaUrl: env("OLLAMA_URL", "http://localhost:11434"),
   embedModel: env("EMBED_MODEL", "nomic-embed-text"),
   classifyModel: env("CLASSIFY_MODEL", "llama3.1:8b"),
@@ -116,7 +214,7 @@ export const config = {
   dreamCron: env("DREAM_CRON", "0 3 * * *"),
   // frequent logical DB snapshots (db-snap tag); empty string disables the cron
   backupCron: env("BACKUP_CRON", "*/15 * * * *"),
-  dataDir: env("MINIME_DATA_DIR", `${process.cwd()}/data`),
+  dataDir: resolveDataDir(process.env.MINIME_DATA_DIR),
   // Optional LOCAL cross-encoder reranker (llama-server --rerank). Unset = stage disabled.
   // Localhost-only by construction (I1): src/search/rerank.ts refuses non-local hosts.
   rerankUrl: process.env.RERANK_URL, // e.g. http://localhost:8114

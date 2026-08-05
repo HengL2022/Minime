@@ -115,16 +115,75 @@ work becomes part of your searchable history with zero effort.
 
 - **Tiers**: 0 = money/health (never readable, aggregates only) · 1 = notes, tasks,
   people (agent-readable default) · 2 = journal, interactions, email metadata
-  (unlock-gated reads). Set `CLOUD_MAX_TIER=1` in `.env` to keep tier 2 off cloud
-  models too.
+  (unlock-gated reads). Tier 0 is absorbing: prose carrying explicit tier-0 evidence is
+  never promoted into an agent-readable tier. Set `CLOUD_MAX_TIER=1` in `.env` to keep
+  tier 2 off cloud models too.
 - **Audit**: `bun run src/cli.ts audit --since 7d` shows every read, write, and byte of
   egress — which agent, when, which rows. The log is append-only; nothing can be
   quietly erased.
+
+### Reading MCP audit outcomes
+
+Transport-originated MCP calls use three append-only audit facts:
+
+- `tool:<name>:attempt` is the durable receipt of a schema-valid call at the transport
+  boundary. It proves intent was recorded, not that validation or the handler began.
+- `tool:<name>` is a durable result authorization written before Minime invokes the local
+  transport's `send()`. It is not proof that the result reached a client.
+- `tool:<name>:disposition` correlates to the result event and records `suppressed` when send
+  was never invoked, `released` when the local `Transport.send()` promise fulfilled, or
+  `send_uncertain` when send was invoked but threw, rejected, was interrupted, or may have
+  partially written. A missing disposition means incomplete/unknown.
+
+`released` is deliberately narrow: it does not prove peer receipt, parsing, handling, use, or
+user observation, and no result/disposition pair is crash-atomic with a stream or client.
+Direct non-transport `invokeTool()` calls retain attempt plus `delivery:"direct"` result and
+have no transport disposition.
+
+When a result cannot be released safely, Minime uses fixed acknowledgements. A
+`completed_result_withheld` response means the handler completed but its result audit was
+unavailable; do not retry it automatically. `AUDIT_UNAVAILABLE` means an error or refusal
+result was withheld for the same reason; do not retry it automatically. An attempt-phase
+`INTERNAL` response with `retry: true` means the handler did not begin because the receipt
+could not be recorded. Cancellation and disconnect outcomes intentionally carry no returned
+IDs. Access-frequency ranking counts only correlated `released` transport results; historical,
+direct, suppressed, uncertain, and incomplete rows do not count. These records describe the
+local audit boundary only; they do not promise crash recovery
+or a distributed rollback across Postgres, files, model providers, or indexes.
+
 - **Nightly dream job** (3am): embeds backlogs, links entities, compiles per-person
   notes, flags contradictions and staleness, rolls up metrics, backs up.
+- **Compiled-note recovery**: compiled archives contain tier frontmatter. Dream repairs legacy
+  mirrors without a model call when possible, and valid private recovery records under
+  `data/tmp/compiled-notes/` resume automatically. Invalid files remain for inspection and are
+  reported only by opaque hash. Owners should not delete an invalid record until they have backed
+  it up and identified its matching page. Explicit tier-0 or unverifiable generated recovery
+  records are removed before model or canonical-note work; if private-record removal fails, the
+  record is retained and no target write is attempted.
+- **Tier-0 note quarantine**: brain sync classifies raw frontmatter before importing a file.
+  Generated database mirrors with tier-0 or unresolved compiled-note provenance are marked
+  deleted at tier 0, their chunks and relevant edges become inert, and embeddings are cleared.
+  The archive file itself is preserved byte-for-byte for owner recovery. Human-owned collisions
+  are left unchanged and reported only with an opaque target hash for owner review.
 - **Backups**: configured in `make setup` (restic, client-side encrypted, local disk or
-  B2/S3). Restore drill: `make restore-pitr TIME="…"` into a scratch DB, then
-  `make promote-restore` — the live database is never touched in one step.
+  B2/S3). Each logical dump is paired with a private manifest binding its hash, applied
+  migrations, and representative row counts. `make restore-pitr TIME="…"` is a compatibility
+  name: it restores the latest logical snapshot at or before that time into a scratch DB; it is
+  not WAL/PITR. Promotion remains the separate `make promote-restore` step, so the live database
+  is never touched during validation.
+- Archive paths are repository-stable and physical: the default is the repository's data/
+  directory even when an MCP host starts Minime elsewhere or through a symlink. Relative
+  MINIME_DATA_DIR overrides are also
+  repository-relative. Database dumps stage in repository db-dump/ with private permissions;
+  database clients receive credentials through short-lived private libpq service files rather
+  than argv. Before replacing `minime.sql`, backup retains and verifies a private `.previous`
+  dump+manifest pair; each new file is fsynced and atomically renamed. Backup/repair diagnostics
+  never include child output or connection fragments. Restore drills bind every connection to
+  the fixed local source/admin/scratch database names, then install and attempt cleanup on
+  every normal, failure, and signal exit and succeed normally; a persistent OS/trusted-rm
+  refusal returns fixed content-free `cleanup_failed` and may leave only a validated private
+  mode-0700 workspace/mode-0600 artifact for owner recovery. Service files are not guaranteed
+  removed under that refusal; no path, URL, child output, or secret is printed.
 - **Updating the software**: `make update` pulls the new version, snapshots the DB
   first, and applies migrations. Your `.env`, `data/`, and backups are never touched —
   they live outside git. Restart `serve` afterward.

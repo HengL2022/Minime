@@ -14,6 +14,8 @@ import {
   insertTransaction,
   insertValueItem,
   listActivePages,
+  setDecisionOutcome,
+  setPersonDetails,
   upsertCalendarEvent,
   upsertPage,
   upsertTask,
@@ -508,13 +510,12 @@ export async function seed(): Promise<Record<string, number>> {
 
   // people
   for (const p of PEOPLE) {
-    const { id } = await ensurePerson(p.name, "human");
+    const { id } = await ensurePerson(p.name, "human", "seed");
     if (p.alias) {
       const { addAlias } = await import("../src/db/repo");
       await addAlias(id, p.alias);
     }
-    const { sql } = await import("../src/db/client");
-    await sql`update people set relation = ${p.relation}, context = ${p.context}, source = 'seed' where id = ${id}`;
+    await setPersonDetails(id, p.relation, p.context);
   }
   counts.people = PEOPLE.length;
 
@@ -574,8 +575,7 @@ export async function seed(): Promise<Record<string, number>> {
     });
     const md = `# Decision: ${d.question}\n\nOptions: ${d.options.join("; ")}\n\n${d.reasoning ?? ""}\n\n${d.outcome ? `Actual outcome: ${d.outcome}` : ""}`;
     if (d.outcome) {
-      const { sql } = await import("../src/db/client");
-      await sql`update decisions set actual_outcome = ${d.outcome}, reviewed_at = ${daysAgo(2)} where id = ${id}`;
+      await setDecisionOutcome(id, d.outcome, daysAgo(2));
     }
     await indexParent("decision", id, md, undefined, 1);
   }

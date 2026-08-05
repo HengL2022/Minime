@@ -1,0 +1,653 @@
+[
+  {
+    "name": "minime_search",
+    "description": "Hybrid (semantic + full-text) search over the owner's notes, journal, decisions, tasks and people. Returns scored hits with snippets and source IDs.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "minLength": 1
+        },
+        "types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "include_derived": {
+          "type": "boolean"
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_get_context",
+    "description": "Resolve an entity (by type+id, or person_name matching a person or org by name/alias) and return the row, related rows via edges, open items, and provenance.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "page",
+            "journal",
+            "interaction",
+            "decision",
+            "decision_branch",
+            "task",
+            "goal",
+            "value",
+            "principle",
+            "person",
+            "org",
+            "commitment"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "person_name": {
+          "type": "string"
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_state",
+    "description": "Snapshot of now: today/tomorrow calendar, due tasks, tasks moved (closed) today, open commitments, decision reviews due, review-queue count, metric anomalies (from rollups only).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_query_metric",
+    "description": "The ONLY path to quantitative answers (spend, sleep, steps, deep work, journal streak). Returns a numeric series via whitelisted SQL aggregation — never does the model do arithmetic over prose.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "from": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "to": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "granularity": {
+          "type": "string",
+          "enum": [
+            "day",
+            "week",
+            "month"
+          ]
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "name",
+        "from",
+        "to"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_capture",
+    "description": "Drop raw text into the inbox. The watcher classifies and files it (task / journal / interaction / note); low-confidence items go to the evening review queue.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hint": {
+          "type": "string"
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_journal",
+    "description": "Write a journal entry (tier 2: writable now, reads require unlock).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "entry_md": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mood": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "energy": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "entry_md"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_log_decision",
+    "description": "Record a decision or six-question decision interview with options, choice/reasoning, falsifier, stakes, reversibility, confidence, transcript turns, branch rows, tier, and review date. Open decisions surface in minime_state.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "question": {
+          "type": "string",
+          "minLength": 1
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "criteria": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "choice": {
+          "type": "string"
+        },
+        "reasoning": {
+          "type": "string"
+        },
+        "expected_outcome": {
+          "type": "string"
+        },
+        "falsifier": {
+          "type": "string"
+        },
+        "stakes": {
+          "type": "string"
+        },
+        "reversibility": {
+          "type": "string",
+          "enum": [
+            "reversible",
+            "costly",
+            "irreversible"
+          ]
+        },
+        "confidence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "decided_at": {
+          "type": "string"
+        },
+        "review_at": {
+          "type": "string"
+        },
+        "tier": {
+          "type": "number",
+          "enum": [
+            1,
+            2
+          ]
+        },
+        "transcript": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "question_key": {
+                "type": "string",
+                "enum": [
+                  "fork",
+                  "falsifier",
+                  "tension",
+                  "prediction",
+                  "stakes",
+                  "review",
+                  "freeform"
+                ]
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1
+              },
+              "answer": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "question_key",
+              "prompt",
+              "answer"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "branches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "chosen",
+                  "rejected",
+                  "considered"
+                ]
+              },
+              "note": {
+                "type": "string"
+              },
+              "would_be_right_if": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "label"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "review_in_days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3650
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "question",
+        "options"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_review_decision",
+    "description": "Close the loop on a past decision: record what actually happened; optionally distill a lesson into a new principle linked back to the decision.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "decision_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "actual_outcome": {
+          "type": "string",
+          "minLength": 1
+        },
+        "lesson": {
+          "type": "string"
+        },
+        "outcome_score": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "decision_id",
+        "actual_outcome"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_upsert_task",
+    "description": "Create or update a task (status: inbox|active|waiting|done|dropped).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "body": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "inbox",
+            "active",
+            "waiting",
+            "done",
+            "dropped"
+          ]
+        },
+        "due": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "goal_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_agenda",
+    "description": "Forward-looking task agenda for a date range. Answers 'what's due tomorrow / Saturday / this week' — which minime_state CANNOT (it is today-anchored, due<=today only). Defaults to today..+7 days when no dates given. Returns open tasks (inbox/active/waiting) due in [from, to], grouped by due date.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "to": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_log_interaction",
+    "description": "Log a meeting/call/message/email/note with a person OR an org (vendor/institution). Resolves aliases, creates the subject if new, updates last-contact for people. subject_type defaults to 'auto': if the name already matches an existing org it attaches to that org, otherwise it attaches to a person. Pass subject_type='org' to force a vendor/institution (avoids minting a phantom person). Tier 2: writable now, reads require unlock.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "person_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "meeting",
+            "call",
+            "message",
+            "email",
+            "note"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "subject_type": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "person",
+            "org"
+          ]
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "person_name",
+        "kind",
+        "summary"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_review_queue",
+    "description": "List open review-queue items (contradiction | stale | duplicate | decision_review | inbox_unfiled | phantom_person | extract_suspect), or resolve one as 'resolved' | 'dismissed'. The queue is flag-only: resolving never edits the flagged rows themselves.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "list",
+            "resolve"
+          ],
+          "default": "list"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "contradiction",
+            "stale",
+            "duplicate",
+            "decision_review",
+            "inbox_unfiled",
+            "phantom_person",
+            "extract_suspect"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "resolved",
+            "dismissed"
+          ]
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_unlock",
+    "description": "Grant a time-boxed tier-2 read unlock (journal, interactions, email metadata). Loudly audited. Tier 0 (transactions, health) is NEVER unlockable.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "minutes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "minutes"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  }
+]

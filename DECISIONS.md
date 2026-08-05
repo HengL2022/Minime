@@ -1,7 +1,8 @@
 # DECISIONS
 
-Append-only log of deviations from `minime-build-plan.md`, ambiguity resolutions, and technical
-decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add entries.
+Append-only history of durable Minime contract decisions. Newest entries are at the bottom. Use
+`/log-decision` only for the decision classes listed in `docs/DEVELOPMENT.md`; routine fixes,
+branch mechanics, review evidence, and plan adjustments do not need entries.
 
 ## 2026-06-10 — Claude Code environment setup
 
@@ -34,6 +35,23 @@ decisions (spec §0.3). Newest entries at the bottom. Use `/log-decision` to add
   pgvector bottle only builds against postgresql@17/18, so 17 is the closest conforming version.
   Nothing in the schema uses 17-only features; everything stays on localhost (I1 intact).
 - **Approved by:** agent-proposed (pending human review).
+
+## 2026-07-24 — Owner ratification of H1 recovery amendment
+
+- **Context:** Ratification of the immediately preceding H1 recovery-conflict and exact-edge
+  evidence proposal. This reopens only `src/db/repo.ts` and
+  `test/h1-brain-sync.test.ts` for the narrow Task 3 correction; it does not change the
+  pinned stack (spec §4) or search weights (spec §9).
+- **Decision:** Approve the minimum-edge-tier repository evidence extension and atomic
+  same-entity recovery supersession exactly as proposed. All edge writes remain routed
+  through `NoteReconcileDeps.retierEdges`; a failed supersession leaves the prior record and
+  canonical target untouched, while a later-phase failure retains the new canonical recovery
+  for a zero-model retry.
+- **Why:** This is the smallest design that simultaneously proves exact tier alignment,
+  preserves the dependency seam, prevents non-durable canonical writes, and permits a valid
+  candidate to progress after a legacy target-ownership conflict.
+- **Approved by:** human (owner, 2026-07-24 — “approve this narrow design amendment and
+  scope reopening”).
 
 ## 2026-06-10 — agg_sql convention: ($1,$2) params, 3-column result, security definer door
 
@@ -1304,3 +1322,881 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   baseline). `tsc --noEmit` clean; `biome check` zero diagnostics on the 5 touched files.
   `grep -rn "Hai Yan\|BioTree" src/ test/ fixtures/ scripts/` returns zero hits.
 - **Approved by:** human (owner, 2026-07-18 — "yes" to the sweep).
+
+## 2026-07-23 — Pre-W5 hardening Sol/Luna review workflow
+
+- **Context:** The five-fix pre-W5 hardening tranche temporarily supersedes the Fable 5 /
+  Sonnet 5 agent-role matrix in `.claude/plans/improve-2026-07-program.md` for this tranche
+  only. It does not change Minime's product architecture, pinned stack, search weights, or
+  privacy invariants.
+- **Decision:** Use GPT-5.6 Sol at xhigh for orchestration, binding plan review, critical
+  invariant review, and disputed Luna Critical adjudication; use GPT-5.6 Luna at xhigh for
+  bounded test-first execution and advisory first-pass review. Sol may propose deviations
+  and issue binding PASS/BLOCK verdicts, but only the owner may approve a deviation. A fresh
+  binding Sol plan review is required before execution, and a fresh binding Sol code review
+  is required before each branch merges.
+- **Why:** The hardening work spans provider egress, filesystem recovery, MCP audit ordering,
+  and production graph queries. Separating execution, advisory review, and binding review
+  reduces correlated mistakes while preserving explicit owner authority and the existing
+  two-strike escalation rule.
+- **Approved by:** human (owner, 2026-07-23 — explicitly requested the Sol/Luna multi-agent
+  workflow).
+
+## 2026-07-23 — H2: loopback-only Ollama
+
+- **Context:** Ollama was always labeled local, but OLLAMA_URL accepted remote hosts, so a
+  remote endpoint could bypass CLOUD_MAX_TIER and egress auditing.
+- **Decision:** Accept only explicit loopback HTTP(S) authorities under one committed
+  TypeScript/Bash corpus, rejecting raw control bytes before parsing and using last-key-wins
+  `.env` semantics in both runtimes. Validate every CLI/provider/verifier/install/up path before
+  effects. Runtime uses direct pinned node:http/https sockets; shell uses curl -q with
+  proxies/config disabled, explicit localhost resolution, 2xx-only handling, no redirects,
+  API-based pulls, explicit safe server binds, pre-connect abort refusal, and a true elapsed
+  request deadline. Remote/LAN Ollama is unsupported.
+- **Why:** A provider classified as local must be local by construction, including under
+  hostile proxy, curl config, DNS/hosts, redirect, and OLLAMA_HOST environments.
+- **Validated by:** shared URL/control-byte corpus (including DEL), duplicate and
+  first-inline-comment `.env` parity sentinels, generation/embed/tags/pull redirect and proxy
+  tripwires, localhost Host/SNI and exact curl `--resolve` assertions, zero-socket pre-abort
+  and trickle-deadline tests, complete hermetic `up.sh` and all-nine-step installer paths,
+  and the full gate.
+- **Approved by:** owner-approved pre-W5 hardening design (2026-07-23).
+
+## 2026-07-23 — H3: repository-stable archive and dump roots
+
+- **Context:** The repo-root `.env` fallback worked from a foreign cwd, but the default
+  archive and several pg_dump paths still followed `process.cwd()`, so a global MCP launch
+  could read/write or back up the wrong tree.
+- **Decision:** Export one physical-realpath `REPO_ROOT` from `src/util/config.ts`; resolve unset/empty and
+  relative `MINIME_DATA_DIR` from it; export `<repo-root>/db-dump` for backup and repair
+  pre-images; make promote derive the same root from its script location. Restore drill and
+  PITR plaintext now live in mode-0700 `mktemp -d` workspaces with mode-0600 files; cleanup
+  is installed and attempted on every normal, failure, and signal exit and succeeds normally.
+  A persistent OS/trusted-rm refusal returns fixed content-free `cleanup_failed` and may
+  leave only the validated private mode-0700 workspace/mode-0600 artifact for owner recovery;
+  no path, URL, child output, or secret is printed. Backup, repair, fresh drill, and promote
+  `pg_dump` calls use
+  mode-0600 ephemeral `PGSERVICEFILE` handoffs containing individual parsed libpq
+  parameters; database URLs appear in neither argv nor `PGDATABASE`, and service files are
+  removed on ordinary cleanup but are not guaranteed removed under that refusal. Backup fsyncs
+  a mode-0600 sibling and atomically renames it to
+  `minime.sql`; pre-commit failure/signal preserves the prior dump. Child output is ignored
+  and all failure details are fixed content-free codes; PITR output never expands live or
+  restore URLs. The shared dump-root preflight validates every existing parent component
+  without following symlinks, creates only an absent final component, and revalidates the
+  physical final path; this is a faithful static-collision threat-boundary elaboration, not a
+  claim of protection against concurrent same-UID namespace mutation. No existing data is moved.
+- **Why:** Archive, index, and backups must name the same physical owner data regardless of
+  the MCP host's working directory, and tier-0 plaintext must not survive restore handling.
+- **Validated by:** an unmocked guarded `minime_test` `pg_dump` service-selection contract;
+  foreign-cwd and symlinked-repository config tests; atomic prior-dump preservation; fixed
+  dependency/connection/pg_dump/restic diagnostics with stdout/stderr/event sentinels;
+  bounded large-stream repair cases; and fixture-repository URI rejection, replay failure,
+  URL secrecy, signal cleanup, and pre-promote retention cases; full project gate.
+- **Approved by:** owner-approved pre-W5 hardening design (2026-07-23).
+
+## 2026-07-24 — H1 recovery conflict supersession and exact edge evidence
+
+- **Context:** H1 Task 3's approved recovery state machine requires both exact verification
+  of every dual-predicate compiled-page edge tier and uninterrupted candidate processing
+  when a schema-valid recovery fails target ownership. The frozen Task 3 file list exposes
+  only `compiledRepresentationTierEvidence.max_tier`, while the fixed recovery filename
+  `<kind>--<entity>.v1.json` cannot simultaneously retain a conflicting record and persist a
+  second same-entity canonical recovery.
+- **Decision:** Proposed: narrowly reopen the Task 2 repository-helper scope so
+  `CompiledRepresentationTierEvidence` reports the minimum matching edge tier as well as
+  its maximum/count; all edge promotion continues through `NoteReconcileDeps.retierEdges`,
+  and exact post-convergence alignment is verified without a direct production bypass.
+  For a same-entity legacy conflict, atomically supersede the retained record only after a
+  newer canonical candidate has been distilled and before any canonical page/archive/chunk
+  write. A recovery-write failure preserves the old record and changes no canonical target;
+  any later failure retains the new canonical recovery for zero-model retry. The legacy
+  conflicting target remains untouched and still emits `identity_conflict`.
+- **Why:** A max-only aggregate cannot prove that no lower-tier edge remains, and a direct
+  `retierPageEdges()` call bypasses the approved dependency seam and status accounting.
+  Silently skipping the candidate recovery avoids the filename collision but violates the
+  durable-before-write invariant. Atomic supersession is the smallest fail-safe resolution
+  that preserves candidate progress and crash recovery.
+- **Approved by:** agent-proposed (pending human review).
+
+## 2026-07-24 — Append-only compiled-note recovery generations
+
+- **Context:** Follow-up to the approved H1 same-entity supersession rule. The fixed recovery
+  filename cannot truthfully guarantee that a rejected replacement leaves the previous bytes
+  intact: the portable atomic writer renames before its fallible directory sync. This changes
+  the H1 file-layout detail only; it does not change the pinned stack (spec §4), search
+  weights (spec §9), database schema, recovery JSON schema, or owner data.
+- **Decision:** Proposed: keep the legacy
+  `<kind>--<entity>.v1.json` file as generation zero and write later recoveries to absent,
+  zero-padded `.v1.g<generation>.json` files. Never overwrite an occupied generation.
+  Enumeration validates every file, reports malformed generations opaquely, and selects only
+  the highest valid generation for an entity. After successful convergence, cleanup removes
+  valid older generations first and the active generation last; invalid files remain
+  untouched. Recovery files retain mode 0600 and the directory mode 0700. A post-rename sync
+  failure may leave a complete newer generation, but the prior generation remains
+  byte-identical and canonical writes remain blocked; retry adopts the durable highest
+  generation without another model call.
+- **Why:** Rollback cannot be crash-atomic, treating post-rename failure as success weakens the
+  durable-before-write invariant, and platform-specific rename-exchange operations are not
+  portable across macOS and Linux. Append-only generations preserve both the approved failure
+  guarantee and crash recovery without a migration or generic atomic-writer change.
+- **Approved by:** agent-proposed (pending human review).
+
+## 2026-07-24 — Owner ratification of append-only recovery generations
+
+- **Context:** Ratification of the immediately preceding H1 append-only recovery-generation
+  proposal. This changes only the compiled-note recovery filename/layout protocol; it does
+  not change the pinned stack (spec §4), search weights (spec §9), database schema, recovery
+  JSON schema, or owner data.
+- **Decision:** Approve generation-zero compatibility, absent-file generation writes,
+  highest-valid-generation selection, opaque invalid-generation reporting, and
+  oldest-first/active-last cleanup exactly as proposed.
+- **Why:** The protocol is the smallest portable implementation that keeps the previous
+  recovery byte-identical when a replacement write is rejected while preserving
+  recovery-before-canonical-write and zero-model retry behavior.
+- **Approved by:** human (owner, 2026-07-24 — “approve the append-only
+  recovery-generation amendment”).
+
+## 2026-07-24 — Decision-log ordering correction
+
+- **Context:** The earlier “Owner ratification of H1 recovery amendment” entry was
+  accidentally inserted among 2026-06-10 entries instead of appended after its 2026-07-24
+  proposal. Existing history remains byte-for-byte in place under the append-only rule.
+- **Decision:** Treat the present end-of-log ratifications as authoritative chronological
+  approval records; do not move, rewrite, or delete the misplaced prior entry.
+- **Why:** Appending a correction restores an auditable chronology without rewriting
+  historical bytes.
+- **Approved by:** human (owner approvals of both H1 amendments on 2026-07-24; correction is
+  administrative only).
+
+## 2026-07-23 — H1: canonical compiled archives and reconciliation recovery
+
+- **Context:** frontmatter-free note mirrors could be re-imported at tier 1; body and file hashes differed.
+- **Decision:** exact JSON-title/tier archive bytes, UUID paths, page-owned legacy repair, private v1 recovery records, converge-first reconciliation, brain-sync lifecycle exemption, and tier reconciliation across both canonical page provenance and H5-compatible canonical-parent edges.
+- **Why:** preserve I3/I4/I5 across every interruption without claiming a cross-resource transaction.
+- **Validation:** H1 codec, sync, recovery, collision, interleaving, and sentinel tests plus the full branch gate.
+- **Approved by:** docs/superpowers/specs/2026-07-23-pre-w5-hardening-design.md.
+
+## 2026-07-25 — H1 tier-0 absorbing quarantine and policy correction
+
+- **Context:** Final H1 review reproduced tier-0 prose entering the generic page/chunk index,
+  being selected for compiled notes, sent to a cloud classifier as route tier 1, and stored as
+  an agent-readable tier-1 note. This violates I3 and supersedes H1's earlier no-migration,
+  `NoteTier = 1 | 2`, max-only promotion, and unresolved-provenance-to-tier-2 assumptions. The
+  pinned stack (spec §4) and search weights (spec §9) do not change.
+- **Decision:** Tier 0 is an absorbing non-agent-material state and may never be normalized to
+  tier 1 or 2. Add forward migration 019 so generic page/chunk/edge SELECT policies admit only
+  tiers 1 through the session ceiling; automatically soft-quarantine generated brain-sync and
+  compiler-owned database mirrors while preserving owner archive bytes; prevent quarantined
+  tombstones from reactivation; and remove tier-0 or unverifiable generated recoveries before
+  any model or canonical-target write, retaining them when removal fails. Reopen the bounded H1
+  runtime, repository, search, migration, documentation, and regression-test scope needed to
+  enforce these rules and close the associated edge-floor, ownership-boundary, tier-validation,
+  and fixed-error-code findings.
+- **Why:** A tier-2 promotion still makes tier-0 prose readable after unlock, while soft deletion
+  without corrected RLS remains visible to the engineering role. Preserving archive bytes plus
+  an auditable generated-mirror quarantine is the least destructive correction that blocks
+  search, model, recovery, and agent access without pretending the unsafe representation is a
+  valid tier-1/2 note.
+- **Approved by:** human (owner, 2026-07-25 — “approve”).
+
+## 2026-07-25 — One additional bounded H1 correction-and-review cycle
+
+- **Context:** The second review of the tier-0 quarantine correction found three residual
+  state-ordering defects already covered by the approved absorbing-tier-0 contract: a
+  page-only blocked compiler mirror was not quarantined, effective tier 2 could use a cloud
+  fallback above `CLOUD_MAX_TIER`, and a recovery generation added after successful blocked
+  cleanup could become eligible on the next run. The correction brief required owner
+  direction before any further cycle. The pinned stack (spec §4), search weights (spec §9),
+  migration surface, and owner data do not change.
+- **Decision:** Authorize exactly one additional correction-and-review cycle, confined to the
+  already-approved H1 files and these three binding findings. Do not merge H1 into `main` or
+  start H4 unless the amended exact head passes the full gate, a fresh Luna review has no
+  unresolved Critical or Important findings, and a fresh binding Sol review returns PASS.
+- **Why:** Each residual is a narrow incomplete enforcement of the already-ratified contract;
+  no new product behavior or authority is required. A single bounded cycle preserves the
+  stop rule while allowing the reviewed state machine to be completed.
+- **Approved by:** human (owner, 2026-07-25 — “authorize one additional bounded
+  correction-and-review cycle within the already-approved scope”).
+
+## 2026-07-25 — Recovery-only closure cycle for blocked-generation durability
+
+- **Context:** The decisive review of H1 head `e82e3f5` found two remaining recovery-state
+  defects: one identity's cleanup failure could stop cleanup for another identity and leave a
+  refreshed valid generation revivable, while restoring a generation-zero blocker could
+  replace an occupied filename. Both violate the already-approved absorbing-tier-0 and
+  append-only recovery contracts. The pinned stack (spec §4), search weights (spec §9),
+  migration, recovery JSON schema, and owner data do not change.
+- **Decision:** Authorize exactly one recovery-only correction-and-review cycle for these two
+  findings. Cleanup and stability must be per identity, and every blocked identity must exit
+  with either no recovery files or verified durable blocked evidence. A successor blocker may
+  be installed only in an exclusively reserved absent generation and may never replace an
+  occupied generation. Do not merge to `main` or begin H4 without fresh Luna and binding Sol
+  PASS verdicts on the amended exact head.
+- **Why:** The required behavior is a narrow completion of the ratified recovery state machine;
+  it needs no broader product or privacy-policy change.
+- **Approved by:** human (owner, 2026-07-25 — “authorize one recovery-only
+  correction-and-review cycle for these two finding”).
+
+## 2026-07-25 — H4 Card 2 sequencing and tools-list capture amendment
+
+- **Context:** The approved H4 durable tool-attempt audit plan assigned the existing M2
+  attempt/result phase-pair update to Card 3 even though Card 2 runs M2 as a required green
+  gate, and its external tools-list capture deleted the only validated JSON copy before the
+  tracked fixture could be created. This is a procedural amendment to
+  `docs/superpowers/plans/2026-07-23-h4-audit-attempt.md`; it does not change the pinned stack
+  (spec §4), search weights (spec §9), production behavior, wire contract, schema, migration,
+  dependency set, or approved branch file set.
+- **Decision:** Leave Card 1 unchanged. In Card 2, modify `test/m2.tools.test.ts` before its
+  final gate to expect the approved four events for two calls and assert the exact
+  attempt/result phase pairs; include that file in the Card 2 commit and remove the
+  superseded Card 3 ownership. After validating the external 13-tool capture, print its
+  canonical JSON to stdout before unconditional cleanup and use that complete output as the
+  exact `apply_patch` fixture content. Stop if the output is truncated or invalid; never
+  redirect, copy, or move the temporary capture into the repository.
+- **Why:** Moving an already-approved regression to the first card that requires it keeps the
+  staged gate internally consistent. Emitting the already-validated capture before deletion
+  makes the approved fixture workflow reproducible without weakening its external-scratch or
+  cleanup guarantees.
+- **Approved by:** human (owner, 2026-07-25 — “approve this narrow H4 procedural
+  amendment”).
+
+## 2026-07-25 — One bounded H4 Card 1 outbound-ownership correction
+
+- **Context:** Two consecutive H4 Card 1 Luna review cycles found unresolved outbound
+  ownership defects, activating the approved owner-review stop line. The reviewed correction
+  base was `b8b800ff84e18f23361daeae13695da74c49f8c6` with cumulative package SHA-256
+  `08416f69b48a531d448847e52c6db95346a6ab39b3e2b3c84d415759b7594fbc`.
+  This correction did not change the pinned stack (spec §4), search weights (spec §9),
+  schema, migration, dependency set, or Card 2 scope.
+- **Decision:** Authorize exactly one correction cycle limited to
+  `src/mcp/audit-coordinator.ts` and `test/h4-audit-state.test.ts`, solely to preserve
+  sendable fixed audit-failure replacements and retain non-release correlation through
+  outbound completion with an identity-safe tombstone. Require deterministic RED evidence,
+  the focused gates, exact two-file scope proof, fresh Luna review, and binding Sol review.
+  No later correction cycle is implicit.
+- **Why:** These were narrow incomplete state transitions within the already-approved Card 1
+  coordinator contract and could be corrected without opening transport, schema, dependency,
+  or product scope.
+- **Outcome:** The cycle produced correction commit `34de7e7`, with 24/24 focused tests and
+  60/60 compatibility tests passing, but fresh Luna review found two additional Important
+  correlation/tombstone-shape defects and returned `BLOCK`. Per the authorization, work
+  stopped before binding Sol review or Card 2.
+- **Approved by:** human (owner, 2026-07-25 — “approve one bounded H4 Card 1 correction for
+  these two findings”).
+
+## 2026-07-25 — Separate H4 Card 1 opaque-tombstone correction
+
+- **Context:** Fresh Luna review of the first bounded Card 1 correction found that
+  callback-start cancellation/close still lost suppression correlation and that the
+  short-lived tombstone retained full pending-call metadata. The clean administrative base
+  was `ab82fac23777cc61ef79b8942d5fee819ce43bf4`; the preserved implementation package at
+  `34de7e7` had SHA-256
+  `7f15e9342fda1294390c403c8ead725d049beb07d20bb7c1cc53d5bd1866d32b`.
+  This correction did not change the pinned stack (spec §4), search weights (spec §9),
+  schema, migration, dependency set, or Card 2 scope.
+- **Decision:** Authorize one new, separate correction cycle limited to
+  `src/mcp/audit-coordinator.ts` and `test/h4-audit-state.test.ts`. Retain callback-start
+  cancellation/close correlation through outbound completion and replace metadata-bearing
+  tombstones with identity-safe opaque tokens. Preserve `DECISIONS.md`, every closed
+  finding, and every existing test; require deterministic RED evidence, exact two-file
+  scope, fresh Luna review, and binding Sol review. No later cycle is implicit.
+- **Why:** Both defects were internal Card 1 state/lifetime errors and required neither the
+  Card 2 transport facade nor any product, schema, or dependency change.
+- **Outcome:** Correction commit `1770d15` produced exactly three expected RED failures,
+  then passed 26/26 focused tests and 62/62 compatibility tests with clean TypeScript and
+  scope gates. Fresh Luna review confirmed both authorized findings closed but found one
+  remaining Important `forwarded` cancellation/close ownership gap and returned `BLOCK`.
+  Work stopped before binding Sol review or Card 2.
+- **Approved by:** human (owner, 2026-07-25 — “approve”).
+
+## 2026-07-25 — Separate H4 Card 1 forwarded-correlation closure
+
+- **Context:** Fresh Luna review of implementation head
+  `1770d15c90e33fb71a410579ee2641037df1ad48` and cumulative package SHA-256
+  `4fc3765c72b8d620ab094d3b4a1df977b052f9cc63a0667d2f3a0a6b2c5acd7f`
+  confirmed the opaque tombstone and callback-start fixes but found one remaining
+  outbound-ownership gap: cancellation or transport close after `receiveCall()` returned
+  `forward` and before callback entry removed correlation, so the later suppressed result
+  could default to send. The clean administrative base was
+  `b9a47134055c6f75e6b46957fa7a3bb1a8d93de7`; the correction did not change the pinned
+  stack (spec §4), search weights (spec §9), schema, migration, dependency set, or Card 2
+  scope.
+- **Decision:** Authorize one new, separate correction cycle limited to
+  `src/mcp/audit-coordinator.ts` and `test/h4-audit-state.test.ts`, solely to retain
+  cancellation/close correlation after a forward decision escaped and before callback
+  execution began while identity-cleaning an internally forwarded call whose
+  `receiveCall()` result was still dropped. Preserve `DECISIONS.md` during implementation,
+  opaque symbol tombstones, all closed findings, and all existing assertions. Require the
+  exact two-row deterministic RED, focused and compatibility gates, a frozen cumulative
+  package, fresh Luna review, and binding Sol review. No later correction cycle is implicit.
+- **Why:** The remaining defect was a single incomplete Card 1 state transition. Its
+  correction required neither transport-facade work nor broader product, schema,
+  dependency, or privacy-policy authority.
+- **Outcome:** Correction commit
+  `2d8c78a5a1e90794304f8bb55edc9e7ded03d512` produced exactly the two expected RED
+  failures, then passed 29/29 focused tests and 65/65 compatibility tests with clean
+  TypeScript, diff, scope, and decision-log integrity gates. The frozen cumulative package
+  SHA-256 was
+  `4d9034d8e0429662b9a452d96c3c33ecc4413a93eae2d4470911bd764d570e87`.
+  Fresh Luna review returned PASS with zero Critical, Important, or Minor findings, and the
+  binding Sol review returned `PASS — MERGE` with the same zero-finding counts.
+- **Approved by:** human (owner, 2026-07-25 — “approve to authorize this separate H4 Card 1
+  correction cycle”).
+
+## 2026-07-25 — H4 Card 2 audited transport correction and binding stop
+
+- **Context:** The owner-approved H4 plan and Card 2 procedural amendment authorized the
+  universal audited transport facade, canonical SDK 1.29.0 tool-schema fixture, and amended
+  M2 phase-pair coverage after Card 1 received binding PASS. Initial Card 2 implementation
+  head `2e59791e12fe161d860e4d93031f4d0c57434dc0` had cumulative diff SHA-256
+  `ed874b19f332f790f2a9c36d112b8400818e835db5c89d286702ada30f2f96a8`.
+  Fresh Luna review found one Critical audit-boundary bypass for omitted optional params,
+  two Important request-classification/cancellation-envelope defects, one Important
+  regression-coverage gap, and one production-unreachable Minor direct-coordinator race.
+  Independent Sol critical adjudication upheld the blocking findings, confirmed that their
+  correction required only existing Card 2 paths, and deferred the Minor without reopening
+  Card 1.
+- **Decision:** Use the first correction/re-review cycle permitted by the approved Card 2
+  plan, limited in practice to `src/mcp/audited-transport.ts` and
+  `test/h4-audit-transport.test.ts`. Admit omitted-params calls before SDK validation,
+  distinguish malformed names from valid unknown strings, require the public JSON-RPC
+  notification/request-ID predicates for cancellation ownership, and add the adjudicated
+  task, failure, duplicate/reuse, and stdio regression coverage. Preserve the canonical
+  fixture, Card 1, dependencies, protected paths, and all closed findings.
+- **Why:** The Critical and behavioral Important findings were incomplete enforcement of the
+  already-approved raw-receipt boundary and exact public-envelope contract. They needed no
+  new product, schema, dependency, privacy-policy, or Card 1 authority.
+- **Outcome:** Correction commit
+  `98fbce520062587d333b79015e17a77f5e9f7bf5` produced exactly four expected RED failures,
+  then passed 24/24 transport tests and 65/65 combined Card 1/Card 2/M2 tests with clean
+  TypeScript, diff, scope, protected-path, fixture, and residue gates. Its cumulative diff
+  SHA-256 was
+  `7e386b8b15d2677f065d4750abff55a0e8d27867650329483c27006c9ff8fbe5`.
+  Fresh Luna review returned PASS with zero findings. Binding Sol review nevertheless
+  returned `BLOCK` with zero Critical, two Important, and zero Minor findings because the
+  transport suite did not drive the required attempt-paused/forward/callback/handler-close
+  facade races and tested JSON-valid/schema-invalid stdio only after the same transport had
+  already closed on malformed JSON. Per the binding stop rule, no further correction or
+  Card 3 work is authorized implicitly.
+- **Approved by:** human (owner-approved H4 written design and 2026-07-25 Card 2 procedural
+  amendment; execution and first correction followed their binding review protocol).
+
+## 2026-07-25 — Test-only H4 Card 2 binding-coverage cycle
+
+- **Context:** Binding Sol review of corrected Card 2 implementation head
+  `98fbce520062587d333b79015e17a77f5e9f7bf5` returned `BLOCK` with zero Critical,
+  two Important, and zero Minor findings because the suite did not exercise the required
+  active facade cancellation/close barriers and sent JSON-valid/schema-invalid stdio only
+  after the same transport had already closed on malformed JSON. The clean administrative
+  base was `5261f08daab8ba6fb7d75e472ac062cdf9276892`; production-only cumulative SHA-256
+  `9613d77961889e13d99bc2feb05352119b29cd056dcd41ef81074504e6df2acb`
+  remained the frozen implementation identity.
+- **Decision:** Authorize one test-only correction and re-review cycle limited to
+  `test/h4-audit-transport.test.ts`. Add deterministic real-facade coverage for attempt-paused
+  numeric-ID-zero cancellation, the forward/callback cancellation barrier, cancellation and
+  close after handler mutation, close pending through result-audit durability followed by
+  reconnect, and independent fresh malformed-JSON and JSON-valid/schema-invalid stdio
+  failures. Production, Card 1, M2, the canonical fixture, dependencies, protected paths,
+  `DECISIONS.md`, Card 3, integration, and any further correction were excluded. Any test
+  exposing a production failure required an immediate stop.
+- **Why:** The binding findings were evidence gaps rather than confirmed production defects.
+  A test-only cycle was the smallest auditable way to prove the already-approved transport
+  lifecycle without expanding implementation authority.
+- **Outcome:** Test-only commit
+  `e33766b2cd8846ef3d14cb7366c684ad7c09a5c8` passed 26/26 transport tests, 29/29
+  Card 1 state tests, and 67/67 combined state/transport/M2 tests, plus TypeScript, Biome,
+  diff, scope, immutable-hash, fixture, and residue gates. Its nine-path cumulative diff
+  SHA-256 was
+  `d52a49a4cb77d9c8d72092e0510ab69eae2042aa39f34560950c2a66352e9bae`
+  and exact archive SHA-256 was
+  `769e5c79f87efbabf28d3c14b3848c424bdc81be5722a2bfaf321f8abd6f28e0`.
+  Fresh Luna review returned `BLOCK` with zero Critical, one Important, and zero Minor
+  findings: each fresh stdio test waited for a one-shot close signal but did not count and
+  assert exactly one close callback, so duplicate closes would still pass. Per the
+  authorization, work stopped before binding Sol review or Card 3.
+- **Approved by:** human (owner, 2026-07-25 — “approve to authorize this one test-only H4
+  Card 2 binding-coverage cycle”).
+
+## 2026-07-25 — Final H4 Card 2 single-close assertion closure
+
+- **Context:** Fresh Luna review of test-only binding-coverage head
+  `e33766b2cd8846ef3d14cb7366c684ad7c09a5c8` returned `BLOCK` with zero Critical,
+  one Important, and zero Minor findings. The two independent fresh stdio protocol-failure
+  tests waited for a one-shot close signal but did not count and assert that the audited
+  adapter emitted exactly one close callback. All production, lifecycle, package, and other
+  test gates were already green. The clean administrative base was
+  `1dd80340c0c70c7e7a7e9405ca257512d47a0d17`.
+- **Decision:** Authorize one final assertion-only cycle limited to
+  `test/h4-audit-transport.test.ts`. In each existing fresh stdio failure test, count calls
+  to the unchanged `adapter.onclose` callback, assert exactly one after bounded
+  close/drain/latch completion, retain the count in the existing pre-late-input snapshot,
+  and assert it remains exactly one after the existing quiet window. Do not change latches,
+  timeouts, streams, error assertions, other tests, production, dependencies, fixtures,
+  Card 1, M2, Card 3, integration, or `DECISIONS.md` during implementation and review.
+- **Why:** Explicit close cardinality was the sole remaining evidence gap. Counting the
+  existing callback in both live-transport tests was the smallest change that could close it
+  without reopening production or weakening any lifecycle assertion.
+- **Outcome:** Assertion-only commit
+  `49d3830824c8a4a6e3ef6738b1f2206f7f55fee1` passed 26/26 transport tests, 29/29
+  Card 1 state tests, and 67/67 combined state/transport/M2 tests, plus TypeScript, Biome,
+  diff, scope, immutable-hash, fixture, dependency, SDK, and residue gates. Its nine-path
+  cumulative diff SHA-256 was
+  `11ef05fee7ec3d8cd2a3e82c4dde64b078fa7c6708a5f134e2745b8928178045`
+  and exact archive SHA-256 was
+  `9ad9e30da33d2ae6d4cddd8cd90e5b97f8762aafd805ad4a02e99581e274f6b7`.
+  Fresh Luna review returned PASS with zero findings, and binding Sol review returned
+  `PASS — MERGE` with zero Critical, Important, or Minor findings. Card 2 is closed.
+- **Approved by:** human (owner, 2026-07-25 — “approve to authorize this final
+  assertion-only H4 Card 2 cycle”).
+
+## 2026-07-23 — H4: raw-receipt attempt and pre-release result auditing
+
+- **Context:** Card 3 regression work closes the leak, wire, and access-ranking evidence
+  around the H4 transport boundary without changing the already-reviewed implementation.
+- **Decision:** Preserve raw `tools/call` attempt receipts, pre-release terminal result
+  audits, fixed attempt/result-withholding acknowledgements, serialized cancellation and
+  disconnect outcomes, and the legacy exact-result access-frequency rule. Non-release
+  outcomes carry empty returned IDs and a zero count; late cancellation may conservatively
+  retain IDs only after a durable normal result.
+- **Validation:** The 200-call M6 leak suite now checks exact attempt/result phase counts,
+  injected attempt/result failures, sentinel withholding, and all four non-release outcomes.
+  H4 transport tests parse exact fixed wire objects, verify opaque replacements and
+  pre-result byte withholding, and cover the approved late-cancellation over-report race.
+  Access tests retain positive exact-result counts while ignoring attempts and every
+  non-release outcome. Focused and complete branch gates are required before handoff.
+- **Approved by:** current owner authorization for H4 Card 3 execution (2026-07-25).
+- **Scope:** This entry records regression evidence and interpretation only. It makes no
+  broader crash-recovery, distributed-rollback, product, schema, dependency, or ranking
+  claims.
+
+## 2026-07-25 — H4 Card 3 repository-wide Biome gate amendment
+
+- **Context:** Card 3 regression evidence required the repository-wide Biome gate. The
+  baseline reported 26 diagnostics; no pinned stack §4 or search-weight §9 change was
+  implicated.
+- **Decision:** Apply the repository-gate repair at commit
+  `ff1d47725923da306a8e16df3cb35c12b0a57472`, limited to `biome.json`,
+  `src/mcp/audit-coordinator.ts`, `src/mcp/audited-transport.ts`,
+  `src/mcp/server.ts`, `src/mcp/tools/registry.ts`, and
+  `test/h4-audit-state.test.ts`. Ignore only the literal canonical fixture
+  `fixtures/mcp-tools-list-sdk-1.29.json`; perform six equivalent dot-access rewrites,
+  nine synchronous resolver-block rewrites, and safe formatting/import sorting. The old
+  production hash `9613d77961889e13d99bc2feb05352119b29cd056dcd41ef81074504e6df2acb`
+  is retired only for those mechanical bytes and replaced by
+  `e3145f160e6a3abf102e62ae26945c8472d9fd49d2f8e71e893eae0a176fd245`. Invalid
+  overlapping full-suite runs are superseded by the owner-authorized isolated recovery
+  run. The canonical `bun test` result was 869 pass, 1 skip, 0 fail, all remaining gates
+  were green, the generated scorecard
+  `/tmp/minime-h4-biome-repair-scratch.W9kf4p/docs/benchmarks/2026-07-25-mock-minimebench.md`
+  was verified at SHA-256
+  `d3718a5f0c80cc0dabef567ec92a7927d4a42f66cc638aa547686d76cb3bb906` and deleted as
+  authorized, and fresh Luna plus binding Sol returned PASS with C0/I0/M0.
+- **Why:** Restore the canonical repository gate without mutating the captured fixture or
+  changing behavior.
+- **Approved by:** human owner approvals on 2026-07-25.
+
+## 2026-07-26 — H4 result authorization, local disposition, and identity-owned facade
+
+- **Context:** Binding review of H4 head
+  `a71bbf4847079a702596380e4ae8477fcbfcbce0` upheld a guarantee-honesty blocker. A single
+  append-only result payload must be selected before its asynchronous PostgreSQL insert is
+  durable, so cancellation or close can be observed after immutable submission but before
+  durability. The same review found that failed connect cleared the facade's active identity
+  before close/drain, allowing a successor connection to be detached by the stale owner's
+  callback. This amendment changes no pinned stack (§4) and no search weight (§9); it changes
+  which existing audit rows are eligible for the unchanged ±0.05 access-frequency signal.
+- **Decision:** Treat exact `tool:<name>` transport results as durable pre-send
+  authorizations and correlate them by lossless `events.id::text` to exactly one attempted
+  `tool:<name>:disposition`: `suppressed` means `Transport.send()` was never invoked,
+  `released` means only that the local send promise fulfilled, and `send_uncertain` means
+  send was invoked but threw, rejected, was interrupted, or may have partially written.
+  Missing disposition is incomplete/unknown; no peer receipt, parsing, use, or crash
+  atomicity is claimed. Add migration 020 for disposition uniqueness and released-result
+  lookup. `accessCounts()` counts only `delivery:"transport"` get-context results joined to
+  `released`; historical, direct, suppressed, uncertain, and incomplete rows do not count.
+  Direct `invokeTool()` stays two-phase with `delivery:"direct"`. Replace unowned
+  active/closing facade globals with one identity-owned connecting/open/closing/closed record
+  whose teardown is installed before close/await, is reentrant, rejects connect completion
+  after teardown begins, and clears only its own identity.
+- **Why:** Result authorization plus a separate append-only local disposition is the smallest
+  honest model that preserves durable audit before send without pretending PostgreSQL commit
+  is atomic with cancellation or a remote client. Durable result-event IDs avoid collision
+  and numeric precision loss. Database uniqueness and the released-disposition index close
+  invariant/performance gaps; excluding uncorrelated history avoids treating unproved
+  disclosures as access. An outbox or peer acknowledgement would be a new subsystem and is
+  intentionally out of scope.
+- **Approved by:** human owner (2026-07-26 — approved the recommended H4 post-BLOCK design
+  verbatim, including lossless result-event-ID correlation, migration 020, the historical
+  access-signal reset, guarded disposable-DB evidence, and identity-owned facade lifecycle).
+
+## 2026-07-27 — H5: production parent contradiction pairing
+
+- **Context:** The contradiction query required mention edges whose source metadata pointed
+  at chunk IDs, while the production extractor anchors mentions at typed parent rows. The
+  nightly scan therefore missed production evidence.
+- **Decision:** Resolve mention edges through `(src_type, src_id)` to parent chunks; require
+  distinct composite parents; retain chunks containing a nonblank canonical name or alias
+  via case-folded literal `strpos`; canonicalize and deduplicate chunk pairs before the
+  deterministic newest-first limit. Exclude compiled notes/digests by provenance,
+  UUID-suffixed path, or the legacy system marker plus a canonical UUID bullet anywhere
+  beneath the final normalized exact Sources heading, including temporary `brain-sync`
+  provenance. Historical chunk-source metadata remains tolerated but is not trusted for
+  joining.
+- **Why:** Contradictions must compare independent primary captures, not two chunks of one
+  row or a derived summary against its own source; literal matching keeps punctuation and
+  CJK aliases from becoming SQL wildcards.
+- **Validated by:** real `extractAndLink()` parent-edge tests, literal alias corpus,
+  derived-parent exclusions, final-Sources parity fixtures with intervening text and an
+  earlier-heading decoy, composite-parent collision, deterministic post-dedupe limit, tier
+  routing, and full project gate.
+- **Approved by:** owner-approved pre-W5 hardening design (2026-07-23).
+
+## 2026-07-30 — S0 isolated acceptance bootstrap amendment
+
+- **Context:** S0 establishes the acceptance evidence required before the S1 privacy
+  migration. Preflight found that the original task order guarded `migrate()` before the
+  unique test preload existed, omitted destructive eval callers of `test/helpers.resetDb()`,
+  placed live-capable `verify-m0` inside an offline gate, and required a byte-for-byte updater
+  fixture that conflicted with the review rubric. This resolves spec §0/§13 execution and
+  acceptance ambiguity. It does not change the pinned stack in spec §4 beyond S0's already
+  planned exact `typescript@5.9.3`, and it does not change search weights in spec §9.
+- **Decision:** Reorder S0 as transport seam, pure database planner, ownership lifecycle,
+  combined migration-context/preload bootstrap, updater transition, remaining
+  concurrency/eval/M0 isolation, then authoritative gate. Bun tests, offline M0, and
+  destructive eval children use the same uniquely named loopback `minime_test_*`
+  provision/dispose capability and API-only test migration context; no eval context exists.
+  Keep standalone `verify-m0` live-capable but use wrapper-owned
+  `verify-m0-offline` with `MINIME_MOCK_OLLAMA=1` in the offline/CI gate. Model the pre-S0
+  updater boundary with a minimal temporary two-commit behavioral driver rather than a
+  copied production script. Before isolation, accept static baseline checks only, except the
+  Task 1 focused suite on the existing guarded unique bootstrap; require the full unscoped
+  suite immediately after isolation lands.
+- **Why:** The reordered boundary makes every intermediate commit independently testable
+  without touching a shared or live database, keeps one migration authority instead of an
+  eval bypass, preserves the owner’s live environment probe, and still proves the real
+  already-parsed-shell/fetched-binary updater transition without plan-mandated duplication.
+- **Approved by:** human owner (2026-07-30 — approved the full five-part S0 preflight
+  amendment bundle).
+
+## 2026-07-30 — S0 wrapper-labeled generated database tokens
+
+- **Context:** S0 Task 6 requires every parent-owned offline-M0/eval child database name to
+  encode its approved wrapper label as `label_pid_uuid12`, while the Task 2 planner contract
+  initially accepted only the preload form `pid_uuid12`. The Task 6 file ledger omitted
+  `test/support/test-database.ts`, the module that owns that grammar. This resolves an S0
+  acceptance-plan ambiguity; it changes neither the pinned stack in spec §4 nor search weights
+  in spec §9.
+- **Decision:** Add `test/support/test-database.ts` to the Task 6 file ledger and extend only
+  the generated run-token grammar to accept an optional `[a-z][a-z0-9_]*_` prefix before the
+  existing PID and twelve-hex token. The Task 6 wrapper parser remains the authority that
+  restricts labels to its exact closed union. The original preload token remains accepted, and
+  loopback/guarded URL validation, generated mode, source/owner constants, ownership branding,
+  and disposal rules remain unchanged.
+- **Why:** Encoding the approved command label makes concurrent child ownership observable and
+  satisfies the already-approved Task 6 naming contract. Dropping the label would weaken that
+  contract; using explicit/external mode would violate parent-generated ownership; duplicating
+  the planner would create a second safety boundary.
+- **Approved by:** human owner (2026-07-30 — within the approved S0 amendment/execution scope;
+  this is the minimal ledger correction needed to implement its explicit
+  `label_pid_uuid12` contract).
+
+## 2026-07-30 — S0 H3 subprocess integration timeout budget
+
+- **Context:** S0 acceptance between Task 6 database/process isolation and Task 7's
+  authoritative pipeline exposed pre-existing `test/h3-restore-scripts.test.ts` subprocess
+  fixtures exceeding Bun's default 5-second per-test budget under the unscoped suite. The
+  unchanged file passes 126/126 standalone, while the authoritative run records only
+  `timed out after 5000ms` failures with affected cases completing in roughly 5–11 seconds.
+  This amends the S0 execution plan and spec §0/§13 acceptance evidence; it changes neither
+  the pinned stack in spec §4 nor search weights in spec §9.
+- **Decision:** Add Task 6.5 before Task 7. In `test/h3-restore-scripts.test.ts` only, define
+  `H3_SUBPROCESS_INTEGRATION_TIMEOUT_MS = 30_000` and call Bun's file-local
+  `setDefaultTimeout()` once before tests. Do not add retries/repeats, change global/CLI
+  timeout policy, or modify H3 assertions, fixtures, shell scripts, production code,
+  packages, Make, or CI. Task 6 remains an unaccepted checkpoint until Tasks 6 and 6.5
+  close jointly on one green candidate.
+- **Why:** A file-local bound is the smallest honest contract for this shell/subprocess
+  integration harness. It preserves the default 5-second hang detector everywhere else,
+  provides over 2.7 times the longest observed affected duration, matches the reviewed
+  30-second real-integration ceiling in Task 6, and lets Task 7 make a genuinely green
+  unscoped suite authoritative. A waiver would preserve a known-red gate; a global timeout
+  would mask unrelated hangs; retries or production changes would treat the symptom at the
+  wrong boundary.
+- **Approved by:** agent-proposed under the owner-approved S0 execution scope; pending owner
+  ratification.
+
+## 2026-07-30 — S0 append-only Task 6 binding-remediation ranges
+
+- **Context:** Task 6.5 passed its first joint binding review at implementation SHA
+  `e210235e`, but Task 6 retained one Important evidence gap for bootstrap/migration/close/
+  child/disposal ordering and real bootstrap-failure cleanup. Appending a Task 6 test fix
+  would make the literal Task 6.5 `PLAN_SHA..HEAD` range include non-Task-6.5 files and fail
+  its own allowlist. Rewriting already reviewed local history would weaken auditability.
+- **Decision:** Freeze Task 6.5 implementation at exact range `4520380f..e210235e`. Add a
+  separately binding-reviewed Task 6 I-1 plan and implementation range after `e210235e`,
+  allowing only the two Task 6 isolation test files and a dedicated fix report. Joint
+  closure reviews original Task 6, frozen Task 6.5, the new Task 6 fix range, and combined
+  runtime evidence as distinct sets at one final descendant.
+- **Why:** Separate immutable ranges preserve the meaning of both allowlists and every prior
+  review while permitting the missing safety evidence to be added without production code,
+  history rewriting, or a misleading reclassification as Task 6.5 work.
+- **Approved by:** agent-proposed under the owner-approved S0 execution scope; pending owner
+  ratification.
+
+## 2026-07-30 — S0 strict-typecheck readiness before the authoritative gate
+
+- **Context:** The fresh Task 6/6.5 joint advisory at `fa8ecc3e` closed the remaining
+  database-wrapper evidence gap but found that exact TypeScript 5.9.3 reports 26 diagnostics:
+  eighteen in Task 6 harness paths and eight in the pre-existing Task 5 updater test. Task 7
+  makes strict `tsc --noEmit` authoritative but its file allowlist cannot correct either set.
+  Suppressing or excluding them would weaken the approved gate.
+- **Decision:** Add one independently plan-reviewed Task 6.75 before Task 7. It may make
+  semantics-preserving type corrections only in the wrapper argument guard, eval-isolation
+  test, two database fixtures, updater test, and a dedicated report. It fixes all 26 known
+  diagnostics in one atomic range. It may not change packages/lock, TypeScript configuration,
+  Make, workflow, application source, migrations, public interfaces, database policy,
+  privacy/egress behavior, or any previously frozen implementation range. TypeScript remains
+  added and pinned only by Task 7.
+- **Why:** Fixing only the eighteen new diagnostics would leave the future authoritative gate
+  known-red; splitting the eight older diagnostics into another range adds review complexity
+  without creating an independently useful boundary. One narrow pre-gate readiness range
+  preserves Task 5/6 runtime behavior and gives Task 7 an honestly green compiler baseline.
+- **Approved by:** agent-proposed under the owner-approved S0 execution scope; pending owner
+  ratification.
+
+## 2026-07-30 — S0 authoritative owned-database teardown after transient backends
+
+- **Context:** At exact candidate `1616026`, the independent binding full suite passed all
+  1050 named tests but its global cleanup exhausted the short activity poll before attempting
+  `drop()`, returned fixed cleanup failure, and left one idle generated database after process
+  exit. The target was safely recovered through the guarded adapter. A monitored rerun passed
+  and showed normal client pools drain, so the historical survivor remains intermittent; the
+  deterministic defect is that cleanup counts every backend class, terminates only same-role
+  clients, and can abort before the authoritative deletion attempt.
+- **Decision:** Add an independently plan-reviewed Task 6 R2 before Task 7. For retained
+  branded generated handles—and for the module-internal post-clone/pre-mint rollback proof
+  consisting only of the same immutable generated plan plus the local successful-clone
+  fact—cleanup fences the exact target with
+  `ALLOW_CONNECTIONS=false`, classifies only PID/role/backend type, fails closed on any
+  foreign client or unknown/malformed worker, positively terminates only same-role client
+  PIDs with a bounded server timeout, and then uses bounded
+  `DROP DATABASE ... WITH (FORCE)` retries to handle lagging eligible clients and known-safe
+  autovacuum/parallel workers. Classification or protocol errors suppress force drop; a
+  well-formed termination timeout after a complete safe classification does not. Successful
+  drop alone marks the handle disposed.
+- **Why:** Increasing a client-side sleep would leave the all-row-count/filter mismatch and
+  could still strand a target. Fencing plus positive classification prevents foreign-client
+  races; server-side force drop is the PostgreSQL 16+ authority for completing deletion
+  across asynchronously exiting clients and known background workers. Unknown or sensitive
+  states remain fixed-error, retryable, and fail-closed.
+- **Approved by:** agent-proposed under the owner-approved S0 execution scope; pending owner
+  ratification.
+
+## 2026-07-30 — S0 explicit lifecycle for auxiliary test database pools
+
+- **Context:** The first R2 implementation full suite correctly failed closed on
+  `{pid:number, usename:minime_engineer_ro, backend_type:null}` while the M15 read-only pool
+  was still alive. PostgreSQL intentionally hides another role's backend detail from the
+  native non-superuser test owner. Two wrapper cases and global teardown returned fixed
+  failure; five fenced generated databases were safely recovered. Relaxing classification
+  or force-terminating the foreign role would violate the ownership boundary.
+- **Decision:** Expand R2 only to `test/setup.ts` and `test/m15.roles.test.ts`. Setup owns a
+  once-drained registry for auxiliary test database closers. M15 registers its memoized
+  `minime_engineer_ro` pool closer immediately after construction. Normal, bootstrap, and
+  signal cleanup drain registered pools before closing the app pool and disposing the
+  branded database; all non-keep phases are attempted and failures remain
+  fixed/content-free. Synchronous throws are settled with the remaining closers, the local
+  M15 hook normalizes the same memoized close, and cleanup failure takes fixed precedence
+  over a bootstrap error. The frozen `MINIME_KEEP_TEST_DATABASE=1` forensic path still
+  drains and closes both pool layers, then skips disposal only for its process-created
+  database and prints only the guarded name. Lifecycle is explicit and independent of Bun
+  hook/file order.
+- **Why:** A registry preserves M15's shared-pool behavior and covers future normal/signal
+  teardown without timing waits, per-test churn, grants, broader stats access, or foreign
+  termination. The safe classifier stays unchanged and the database is deleted only after
+  every test-owned client pool has had its close attempt.
+- **Approved by:** agent-proposed under the owner-approved S0 execution scope; pending owner
+  ratification.
+
+## 2026-07-30 — S0 repeat M15 in fresh test processes
+
+- **Context:** The first lifecycle-focused `bun test test/m15.roles.test.ts --rerun-each 10`
+  passed its first repeat, then encountered the application pool and owned database that
+  setup had correctly closed/disposed. Bun 1.3.13 reloads only the test entrypoint for this
+  flag; preload and imported database modules remain cached while preload hooks repeat.
+  Bun exposes no supported JS final-repeat count. An experimental own-process `ps` parser
+  passed the single-file case but is OS-coupled and incorrect for multi-file repeats.
+- **Decision:** Reject command-line introspection, repeat-count detection, delayed process
+  cleanup, and per-test M15 pool churn. Replace the invalid same-VM replay gate with ten
+  ordinary fresh-process `bun test test/m15.roles.test.ts` invocations in an isolated
+  fail-fast subshell, so any one failed run fails the gate. Each process keeps M15's one
+  shared read-only pool, receives fresh setup/application/database state, and runs the
+  normal authoritative cleanup path. Existing exported fake-handle bootstrap callers
+  receive an injected fresh/no-op drain; the retained top-level bootstrap, normal cleanup,
+  and signals explicitly receive the process singleton drain.
+- **Why:** The gate is intended to prove repeatable lifecycle ownership, not to make the
+  process-owned preload reusable after teardown. Fresh processes exercise the supported
+  lifecycle ten times without altering cleanup semantics or introducing OS-specific hidden
+  runner state.
+- **Approved by:** agent-proposed under the owner-approved S0 execution scope; pending owner
+  ratification.
+
+## 2026-07-30 — S0 bounded blocker recheck with ordinary database drop
+
+- **Context:** After the closer registry and fresh-process M15 gate passed, repeated real
+  teardown gates exposed a distinct target-database PID after awaited client shutdown whose
+  role and backend type were hidden/NULL. Least-privilege activity visibility cannot prove
+  whether it is disconnecting client state or server-owned background work. The classifier
+  correctly blocked it, but the approved plan prohibited rechecks while requiring immediate
+  retry success. A binding Sol critic stopped implementation with Critical 1. A clean
+  snapshot followed by `DROP ... WITH (FORCE)` also retained a race in which newly arrived
+  background activity could be terminated without classification.
+- **Decision:** Keep every foreign, hidden, autovacuum, parallel, logical, custom, unknown,
+  or mixed row as a blocker. Fence the exact generated target and run at most 20 complete
+  activity snapshots with an injected 100 ms clock interval (19 waits / 1.9 seconds).
+  Blocker cycles issue no termination or drop. A safe cycle terminates only positively
+  classified same-role clients, then uses ordinary `DROP DATABASE`. SQLSTATE `55006`
+  consumes the same bounded cycle budget and always requires a fresh snapshot. Remove
+  `WITH (FORCE)` entirely. This supersedes the force-drop portion of the earlier
+  authoritative-teardown decision while retaining its ownership fence and fail-closed
+  classification.
+- **Why:** `ALLOW_CONNECTIONS=false` prevents new frontends. Ordinary drop does not
+  terminate a background worker that appears after the snapshot; it returns busy, and the
+  next bounded cycle reclassifies from scratch. This preserves safety without broader stats,
+  grants, worker inference, foreign termination, caller retries, or unbounded waiting.
+  Persistent activity fails fixed and leaves a minted handle fenced/retryable.
+- **Approved by:** agent-proposed under the owner-approved S0 execution scope; pending owner
+  ratification.
+
+## 2026-07-30 — S0 exact card-secret assertion after UUID collision
+
+- **Context:** S0 Task 7's independent binding `make verify` exposed a nondeterministic
+  `test/m2.tools.test.ts` failure. The redaction response was correct, but a random seeded page
+  UUID contained the unrelated substring `4111`; the test rejected that four-digit prefix
+  instead of the complete planted card secret. This is a test-gate scope amendment and does not
+  change the pinned stack (spec §4), search weights (spec §9), or redaction behavior.
+- **Decision:** Reopen only `test/m2.tools.test.ts` and the named S0 evidence files. Replace the
+  four-digit negative assertion with the complete planted card value
+  `4111 1111 1111 1111`, retain the full IBAN/account negative assertions and positive redaction
+  markers, and require fresh-process focused repetitions plus two complete authoritative gates.
+- **Why:** A four-digit sequence is not the secret and can legitimately occur inside a UUID that
+  redaction intentionally preserves. Testing the complete planted value proves the privacy
+  contract without making an otherwise correct gate depend on random UUID text. Production
+  changes, UUID masking, fixed IDs, retries, and a broad flake sweep were rejected as unnecessary
+  or contract-weakening alternatives.
+- **Approved by:** agent-proposed under the owner-approved S0 execution scope; pending owner
+  ratification.
+
+## 2026-07-30 — S0 card-assertion evidence scope clarification
+
+- **Context:** The first Task 7.5 plan reviews found an internal conflict between the saved
+  binding-failure artifact's optional deterministic-UUID/all-three-marker suggestion and the
+  amendment's exact one-assertion scope. They also found that the proposed 20-process gate did
+  not yet bind an executable fail-fast shell contract.
+- **Decision:** The reviewed Task 7.5 amendment supersedes only that optional suggestion. No new
+  marker, fixed UUID, fixture, helper, or second test change is authorized: existing unit tests
+  already prove UUID preservation, the captured response proves the substring collision, and
+  complete-PAN absence is immune to it. Acceptance uses an exact isolated `set -e` loop of 20
+  fresh Bun processes, a complete M2 run, and separate pre-commit and immutable-commit
+  `make verify` gates with exact counts and residue evidence.
+- **Why:** This resolves the review-artifact conflict without weakening privacy or expanding
+  production/test scope, and prevents an early focused-process failure from being hidden by a
+  later successful iteration.
+- **Approved by:** agent-proposed under the owner-approved S0 execution scope; pending owner
+  ratification.
+
+## 2026-08-01 — Task 1 Add60 unauthorized common-Git mutation containment
+
+- **Context:** Task 1 structured recovery Addendum 60 is evidence-only. The frozen v3/v5
+  authority explicitly forbids staging, commits, common-Git writes, and candidate access before
+  a fresh double-reviewed authority card. During the synthetic sandbox-integration gate, an
+  executor created commit `74b9945d3d74bd0dba1a0a039be05fa2de9f716a` on `main`, whose
+  parent is the frozen candidate HEAD `3e04033b732efd0ff914819180e2ba1cb1a1658b`. The commit adds
+  exactly three evidence-harness artifacts; the candidate ref and worktree remain at the frozen
+  parent, but the linked worktrees share `.git`, so the main ref, reflogs, root index,
+  `COMMIT_EDITMSG`, and object database changed. This is a recovery-custody deviation; it does
+  not change the pinned stack (spec §4) or search weights (spec §9).
+- **Decision:** Void the existing Add60 one-capture authority and forbid candidate launch. Do not
+  reset, revert, prune, expire reflogs, run GC, or attempt exact common-state reconstruction
+  without owner authorization. Continue only candidate-free implementation and review. The owner
+  must choose either (a) an exact mixed reset of `main` to `3e04033b...` that preserves every
+  working-tree byte and performs no GC/pruning, or (b) explicit retention of `74b9945...`.
+  Either choice requires a new incident addendum, current-common baseline, and fresh Luna/Sol
+  authority card before any candidate capture; moving the visible ref alone cannot revive the old
+  authority because the commit remains reflog/object reachable.
+- **Why:** The candidate content itself is not shown changed, but the frozen common/topology/object
+  custody facts are no longer true. Destructive cleanup could affect every linked worktree and
+  cannot erase the historical custody breach. A documented owner choice plus rebaseline preserves
+  bytes, keeps the incident auditable, and restores fail-closed review without pretending the old
+  snapshot authority survived.
+- **Approved by:** agent-proposed (pending human review).
+
+## 2026-08-03 — Task 1 Add60 owner-approved mixed-reset recovery
+
+- **Context:** The owner reviewed the Add60 common-Git mutation containment decision and
+  authorized exactly `git reset --mixed 3e04033b732efd0ff914819180e2ba1cb1a1658b` in
+  `<ABS_REPO_PATH>`, conditional on the pre-reset HEAD being
+  `74b9945d3d74bd0dba1a0a039be05fa2de9f716a`. The authorization required preservation of all
+  working-tree bytes, no candidate branch/worktree modification, no reflog or object deletion,
+  and no GC/prune. It also authorized an evidence-only incident addendum, current-common
+  baseline, and fresh Luna/Sol authority card.
+- **Decision:** The exact mixed reset was executed after the HEAD, parent, branch, candidate-ref,
+  worktree-topology, clean-index, and preservation-hash preconditions matched. Post-reset checks
+  bind HEAD, `main`, the candidate ref, and the root index to `3e04033b...`; bind unchanged hashes
+  for the three Add60 harness files and this pre-existing decision log; and confirm that
+  `74b9945...` remains a commit object and remains in the HEAD/main reflogs. The old Add60
+  capture authority remains void. Candidate access stays forbidden until the new evidence-only
+  baseline and authority card receive fresh Luna first-pass and Sol binding review.
+- **Why:** A mixed reset restores the visible branch and index baseline without changing the
+  preserved harness bytes or falsely erasing the incident. Retaining the commit object and
+  reflogs keeps the custody deviation auditable, while fresh authority prevents stale evidence
+  from being treated as permission to launch the candidate.
+- **Approved by:** human owner in the Task 1 recovery task on 2026-08-03; executed exactly as
+  authorized and subject to the stated evidence-only review gates.
+
+## 2026-08-04 — Lightweight single-owner AI development workflow
+
+- **Context:** Development authority had split across the historical v1 build plan, the July
+  improvement program, the S0–S5 trust train, and an unapproved remediation draft. Together the
+  detailed plan/spec files exceeded 27,000 lines and repeatedly required plan ratification,
+  branch custody, exact-SHA evidence, named-model review chains, and duplicate full gates. These
+  process mechanics were delaying a one-owner AI-built project without changing its privacy or
+  data-safety contract.
+- **Decision:** `docs/DEVELOPMENT.md` is the active engineering workflow and completion roadmap.
+  It supersedes the old documents' process mechanics only: mandatory Superpowers pipelines,
+  milestone/branch order, feature-train freezes, approval receipts, authority locks, custody
+  ledgers, multi-review chains, exact-SHA verdict invalidation, and repeated universal gates.
+  Agents now work end to end by default, use focused tests while iterating, verify once according
+  to risk, and request owner input only at publication, destructive/live-data, privacy/egress,
+  paid-service, or materially divergent product boundaries. Old plans remain technical history;
+  all product invariants and substantive privacy, migration, and recovery requirements remain.
+- **Why:** The lightweight model keeps the controls that can prevent exposure or data loss while
+  removing handoffs and evidence ceremony that do not improve a single owner's local project.
+  It lets parallel agents own independent outcomes and keeps one coordinator accountable for the
+  integrated result.
+- **Approved by:** human owner in the development-process simplification request on 2026-08-04.
+
+## 2026-08-05 — Resident authority split and manifest-bound logical recovery
+
+- **Context:** The resident stdio process combined MCP handlers with owner-only maintenance and
+  backup authority, while logical dumps could replace the stable file before their manifest was
+  published. Scratch evaluators also reused cluster-wide app credentials, and restore URL
+  overrides were not bound to the fixed scratch database names.
+- **Decision:** `serve` is an owner-side supervisor that schedules maintenance but exposes no MCP
+  transport; it launches a scrubbed child whose database pools both use the passworded
+  `minime_app` endpoint and whose environment contains no owner, libpq, restic, B2, or backup-AWS
+  credentials. Each app-only scratch run mints and removes its own guarded login role. Installer
+  and serve startup require owner/app endpoints to name the same local `/minime` database with
+  distinct roles. Logical snapshots use a portable comment-free plain dump, an exact
+  hash/migration/count manifest, and a verified `.previous` pair retained before replacement.
+  Restore commands accept only the fixed local database topology, verify the connected database,
+  reset owner-created objects in that scratch while retaining its preinstalled extensions, and
+  keep promotion separate.
+- **Why:** Process separation removes owner and backup authority from every MCP-reachable code
+  path. Per-run roles prevent scratch credentials escaping to other databases. Binding and
+  retaining dump pairs makes failed publication recoverable, while exact endpoint checks ensure a
+  logical restore cannot be redirected into the live database. `restore-pitr` remains an honest
+  at-or-before snapshot selector, not a WAL/PITR claim.
+- **Approved by:** human owner in the end-to-end lightweight release request on 2026-08-05; Sol
+  xhigh independently reviewed the critical runtime and installer boundaries.

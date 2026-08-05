@@ -37,6 +37,11 @@ die() { # exit-code step-name error-sentence fix-command
   exit "$1"
 }
 
+STEP=1
+if ! ollama_preflight; then
+  die 40 env "$(ollama_preflight_error)" "$(ollama_preflight_fix)"
+fi
+
 # --- sudo: resolved lazily, only when an install action actually needs it -----
 SUDO="" SUDO_STATE=unresolved
 resolve_sudo() {
@@ -186,14 +191,46 @@ else
     "PROBE_URL=postgres://minime:minime@localhost:$PG_PORT/minime bun scripts/pg-probe.ts (to see why)"
 fi
 
+# GitHub's Ubuntu 22 image prepends its bundled PostgreSQL 14 client directory to PATH.
+# After installing the supported PG16 server, pin this installer process (including its
+# verification suite and an idempotent re-run) to the matching client tools.
+if [ "$OS_FAMILY" = debian ] && [ -x /usr/lib/postgresql/16/bin/pg_dump ]; then
+  export PATH="/usr/lib/postgresql/16/bin:$PATH"
+fi
+
 # =============================== 4. .env =======================================
 STEP=4
+installer_endpoint_matches() {
+  # Parse only the endpoint identity. Secrets stay in the environment and the helper emits
+  # no URL, so a malformed or remote .env can never echo credentials into installer output.
+  local owner_url="$1" target_url="$2"
+  MINIME_INSTALL_OWNER_URL="$owner_url" MINIME_INSTALL_TARGET_URL="$target_url" \
+    MINIME_SKIP_REPO_DOTENV=1 bun -e '
+      const loopback = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+      const endpoint = (raw) => {
+        let url;
+        try { url = new URL(raw); } catch { return undefined; }
+        if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") return undefined;
+        const host = url.hostname.toLowerCase();
+        if (!loopback.has(host)) return undefined;
+        let database;
+        try { database = decodeURIComponent(url.pathname.replace(/^\//, "")); } catch { return undefined; }
+        if (database !== "minime") return undefined;
+        return `loopback:${url.port || "5432"}/${database}`;
+      };
+      const owner = new URL(process.env.MINIME_INSTALL_OWNER_URL || "");
+      const target = new URL(process.env.MINIME_INSTALL_TARGET_URL || "");
+      const ownerEndpoint = endpoint(owner.toString());
+      const targetEndpoint = endpoint(target.toString());
+      const ok = Boolean(ownerEndpoint && targetEndpoint && ownerEndpoint === targetEndpoint) &&
+        Boolean(owner.username) && owner.username !== "minime_app" && target.username === "minime" &&
+        target.hostname.toLowerCase() === "localhost";
+      process.exit(ok ? 0 : 1);
+    ' >/dev/null 2>&1
+}
+
 if [ -f .env ]; then
-  if [ "$PG_PORT" != 5432 ] && ! grep -q "localhost:$PG_PORT" .env 2>/dev/null; then
-    line WARN env ".env exists but does not point at port $PG_PORT — left untouched"
-  else
-    line SKIP env ".env already exists (never rewritten)"
-  fi
+  line SKIP env ".env already exists (endpoint will be validated; credentials never rewritten)"
 elif [ "$DRY_RUN" = 1 ]; then
   line OK env "(dry-run) would copy .env.example -> .env"
 else
@@ -203,17 +240,29 @@ else
   fi
   line OK env "created from .env.example"
 fi
-export DATABASE_URL="postgres://minime:minime@localhost:$PG_PORT/minime"
+
+# The owner DSN is the control-plane connection used by migrations/provisioning. Existing
+# installs may use a different owner password, but the endpoint must remain the installer's
+# local minime database. Reject before Ollama/migration work instead of silently retargeting.
+if [ "$DRY_RUN" = 0 ] || [ -f .env ]; then
+  owner_url="$(repo_env_value DATABASE_URL .env 2>/dev/null || true)"
+  [ -n "$owner_url" ] || die 40 env "DATABASE_URL is required in existing .env" \
+    "set DATABASE_URL=postgres://<owner>:<password>@localhost:$PG_PORT/minime in .env, then re-run"
+  installer_target="postgres://minime:minime@localhost:$PG_PORT/minime"
+  installer_endpoint_matches "$owner_url" "$installer_target" ||
+    die 40 env "DATABASE_URL must target the installer loopback endpoint" \
+      "set DATABASE_URL=postgres://<owner>:<password>@localhost:$PG_PORT/minime in .env, then re-run"
+  export DATABASE_URL="$owner_url"
+fi
 
 # =============================== 5. ollama =====================================
 STEP=5
 degrade() { DEGRADED=1; SUMMARY_OLLAMA="$2"; line WARN ollama "$1"; note "continuing degraded: search=FTS-only, inbox=review-queue"; note "FIX later: $3"; }
 
-pull_model() { # blocking, heartbeat every 20s, never raw progress bars
-  local model="$1" log pid started=$SECONDS last_beat=0 elapsed
+pull_model() {
+  local model="$1" pid started=$SECONDS last_beat=0 elapsed
   ollama_has_model "$model" && { note "model present: $model"; return 0; }
-  log="$(mktemp)"
-  ollama pull "$model" >"$log" 2>&1 &
+  ollama_pull_model "$model" "$PULL_TIMEOUT" &
   pid=$!
   while kill -0 "$pid" 2>/dev/null; do
     sleep 2
@@ -223,13 +272,18 @@ pull_model() { # blocking, heartbeat every 20s, never raw progress bars
       last_beat=$elapsed
     fi
     if [ "$elapsed" -ge "$PULL_TIMEOUT" ]; then
-      kill "$pid" 2>/dev/null
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
       note "pull of $model timed out after ${PULL_TIMEOUT}s (MINIME_PULL_TIMEOUT)"
       return 1
     fi
   done
-  wait "$pid" || { note "pull failed: $(tail -1 "$log" 2>/dev/null)"; return 1; }
-  note "pulled $model"
+  if wait "$pid"; then
+    note "pulled $model"
+    return 0
+  fi
+  note "pull failed for $model"
+  return 1
 }
 
 if [ "$NO_OLLAMA" = 1 ]; then
@@ -253,15 +307,17 @@ else
         fi
       fi
     fi
-    # non-systemd boxes / fresh installs: self-start and poll
-    if have ollama && ! ollama_reachable; then
-      nohup ollama serve >.ollama-serve.log 2>&1 &
+    # Only a plain HTTP root endpoint can launch a local server. HTTPS and paths
+    # describe an existing proxy and must remain untouched when unreachable.
+    if [ "$OLLAMA_CAN_LAUNCH" = 1 ] && have ollama && ! ollama_reachable; then
+      nohup env -u OLLAMA_HOST OLLAMA_HOST="$OLLAMA_BIND_AUTHORITY" \
+        ollama serve >.ollama-serve.log 2>&1 &
       for _ in $(seq 1 30); do ollama_reachable && break; sleep 1; done
     fi
   fi
   if ! ollama_reachable; then
     degrade "could not install/start ollama" "absent (search=FTS-only, inbox=review-queue)" \
-      "install from ollama.com, then: ollama pull $EMBED_MODEL && ollama pull $CLASSIFY_MODEL && make embed"
+      "install Ollama from ollama.com, then rerun: bash scripts/install.sh; then: make embed"
   else
     for model in $PULL_MODELS; do
       pull_model "$model" || true # absence is judged below, not per-pull
@@ -274,7 +330,7 @@ else
     done
     if [ -n "$MISSING" ]; then
       degrade "required model(s) absent:$MISSING" "partial (missing:$MISSING)" \
-        "ollama pull$MISSING && make embed"
+        "rerun: bash scripts/install.sh; then: make embed"
     else
       SUMMARY_OLLAMA="ok ($EMBED_MODEL,$CLASSIFY_MODEL)"
       line OK ollama "server up, models present: $EMBED_MODEL $CLASSIFY_MODEL"
@@ -287,9 +343,46 @@ STEP=6
 if [ "$DRY_RUN" = 1 ]; then
   line OK migrate "(dry-run) would apply db/migrations/*.sql"
 else
-  out="$(bun run src/cli.ts migrate 2>&1)" ||
-    die 50 migrate "$(echo "$out" | tail -1)" "bun run src/cli.ts migrate (full output)"
+  out="$(bun run src/cli.ts migrate --context install 2>&1)" ||
+    die 50 migrate "$(echo "$out" | tail -1)" "bun run src/cli.ts migrate --context install (full output)"
   line OK migrate "$(echo "$out" | tail -1)"
+fi
+
+# Cut over only after migration 021 has installed the least-privilege grants. A failed
+# migration therefore cannot publish a credential for a half-configured resident role.
+if [ "$DRY_RUN" = 0 ]; then
+  if ! MINIME_APP_PASSWORD="$(repo_env_value MINIME_APP_PASSWORD .env 2>/dev/null)" ||
+     ! [[ "$MINIME_APP_PASSWORD" =~ ^[A-Za-z0-9_-]{24,128}$ ]]; then
+    if have openssl; then
+      MINIME_APP_PASSWORD="$(openssl rand -hex 32)"
+    else
+      MINIME_APP_PASSWORD="$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9_-' | cut -c1-64)"
+    fi
+    [ "${#MINIME_APP_PASSWORD}" -ge 24 ] || die 40 env "could not generate runtime role secret" \
+      "install openssl, then re-run bash scripts/install.sh"
+  fi
+  APP_DATABASE_URL="postgres://minime_app:$MINIME_APP_PASSWORD@localhost:$PG_PORT/minime"
+  export MINIME_APP_PASSWORD
+  export MINIME_APP_DATABASE_URL="$APP_DATABASE_URL"
+  bun run scripts/provision-runtime-role.ts >/dev/null 2>&1 ||
+    die 40 env "could not provision restricted runtime role" \
+      "run bun scripts/provision-runtime-role.ts with the owner database configured, then re-run"
+  chmod 600 .env || die 40 env "cannot protect environment file" "check repository permissions"
+  env_tmp="$(mktemp .env.runtime.XXXXXX)" ||
+    die 40 env "cannot stage runtime role endpoint" "check repository permissions"
+  MINIME_APP_PASSWORD="$MINIME_APP_PASSWORD" MINIME_APP_DATABASE_URL="$APP_DATABASE_URL" awk \
+    'BEGIN{seen_password=0;seen_url=0}
+     /^MINIME_APP_PASSWORD=/{if(!seen_password){print "MINIME_APP_PASSWORD=" ENVIRON["MINIME_APP_PASSWORD"];seen_password=1};next}
+     /^MINIME_APP_DATABASE_URL=/{if(!seen_url){print "MINIME_APP_DATABASE_URL=" ENVIRON["MINIME_APP_DATABASE_URL"];seen_url=1};next}
+     {print}
+     END{
+       if(!seen_password) print "MINIME_APP_PASSWORD=" ENVIRON["MINIME_APP_PASSWORD"]
+       if(!seen_url) print "MINIME_APP_DATABASE_URL=" ENVIRON["MINIME_APP_DATABASE_URL"]
+     }' \
+    .env >"$env_tmp" && chmod 600 "$env_tmp" && mv "$env_tmp" .env || {
+    rm -f "$env_tmp"
+    die 40 env "cannot publish runtime role endpoint" "check repository permissions"
+  }
 fi
 
 # =============================== 7. demo seed ==================================

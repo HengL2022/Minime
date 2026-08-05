@@ -1,7 +1,7 @@
 // M4 acceptance: importers are idempotent (run twice = identical counts), malformed rows
 // are logged not fatal, and an inbox text file becomes a filed task end-to-end.
 
-import { beforeAll, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { insertInboxItem } from "../src/db/repo";
@@ -11,6 +11,7 @@ import { importHealth } from "../src/importers/health";
 import { type TxProfile, importTransactions, parseCsv } from "../src/importers/transactions";
 import { heuristicClassify } from "../src/pipeline/classify";
 import { processInboxFile, startWatcher } from "../src/pipeline/watcher";
+import { setNow } from "../src/util/clock";
 import { config } from "../src/util/config";
 import { countEvents, resetDb, testSql as sql } from "./helpers";
 
@@ -121,6 +122,9 @@ describe("email-meta importer", () => {
 });
 
 describe("inbox e2e (watcher pipeline, classifier mocked)", () => {
+  beforeEach(() => setNow(new Date("2026-07-01T12:00:00.000Z")));
+  afterEach(() => setNow(null));
+
   test("a text capture becomes a filed task with provenance + archive copy", async () => {
     const inbox = join(config.dataDir, "inbox");
     await mkdir(inbox, { recursive: true });
@@ -216,7 +220,7 @@ describe("inbox startup drain (watcher recovery)", () => {
     // A row synced from another machine: classifier_output IS NULL and raw_path points at a
     // file that never existed here (e.g. macOS /Users/... path). drainStartup used to skip
     // these silently, so they sat 'pending' forever and inflated the review queue.
-    const ghostPath = "/Users/someoneelse/.hermes/data/inbox/capture-ghost.md";
+    const ghostPath = "/fictional-owner/.hermes/data/inbox/capture-ghost.md";
     const { id } = await insertInboxItem({
       rawPath: ghostPath,
       mime: "text/markdown",

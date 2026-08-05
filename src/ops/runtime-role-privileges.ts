@@ -1,0 +1,49 @@
+/** Reviewable application-role allow-list.  Migration 021 is the source of enforcement. */
+export type TablePrivilege = "SELECT" | "INSERT" | "UPDATE" | "DELETE";
+
+export const RUNTIME_ROLE_TABLE_PRIVILEGES = {
+  schema_migrations: ["SELECT"],
+  values_items: ["SELECT", "INSERT"],
+  goals: ["SELECT", "INSERT"],
+  principles: ["SELECT", "INSERT"],
+  commitments: ["SELECT", "INSERT"],
+  journal_entries: ["SELECT", "INSERT"],
+  person_aliases: ["SELECT", "INSERT"],
+  interactions: ["SELECT", "INSERT"],
+  calendar_events: ["SELECT", "INSERT", "UPDATE"],
+  email_meta: ["SELECT", "INSERT"],
+  org_aliases: ["SELECT", "INSERT"],
+  decision_transcripts: ["SELECT", "INSERT"],
+  decision_branches: ["SELECT", "INSERT"],
+  edge_validations: ["SELECT", "INSERT"],
+  tasks: ["SELECT", "INSERT", "UPDATE"],
+  decisions: ["SELECT", "INSERT", "UPDATE"],
+  people: ["SELECT", "INSERT", "UPDATE"],
+  pages: ["SELECT", "INSERT", "UPDATE"],
+  metric_values: ["SELECT", "INSERT", "UPDATE"],
+  review_queue: ["SELECT", "INSERT", "UPDATE"],
+  inbox_items: ["SELECT", "INSERT", "UPDATE"],
+  orgs: ["SELECT", "INSERT", "UPDATE"],
+  events: ["SELECT", "INSERT"],
+  chunks: ["SELECT", "INSERT", "UPDATE", "DELETE"],
+  edges: ["SELECT", "INSERT", "UPDATE", "DELETE"],
+  session_unlocks: ["INSERT"],
+  transactions: ["INSERT"],
+  health_samples: ["INSERT"],
+  metric_defs: ["SELECT"],
+} as const satisfies Record<string, readonly TablePrivilege[]>;
+
+export const RUNTIME_ROLE_TABLES = Object.freeze(Object.keys(RUNTIME_ROLE_TABLE_PRIVILEGES));
+// No system/catalog functions are granted.  Keep this explicit so the manifest cannot drift
+// from migration 021's deny-all posture.
+export const RUNTIME_ROLE_SYSTEM_FUNCTIONS = Object.freeze([] as const);
+
+export const RUNTIME_ROLE_PRIVILEGE_MANIFEST = Object.freeze({
+  tables: RUNTIME_ROLE_TABLE_PRIVILEGES,
+  database: Object.freeze({ app: ["CONNECT"] as const }),
+  schema: Object.freeze({ app: ["USAGE"] as const }),
+  systemFunctions: RUNTIME_ROLE_SYSTEM_FUNCTIONS,
+});
+
+export const RUNTIME_ROLE_PRIVILEGES = RUNTIME_ROLE_PRIVILEGE_MANIFEST;
+export type RuntimeRolePrivilegeManifest = typeof RUNTIME_ROLE_PRIVILEGE_MANIFEST;

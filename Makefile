@@ -1,11 +1,19 @@
 SHELL := /bin/bash
 BUN := bun
 
-.PHONY: install setup install-hooks onboard update up down psql-ro migrate seed embed test lint verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 verify-m13 verify-m14 verify-m15 check-subsystems verify restore-drill restore-pitr promote-restore eval-search eval-search-live eval-snapshot eval-pmb eval-graph-hygiene
+# Freeze command-line BASE literally before exporting it to the recipe shell. This keeps
+# Make functions such as $(shell ...) and $(file ...) data in the ref, never Make actions.
+ifneq ($(origin BASE),undefined)
+override BASE_LITERAL := $(value BASE)
+override BASE := $(BASE_LITERAL)
+export BASE
+endif
 
-# Scratch DB for MinimeBench — a throwaway database the runner DROPs and rebuilds. Derived
-# from DATABASE_URL so non-default ports just work; override EVAL_DATABASE_URL to change it.
-EVAL_DATABASE_URL ?= postgres://minime:minime@localhost:5432/minime_eval
+.PHONY: install setup install-hooks onboard update up down psql-ro migrate provision-runtime-role seed embed test lint format typecheck typecheck-ops verify-m0 verify-m0-offline verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 verify-m13 verify-m14 verify-m15 check-subsystems check-tracked-privacy verify-offline verify restore-drill restore-pitr promote-restore eval-search eval-search-live eval-snapshot eval-pmb eval-pmb-official eval-graph-hygiene eval-skills optimize-skill
+
+# Every automated child is provisioned by this parent-owned runner. The child receives only
+# the generated loopback URL and (where applicable) one approved compatibility alias.
+TEST_DB_RUNNER := $(BUN) run scripts/with-test-database.ts
 
 # One-command setup for fresh machines (see AGENTS.md). Safe to re-run.
 install:
@@ -43,7 +51,29 @@ psql-ro:
 	@psql "$$(grep '^DATABASE_URL=' .env.engineering | cut -d= -f2-)"
 
 migrate:
-	@$(BUN) run src/cli.ts migrate
+	@$(BUN) run src/cli.ts migrate --context direct
+
+# Existing installs: provision the restricted role and publish its DSN in .env. The owner DSN
+# remains DATABASE_URL for migrations; the resident app cuts over on the generated endpoint.
+provision-runtime-role:
+	@set -eu; \
+	owner_url="$$(sed -n 's/^DATABASE_URL=//p' .env | tail -n 1)"; \
+	if [ -n "$${DATABASE_URL:-}" ] && [ "$$DATABASE_URL" != "$$owner_url" ]; then echo 'runtime_role_configuration_invalid' >&2; exit 2; fi; \
+	app_password="$$(sed -n 's/^MINIME_APP_PASSWORD=//p' .env | tail -n 1)"; \
+	test -n "$$owner_url" || { echo 'runtime_role_configuration_invalid' >&2; exit 2; }; \
+	DATABASE_URL="$$owner_url" $(BUN) run src/cli.ts migrate --context direct; \
+	if [ -n "$$app_password" ] && ! [[ "$$app_password" =~ ^[A-Za-z0-9_-]{24,128}$$ ]]; then echo 'runtime_role_configuration_invalid' >&2; exit 2; fi; \
+	if [ -z "$$app_password" ]; then \
+		if command -v openssl >/dev/null 2>&1; then app_password="$$(openssl rand -hex 32)"; else app_password="$$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9_-' | cut -c1-64)"; fi; \
+	fi; \
+	[[ "$$app_password" =~ ^[A-Za-z0-9_-]{24,128}$$ ]] || { echo 'runtime_role_configuration_invalid' >&2; exit 2; }; \
+	app_url="$$(DATABASE_URL="$$owner_url" MINIME_APP_PASSWORD="$$app_password" $(BUN) -e 'const u=new URL(process.env.DATABASE_URL);u.username="minime_app";u.password=process.env.MINIME_APP_PASSWORD;console.log(u.toString())')"; \
+	DATABASE_URL="$$owner_url" MINIME_APP_PASSWORD="$$app_password" $(BUN) run scripts/provision-runtime-role.ts; \
+	chmod 600 .env; \
+	tmp="$$(mktemp .env.runtime.XXXXXX)"; \
+	MINIME_APP_PASSWORD="$$app_password" MINIME_APP_DATABASE_URL="$$app_url" awk 'BEGIN{seen_password=0;seen_url=0} /^MINIME_APP_PASSWORD=/{if(!seen_password){print "MINIME_APP_PASSWORD=" ENVIRON["MINIME_APP_PASSWORD"];seen_password=1};next} /^MINIME_APP_DATABASE_URL=/{if(!seen_url){print "MINIME_APP_DATABASE_URL=" ENVIRON["MINIME_APP_DATABASE_URL"];seen_url=1};next} {print} END{if(!seen_password) print "MINIME_APP_PASSWORD=" ENVIRON["MINIME_APP_PASSWORD"]; if(!seen_url) print "MINIME_APP_DATABASE_URL=" ENVIRON["MINIME_APP_DATABASE_URL"]}' .env > "$$tmp"; \
+	chmod 600 "$$tmp"; \
+	mv "$$tmp" .env
 
 seed:
 	@$(BUN) run src/cli.ts seed
@@ -55,10 +85,23 @@ test:
 	@$(BUN) test
 
 lint:
-	@bunx biome check --write .
+	@$(BUN) run lint
+
+format:
+	@$(BUN) run format
+
+typecheck:
+	@$(BUN) run typecheck
+
+typecheck-ops:
+	@$(BUN) run typecheck:ops
 
 verify-m0:
 	@$(BUN) run src/verify/m0.ts
+
+verify-m0-offline:
+	@MINIME_MOCK_OLLAMA=1 $(TEST_DB_RUNNER) --label verify_m0 -- \
+		$(BUN) run src/verify/m0.ts
 
 verify-m1:
 	@$(BUN) test test/m1.*.test.ts
@@ -115,17 +158,23 @@ verify-m15:
 check-subsystems:
 	@$(BUN) run scripts/check-subsystems.ts
 
-# The full gate: every milestone suite PLUS the retrieval-regression gate (offline
-# MinimeBench vs the committed baseline floors) — new features must not quietly make
-# retrieval worse (gbrain-evals stability discipline, DECISIONS.md 2026-06-12).
-verify: verify-m0 verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 verify-m13 verify-m14 verify-m15 check-subsystems eval-search
+# Offline tracked-tree/outgoing-range privacy scan. Terms are supplied only through stdin.
+check-tracked-privacy:
+	@$(BUN) run scripts/check-tracked-privacy.ts --base "$${BASE}"
+
+verify-offline: verify-m0-offline test lint typecheck typecheck-ops check-subsystems
+
+# Release/search gate: the complete offline verification gate plus retrieval-regression
+# evaluation against committed baseline floors. Do not run both targets separately.
+verify: verify-offline eval-search
 
 # Restores the latest restic snapshot into a scratch DB and runs the m1 suite against it.
 restore-drill:
 	@./scripts/restore-drill.sh
 
-# Point-in-time restore into the scratch minime_restore DB (live untouched). Picks the latest
-# db-snap/dream snapshot at or before TIME. Usage: make restore-pitr TIME="2026-06-12 14:30"
+# Logical snapshot restore into scratch minime_restore (live untouched). The compatibility
+# command name is restore-pitr; it picks the latest db-snap/dream snapshot at or before TIME.
+# This is not WAL/PITR. Usage: make restore-pitr TIME="2026-06-12 14:30"
 restore-pitr:
 	@test -n "$(TIME)" || { echo 'usage: make restore-pitr TIME="2026-06-12 14:30"'; exit 2; }
 	@TIME="$(TIME)" ./scripts/restore-pitr.sh
@@ -136,12 +185,8 @@ promote-restore:
 	@./scripts/promote-restore.sh
 
 # MinimeBench (offline, CI-safe): deterministic mock embeddings, single run, full area table.
-# DATABASE_URL is pinned to the scratch DB at PROCESS START — the pool binds at module load,
-# so an in-process swap is too late (incident 2026-06-12: the runner reset the real DB).
 eval-search:
-	@createdb $(notdir $(EVAL_DATABASE_URL)) 2>/dev/null || true
-	@MINIME_MOCK_OLLAMA=1 DATABASE_URL=$(EVAL_DATABASE_URL) EVAL_DATABASE_URL=$(EVAL_DATABASE_URL) \
-		$(BUN) run scripts/eval-search.ts --mode mock --round mock
+	@MINIME_MOCK_OLLAMA=1 $(BUN) run scripts/eval-search.ts --mode mock --round mock
 
 # LongMemEval-s (public, 500 questions): one-off ~49M-token ingest, then judge-free
 # session-level recall. Same scratch-DB safety contract as MinimeBench.
@@ -155,63 +200,48 @@ eval-longmemeval:
 # In-process runner — reads the harness clone's fixtures as data, executes none of its
 # code, ports its scorer verbatim. Needs PMB_DIR (the clone), a live embed provider, and
 # ideally the reranker (autocut is the experiment). ROUND labels the scorecard.
-EVAL_PMB_DATABASE_URL ?= postgres://minime:minime@localhost:5432/minime_eval_pmb
 ROUND ?= r1
 eval-pmb:
-	@createdb -O minime $(notdir $(EVAL_PMB_DATABASE_URL)) 2>/dev/null || true
-	@psql -d $(notdir $(EVAL_PMB_DATABASE_URL)) \
-		-c "create extension if not exists vector; create extension if not exists pgcrypto;" >/dev/null
-	@DATABASE_URL=$(EVAL_PMB_DATABASE_URL) EVAL_PMB_DATABASE_URL=$(EVAL_PMB_DATABASE_URL) \
+	@$(TEST_DB_RUNNER) --label eval_pmb --database-env EVAL_PMB_DATABASE_URL -- \
 		$(BUN) run scripts/eval-precisionmembench.ts --out /tmp/minime-pmb
 	@$(BUN) run scripts/eval-pmb-report.ts /tmp/minime-pmb --round $(ROUND)
 
 # Official-harness variant for leaderboard submission: runs the third-party ava harness
 # (external code — run this yourself) against scripts/pmb-server.ts over HTTP.
 eval-pmb-official:
-	@./scripts/eval-pmb.sh
+	@$(TEST_DB_RUNNER) --label eval_pmb_official --database-env EVAL_PMB_DATABASE_URL -- \
+		./scripts/eval-pmb.sh
 
 # SkillEval: behavioral contracts of agents/skills/*.md, driven by a real model
 # (CLASSIFY_PROVIDER/CLASSIFY_MODEL) through the audited tool door; judge-free scoring
 # from the events log. Runs on the standing config (Bedrock LLM + OpenRouter embed);
 # local Ollama is only the free fallback for harness smoke tests.
-EVAL_SKILLS_DATABASE_URL ?= postgres://minime:minime@localhost:5432/minime_eval_skills
-
 # SkillOpt: gbrain-style optimizer loop. Trains on fixtures/skill-tasks/train/, gated by
 # contamination check + train-improves + held-out-no-regression. Candidates go to
 # agents/skills/candidates/ for review. Usage: make optimize-skill SUITE=query
 # [START_FROM=fixtures/skill-tasks/deficient-query.md] for the loop-validation run.
 optimize-skill:
 	@test -n "$(SUITE)" || { echo "usage: make optimize-skill SUITE=<suite> [START_FROM=...]"; exit 2; }
-	@createdb -O minime $(notdir $(EVAL_SKILLS_DATABASE_URL)) 2>/dev/null || true
-	@psql -d $(notdir $(EVAL_SKILLS_DATABASE_URL)) \
-		-c "create extension if not exists vector; create extension if not exists pgcrypto;" >/dev/null
-	@DATABASE_URL=$(EVAL_SKILLS_DATABASE_URL) EVAL_SKILLS_DATABASE_URL=$(EVAL_SKILLS_DATABASE_URL) \
-		$(BUN) run scripts/optimize-skill.ts --suite $(SUITE) --round $(or $(ROUND),r1) \
-		$(if $(START_FROM),--start-from $(START_FROM),)
+	@$(TEST_DB_RUNNER) \
+		--label eval_skill_optimize --database-env EVAL_SKILLS_DATABASE_URL -- \
+		$(BUN) run scripts/optimize-skill.ts --suite $(SUITE) --round $(or $(ROUND),r1) $(if $(START_FROM),--start-from $(START_FROM),)
 
 eval-skills:
-	@createdb -O minime $(notdir $(EVAL_SKILLS_DATABASE_URL)) 2>/dev/null || true
-	@psql -d $(notdir $(EVAL_SKILLS_DATABASE_URL)) \
-		-c "create extension if not exists vector; create extension if not exists pgcrypto;" >/dev/null
-	@DATABASE_URL=$(EVAL_SKILLS_DATABASE_URL) EVAL_SKILLS_DATABASE_URL=$(EVAL_SKILLS_DATABASE_URL) \
+	@$(TEST_DB_RUNNER) \
+		--label eval_skills --database-env EVAL_SKILLS_DATABASE_URL -- \
 		$(BUN) run scripts/eval-skills.ts --round $(ROUND)
 
 # Release snapshot: dated, committed scorecard for the stability streak. Usage:
 #   make eval-snapshot ROUND=v0.9   → docs/benchmarks/<date>-release-v0.9-minimebench.md
 eval-snapshot:
 	@test -n "$(ROUND)" || { echo "usage: make eval-snapshot ROUND=<release-tag>"; exit 2; }
-	@createdb $(notdir $(EVAL_DATABASE_URL)) 2>/dev/null || true
-	@MINIME_MOCK_OLLAMA=1 DATABASE_URL=$(EVAL_DATABASE_URL) EVAL_DATABASE_URL=$(EVAL_DATABASE_URL) \
-		$(BUN) run scripts/eval-search.ts --mode mock --round release-$(ROUND)
+	@MINIME_MOCK_OLLAMA=1 $(BUN) run scripts/eval-search.ts --mode mock --round release-$(ROUND) --publish-scorecard
 
 # MinimeBench (live): configured embed provider, N=3 min/median/max. Needs a provider + DB.
 eval-search-live:
-	@createdb $(notdir $(EVAL_DATABASE_URL)) 2>/dev/null || true
-	@DATABASE_URL=$(EVAL_DATABASE_URL) EVAL_DATABASE_URL=$(EVAL_DATABASE_URL) \
-		$(BUN) run scripts/eval-search.ts --mode live --round $(or $(ROUND),live-r1) --repeats 3
+	@$(BUN) run scripts/eval-search.ts --mode live --round $(or $(ROUND),live-r1) --repeats 3 --publish-scorecard
 
 # W1 graph-hygiene live bake (owner-run; CI bar is the mock path inside verify-m14)
 eval-graph-hygiene:
-	@createdb $(notdir $(EVAL_DATABASE_URL)) 2>/dev/null || true
-	@DATABASE_URL=$(EVAL_DATABASE_URL) EVAL_DATABASE_URL=$(EVAL_DATABASE_URL) \
+	@$(TEST_DB_RUNNER) --label eval_graph_hygiene --database-env EVAL_DATABASE_URL -- \
 		$(BUN) run scripts/eval-graph-hygiene.ts

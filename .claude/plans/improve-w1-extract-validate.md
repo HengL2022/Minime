@@ -1,8 +1,7 @@
 # W1 — Extractor re-validation dream step Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development or
-> superpowers:executing-plans. Parent contract: `improve-2026-07-program.md`. **Depends on W3
-> merged** (`classifyProviderForTier`/`classifyIsCloudForTier`).
+> **Historical implementation record.** W1 shipped. Its mandatory skills, parent orchestration,
+> review gates, and branch choreography are inactive; current work follows `docs/DEVELOPMENT.md`.
 
 **Goal:** Close the phantom-entity bug class structurally: a nightly dream step batch-verifies a
 budget of `system:extract` edges with the classify model and **flags disagreements to the review

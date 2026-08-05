@@ -26,7 +26,7 @@ export async function resetDb(): Promise<void> {
   for (const f of fns) {
     await sql.unsafe(`drop function if exists ${f} cascade`);
   }
-  await migrate();
+  await migrate({ kind: "test" });
 }
 
 export async function resetAndSeed(): Promise<void> {

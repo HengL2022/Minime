@@ -2,10 +2,12 @@
 // audit (I8) and redaction (§8). The MCP server and the test harness both go through here,
 // so what we test is exactly what agents get.
 
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { type ZodRawShape, z } from "zod";
+import { withActorDbSession } from "../../db/repo";
 import { configuredTimeZone } from "../../util/clock";
-import { auditToolCall } from "../audit";
-import { type Envelope, ToolError } from "../envelope";
+import { type AuditSink, eventAuditSink } from "../audit";
+import { type Envelope, ToolError, localizeEnvelopeDates } from "../envelope";
 import { redactDeep } from "../redact";
 
 export interface ToolCtx {
@@ -22,7 +24,44 @@ export interface ToolDef {
 
 export type ToolResult =
   | { ok: true; envelope: Envelope }
-  | { ok: false; error: { code: string; message: string } };
+  | { ok: false; error: { code: string; message: string; retry?: boolean } };
+
+export const ATTEMPT_FAILURE_RESULT = {
+  isError: true,
+  content: [
+    {
+      type: "text",
+      text: '{"error":{"code":"INTERNAL","message":"Tool unavailable before execution.","retry":true}}',
+    },
+  ],
+} as const satisfies CallToolResult;
+
+export const COMPLETED_RESULT_WITHHELD = {
+  isError: false,
+  content: [
+    {
+      type: "text",
+      text: '{"data":{"status":"completed_result_withheld","retry":false},"sources":[],"gaps":["completion audit unavailable; result withheld"]}',
+    },
+  ],
+} as const satisfies CallToolResult;
+
+export const AUDIT_UNAVAILABLE_RESULT = {
+  isError: true,
+  content: [
+    {
+      type: "text",
+      text: '{"error":{"code":"AUDIT_UNAVAILABLE","message":"Tool result withheld because completion audit is unavailable.","retry":false}}',
+    },
+  ],
+} as const satisfies CallToolResult;
+
+export const INTERNAL_EXECUTION_RESULT = {
+  isError: true,
+  content: [
+    { type: "text", text: '{"error":{"code":"INTERNAL","message":"Internal tool error."}}' },
+  ],
+} as const satisfies CallToolResult;
 
 export const TIME_ZONE_SCHEMA = {
   time_zone: z
@@ -50,30 +89,107 @@ export function timeZoneFromParams(params: unknown): string | undefined {
   }
 }
 
-export async function invokeTool(tool: ToolDef, params: any, ctx: ToolCtx): Promise<ToolResult> {
+export async function executeTool(tool: ToolDef, params: any, ctx: ToolCtx): Promise<ToolResult> {
   try {
     const timeZone = ctx.timeZone ?? timeZoneFromParams(params);
     const parsed = z.object(schemaWithCommonParams(tool.schema)).parse(params);
-    const env = await tool.handler(parsed, { ...ctx, timeZone });
+    const env = await withActorDbSession(ctx.actor, () =>
+      tool.handler(parsed, { ...ctx, timeZone }),
+    );
     const redacted = redactDeep(env);
-    await auditToolCall({
-      actor: ctx.actor,
-      tool: tool.name,
-      params,
-      returnedIds: env.sources.map((s) => s.id),
-    });
     return { ok: true, envelope: redacted };
   } catch (err) {
     const code =
       err instanceof ToolError ? err.code : err instanceof z.ZodError ? "BAD_INPUT" : "INTERNAL";
     const message = err instanceof Error ? err.message : String(err);
-    await auditToolCall({
-      actor: ctx.actor,
-      tool: tool.name,
-      params,
-      returnedIds: [],
-      error: code,
-    }).catch(() => {});
     return { ok: false, error: { code, message: redactDeep(message) } };
+  }
+}
+
+export interface AuditableToolResult {
+  toolResult: ToolResult;
+  callToolResult: CallToolResult;
+  returnedIds: string[];
+  returnedCount: number;
+  error?: string;
+}
+
+export function toAuditableToolResult(result: ToolResult, timeZone?: string): AuditableToolResult {
+  if (!result.ok) {
+    return {
+      toolResult: result,
+      callToolResult: {
+        isError: true,
+        content: [{ type: "text", text: JSON.stringify({ error: result.error }) }],
+      },
+      returnedIds: [],
+      returnedCount: 0,
+      error: result.error.code,
+    };
+  }
+  const returnedIds = result.envelope.sources.map((source) => source.id);
+  return {
+    toolResult: result,
+    callToolResult: {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(localizeEnvelopeDates(result.envelope, timeZone), null, 2),
+        },
+      ],
+    },
+    returnedIds,
+    returnedCount: returnedIds.length,
+  };
+}
+
+export async function invokeTool(
+  tool: ToolDef,
+  params: any,
+  ctx: ToolCtx,
+  auditSink: AuditSink = eventAuditSink,
+): Promise<ToolResult> {
+  let hash: string;
+  try {
+    hash = await auditSink.attempt(ctx.actor, tool.name, params);
+  } catch {
+    return {
+      ok: false,
+      error: { code: "INTERNAL", message: "Tool unavailable before execution.", retry: true },
+    };
+  }
+
+  const result = await executeTool(tool, params, ctx);
+  const allIds = result.ok ? result.envelope.sources.map((source) => source.id) : [];
+  const ids = allIds.slice(0, 100);
+  const returnedCount = allIds.length;
+  const error = result.ok ? undefined : result.error.code;
+  try {
+    const audit = await auditSink.result(ctx.actor, tool.name, hash, {
+      returnedIds: ids,
+      returnedCount,
+      ...(error ? { error } : {}),
+      delivery: "direct",
+    });
+    void audit.eventId;
+    return result;
+  } catch {
+    return result.ok
+      ? {
+          ok: true,
+          envelope: {
+            data: { status: "completed_result_withheld", retry: false },
+            sources: [],
+            gaps: ["completion audit unavailable; result withheld"],
+          },
+        }
+      : {
+          ok: false,
+          error: {
+            code: "AUDIT_UNAVAILABLE",
+            message: "Tool result withheld because completion audit is unavailable.",
+            retry: false,
+          },
+        };
   }
 }

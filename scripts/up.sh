@@ -6,6 +6,12 @@ cd "$(dirname "$0")/.."
 # shellcheck source=scripts/lib.sh
 . scripts/lib.sh
 
+if ! ollama_preflight; then
+  echo "ERROR: $(ollama_preflight_error)." >&2
+  echo "FIX: $(ollama_preflight_fix)." >&2
+  exit 40
+fi
+
 if docker_available; then
   echo "==> Starting Postgres via Docker Compose"
   MINIME_PG_PORT="$PG_PORT" docker compose up -d --wait
@@ -53,10 +59,10 @@ if ollama_reachable; then
     if ollama_has_model "$model"; then
       echo "==> Ollama model present: $model"
     else
-      echo "WARNING: Ollama model missing: $model  (run: ollama pull $model)" >&2
+      echo "WARNING: Ollama model missing: $model  (run: bash scripts/install.sh)" >&2
     fi
   done
 else
-  echo "WARNING: Ollama not reachable at $OLLAMA_URL (embeddings/classification unavailable; tests still run mocked)" >&2
+  echo "WARNING: Ollama not reachable (embeddings/classification unavailable; tests still run mocked)" >&2
 fi
 echo "==> up complete"
