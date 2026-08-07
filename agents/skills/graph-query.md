@@ -8,7 +8,10 @@ deterministically on every write, each with a confidence and provenance.
 ## Phases
 
 1. **Resolve the entity.** `minime_get_context` with `person_name` set to the person *or org*
-   name (aliases match; "Fjordsonics" finds "Fjordsonics AS").
+   name (aliases match; "Fjordsonics" finds "Fjordsonics AS"). A `NOT_FOUND` here is not proof
+   no such person/org exists: interaction-minted people live at tier 2, invisible to a tier-1
+   lookup. The error says a match may exist at tier 2 — offer an unlock before telling the
+   owner the graph has nothing on them.
 2. **Read the edges.** The `related` list carries typed edges with both endpoints titled:
    - org dossier → `works_at` edges pointing in = the people who work there
    - person dossier → `works_at` pointing out = employer; `relation` field = how they relate

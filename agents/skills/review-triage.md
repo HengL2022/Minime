@@ -9,9 +9,19 @@ auto-resolve).
 1. `minime_review_queue` (action `list`) — group items by `kind`, lead with the count:
    "6 open: 3 unfiled captures, 2 contradictions, 1 stale page."
 2. Work one kind at a time, one item per question:
-   - **inbox_unfiled** — show the capture (via its `inbox_item_id` / `raw_path` reference)
-     and the classifier's failed guess; ask "task, journal, note, or drop?"; file with the
-     matching write tool, then resolve the item.
+   - **inbox_unfiled** — the queue item carries only `inbox_item_id` and `created_at`; the
+     capture text, the classifier's guess, and its reason never cross the MCP boundary (no
+     tool exposes them — there is nothing an unlock would reveal here). Give the owner those
+     two facts and ask them to open the file themselves: the archived copy at
+     `data/archive/<year>/<month>/<inbox_item_id>-*` (year/month from `created_at`) or the
+     original still in `data/inbox/`. Once they read or dictate it back, ask "task, journal,
+     note, or drop?", file with the matching write tool, then resolve.
+   - **duplicate** — a captured task looked like an existing open one. Same boundary as
+     inbox_unfiled: the new capture's `candidate_title` always comes back masked — not a tier
+     lock, an unlock will not reveal it. You do get `existing_title` (the open task it
+     matched), `candidate_due`, and a match `score`. Read the owner `existing_title` and ask
+     what they actually captured: the same thing → drop the new capture; different → file it
+     fresh with `minime_upsert_task`; then resolve.
    - **contradiction** — payload holds row IDs only; fetch both rows via
      `minime_get_context`, show the two claims side by side with dates, ask which stands.
      The owner's answer is a *new* capture or correction — never edit or delete the old rows

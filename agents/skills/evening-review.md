@@ -46,7 +46,10 @@ Run as a short conversation, not a form — write as you go:
 3. **Any promise made** → `minime_upsert_task` (due date if stated), and the
    people involved get `minime_log_interaction`.
 4. **Inbox triage** → if `review_queue_open > 0`, list via `minime_review_queue`
-   (kind `inbox_unfiled`) and ask, one by one: "task, journal, note, or drop?"
+   (kind `inbox_unfiled`). Each item is only `inbox_item_id` + `created_at` — the capture
+   text never crosses the MCP boundary — so ask the owner to open it themselves (the archived
+   copy at `data/archive/<year>/<month>/<inbox_item_id>-*`, or the original still in
+   `data/inbox/`) and read or dictate it back, one at a time: "task, journal, note, or drop?"
    File via the matching write tool, then resolve each item (see
    `review-triage.md` for the full queue pass — here, just the unfiled captures).
 

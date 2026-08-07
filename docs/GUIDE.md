@@ -31,8 +31,11 @@ queue instead of being filed wrong.
 
 Ways to feed the inbox:
 
-- **From your phone**: an iOS Shortcut ("share → save text to folder") + Syncthing on the
-  folder. Capture an idea on the train; it's searchable by the time you're home.
+- **From your phone**: DIY today, not a shipped feature. Syncthing has no first-party iOS
+  app, so pair `data/inbox/` using a third-party Syncthing-compatible client, then build your
+  own iOS Shortcut ("share → save text to folder") into that synced folder — a bundled
+  Shortcut is future work. Real-time filing also needs your Mac awake with `serve` running to
+  notice the new file; otherwise it waits and files at the next startup scan.
 - **From any agent chat**: "remember this: …" → the agent calls `minime_capture`.
 - **From the terminal**: `echo "todo: renew passport by 2026-08-01" > data/inbox/note.md`
 
@@ -117,7 +120,8 @@ work becomes part of your searchable history with zero effort.
 - **Morning brief / evening review**: skills that pull today's calendar, due tasks, open
   commitments, decision reviews due, and the review queue (`minime_state`).
 - **Numbers**: always via metrics ("how did I sleep this month?" →
-  `minime_query_metric sleep_minutes`). Agents are forbidden from doing arithmetic over
+  `minime_query_metric sleep_minutes`; unsure of the exact name → `minime_list_metrics` lists
+  everything queryable). Agents are forbidden from doing arithmetic over
   your prose — numbers come from SQL or not at all. Include `time_zone` when the answer should
   follow a travel/local calendar; live results use that zone without overwriting the nightly
   configured-timezone cache. The nightly cache is rebuilt atomically if the configured timezone
@@ -135,8 +139,8 @@ work becomes part of your searchable history with zero effort.
   readable: prose carrying explicit tier-0 evidence is never promoted into an agent-readable
   tier. Set `CLOUD_MAX_TIER=1` in `.env` to keep tier 2 off cloud models too.
 - **Audit**: `bun run src/cli.ts audit --since 7d` shows every read, write, and byte of
-  egress — which agent, when, which rows. The log is append-only; nothing can be
-  quietly erased.
+  egress — which agent, when, which verb, and how many rows a call returned (never the row
+  IDs or their content). The log is append-only; nothing can be quietly erased.
 
 ### Reading MCP audit outcomes
 
