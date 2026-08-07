@@ -3,7 +3,12 @@
 import { join } from "node:path";
 import { closeDb, withAdminDbTransaction } from "./db/client";
 import { assertSchemaCurrent, migrate, parseMigrationCliContext } from "./db/migrate";
-import { approveTier2UnlockRequest, eventsSince } from "./db/repo";
+import {
+  type PendingTier2UnlockRequest,
+  approveTier2UnlockRequest,
+  eventsSince,
+  pendingTier2UnlockRequests,
+} from "./db/repo";
 import { importCalendar } from "./importers/calendar";
 import { importEmailMeta } from "./importers/email-meta";
 import { importHealth } from "./importers/health";
@@ -38,6 +43,7 @@ const USAGE = `minime <command>
   backup                           take a tagged db snapshot now (pg_dump -> restic db-snap)
   backup:pre-update                take the fail-closed pre-update db snapshot
   unlock:approve <request-id>      approve one pending tier-2 request for its MCP connection
+  unlock:approve --latest          approve the single pending request (refuses if more than one)
   serve                            MCP server (stdio) + inbox watcher + dream cron
   audit --since <Nd>               show what left the box (events), default 7d
   import:calendar <file.ics>
@@ -77,6 +83,13 @@ export function assertServeRuntimeRole(
   }
 }
 
+/** Thrown inside the `--latest` transaction so the caller can list every pending request. */
+class AmbiguousLatestUnlockError extends Error {
+  constructor(readonly pending: PendingTier2UnlockRequest[]) {
+    super("unlock_request_ambiguous");
+  }
+}
+
 async function main(): Promise<number> {
   const cmd = process.argv[2];
   if (cmd === "migrate" || cmd === "serve" || cmd === "serve:runtime") {
@@ -98,14 +111,14 @@ async function main(): Promise<number> {
     return 1;
   }
   if (cmd === "unlock:approve") {
-    const requestId = process.argv[3];
-    if (
-      !requestId ||
-      process.argv.length !== 4 ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId)
-    ) {
+    const requestArg = process.argv[3];
+    const isLatest = requestArg === "--latest";
+    const isUuid =
+      typeof requestArg === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestArg);
+    if (!requestArg || process.argv.length !== 4 || !(isUuid || isLatest)) {
       console.error("ERROR: unlock request id is invalid");
-      console.error("FIX: copy the request id returned by minime_unlock");
+      console.error("FIX: copy the request id returned by minime_unlock, or pass --latest");
       return 2;
     }
     try {
@@ -119,12 +132,41 @@ async function main(): Promise<number> {
       throw error;
     }
     try {
-      const approved = await withAdminDbTransaction(() => approveTier2UnlockRequest(requestId));
+      // Listing and approving share one admin transaction: approveTier2UnlockRequest
+      // re-validates scope/window/ceiling itself, so a request that goes stale between the
+      // list and the approval is simply left unapproved, never wrongly approved.
+      const approved = await withAdminDbTransaction(async () => {
+        if (isUuid) return approveTier2UnlockRequest(requestArg);
+        const pending = await pendingTier2UnlockRequests();
+        if (pending.length > 1) throw new AmbiguousLatestUnlockError(pending);
+        if (pending.length === 0) throw new Error("unlock_request_none_pending");
+        return approveTier2UnlockRequest(pending[0]!.id);
+      });
       console.log(
-        `approved tier-2 request ${approved.id} for ${approved.minutes}min until ${approved.expires_at.toISOString()}`,
+        `approved tier-2 request ${approved.id} for ${approved.minutes}min, requested by ` +
+          `${approved.requestedBy}, until ${approved.expires_at.toISOString()}`,
       );
       return 0;
     } catch (error) {
+      if (error instanceof AmbiguousLatestUnlockError) {
+        console.error("ERROR: more than one unlock request is pending within the approval window");
+        for (const request of error.pending) {
+          const ageMinutes = Math.max(
+            0,
+            Math.floor((Date.now() - request.requestedAt.getTime()) / 60_000),
+          );
+          console.error(
+            `  ${request.id}  requested_by=${request.requestedBy}  requested ${ageMinutes}min ago`,
+          );
+        }
+        console.error("FIX: rerun with the exact request id you want to approve");
+        return 1;
+      }
+      if (error instanceof Error && error.message === "unlock_request_none_pending") {
+        console.error("ERROR: no pending unlock request within the approval window");
+        console.error("FIX: ask the agent to create a fresh minime_unlock request");
+        return 1;
+      }
       if (error instanceof Error && error.message === "unlock_request_not_approvable") {
         console.error("ERROR: unlock request is not pending and eligible");
         console.error("FIX: ask the agent to create a fresh minime_unlock request");

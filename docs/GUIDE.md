@@ -63,9 +63,12 @@ Tell your agent "journal: …" (→ `minime_journal`, with optional mood/energy 
 just write journal-ish text into the inbox. Journal entries are **tier 2**: agents can
 write them anytime but can only *read* them during an unlock you approve explicitly. After
 you agree, `minime_unlock` creates a pending request and gives the agent a request ID and local
-command. Run `bun run src/cli.ts unlock:approve <request-id>` in your own terminal. Approval
-must happen within 10 minutes, is time-boxed, loudly audited, bound to that MCP connection,
-and is lost when it reconnects.
+command. Run `bun run src/cli.ts unlock:approve <request-id>` in your own terminal, or
+`unlock:approve --latest` to approve the one pending request without copying an id — it refuses
+and lists every pending request instead of guessing if more than one is waiting. Approval must
+happen within the approval window (`TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES`, default 10 minutes,
+configurable 1–60), is time-boxed, loudly audited, bound to that MCP connection, and is lost
+when it reconnects.
 
 ### 4. People and interactions
 

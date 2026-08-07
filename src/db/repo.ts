@@ -16,7 +16,12 @@ import {
   type CompiledNoteIdentity,
   recognizeCompiledNote,
 } from "../util/compiled-note-archive";
-import { type ProviderName, assertTier2UnlockMaxMinutes, config } from "../util/config";
+import {
+  type ProviderName,
+  assertTier2UnlockApprovalWindowMinutes,
+  assertTier2UnlockMaxMinutes,
+  config,
+} from "../util/config";
 import { type MetricRollup, metricDateString } from "../util/metric-rollup";
 import {
   type DbExecutor,
@@ -316,10 +321,9 @@ export async function requestTier2Unlock(minutes: number): Promise<{ id: string 
 export interface ApprovedTier2Unlock {
   id: string;
   minutes: number;
+  requestedBy: string;
   expires_at: Date;
 }
-
-export const TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES = 10;
 
 /** Approve one pending request inside an owner/control-plane transaction. */
 export async function approveTier2UnlockRequest(
@@ -327,6 +331,7 @@ export async function approveTier2UnlockRequest(
   approvedBy = "owner:cli",
 ): Promise<ApprovedTier2Unlock> {
   assertTier2UnlockMaxMinutes(config.tier2UnlockMaxMinutes);
+  assertTier2UnlockApprovalWindowMinutes(config.tier2UnlockApprovalWindowMinutes);
   const [row] = await db()`
     with approval_clock as (select clock_timestamp() as at)
     update session_unlocks u
@@ -340,13 +345,14 @@ export async function approveTier2UnlockRequest(
       and u.approved_by is null
       and u.expires_at is null
       and u.requested_at >= approval_clock.at
-          - make_interval(mins => ${TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES})
+          - make_interval(mins => ${config.tier2UnlockApprovalWindowMinutes})
       and u.requested_minutes between 1 and ${config.tier2UnlockMaxMinutes}
-    returning u.id::text as id, u.requested_minutes::int as minutes, u.expires_at`;
+    returning u.id::text as id, u.requested_minutes::int as minutes, u.requested_by, u.expires_at`;
   if (!row) throw new Error("unlock_request_not_approvable");
   const approved = {
     id: String(row.id),
     minutes: Number(row.minutes),
+    requestedBy: String(row.requested_by),
     expires_at: new Date(row.expires_at),
   };
   await logEvent({
@@ -357,6 +363,40 @@ export async function approveTier2UnlockRequest(
     payload: auditPayload.tier2Unlock({ requestId: approved.id, minutes: approved.minutes }),
   });
   return approved;
+}
+
+export interface PendingTier2UnlockRequest {
+  id: string;
+  requestedBy: string;
+  requestedMinutes: number;
+  requestedAt: Date;
+}
+
+/**
+ * Requests still eligible for approval (same scope/window/ceiling predicates as
+ * approveTier2UnlockRequest), newest first. session_id is NEVER selected — DECISIONS.md
+ * 2026-08-06 "Session identifiers are never returned or audited" — callers approve by request
+ * id only; approveTier2UnlockRequest re-validates every predicate itself, so a request that
+ * goes stale between this list and that call is simply not approvable, not miss-approved.
+ */
+export async function pendingTier2UnlockRequests(): Promise<PendingTier2UnlockRequest[]> {
+  assertTier2UnlockMaxMinutes(config.tier2UnlockMaxMinutes);
+  assertTier2UnlockApprovalWindowMinutes(config.tier2UnlockApprovalWindowMinutes);
+  const rows = await db()`
+    select id::text as id, requested_by, requested_minutes::int as requested_minutes, requested_at
+    from session_unlocks
+    where scope = 'tier2'
+      and approved_at is null
+      and requested_at >= clock_timestamp()
+          - make_interval(mins => ${config.tier2UnlockApprovalWindowMinutes})
+      and requested_minutes between 1 and ${config.tier2UnlockMaxMinutes}
+    order by requested_at desc`;
+  return rows.map((row) => ({
+    id: String(row.id),
+    requestedBy: String(row.requested_by),
+    requestedMinutes: Number(row.requested_minutes),
+    requestedAt: new Date(row.requested_at),
+  }));
 }
 
 export async function logEvent(e: {

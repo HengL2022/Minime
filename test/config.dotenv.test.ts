@@ -7,12 +7,14 @@ import { join } from "node:path";
 import {
   EMBED_PROVIDER_NAMES,
   PROVIDER_NAMES,
+  assertTier2UnlockApprovalWindowMinutes,
   assertTier2UnlockMaxMinutes,
   fillMissingEnv,
   parseDotenv,
   parseEmbedProviderName,
   parseProviderEnvironment,
   parseProviderName,
+  parseTier2UnlockApprovalWindowMinutes,
   parseTier2UnlockMaxMinutes,
 } from "../src/util/config";
 import {
@@ -200,6 +202,46 @@ describe("tier-2 unlock limit", () => {
     for (const value of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 1441]) {
       expect(() => assertTier2UnlockMaxMinutes(value)).toThrow(/TIER2_UNLOCK_MAX_MINUTES/);
     }
+  });
+});
+
+describe("tier-2 unlock approval window", () => {
+  test("accepts only bounded positive decimal integers", () => {
+    expect(parseTier2UnlockApprovalWindowMinutes("1")).toBe(1);
+    expect(parseTier2UnlockApprovalWindowMinutes("10")).toBe(10);
+    expect(parseTier2UnlockApprovalWindowMinutes("60")).toBe(60);
+    for (const raw of ["", "0", "-1", "1.5", "1e2", "NaN", "Infinity", "61"]) {
+      expect(() => parseTier2UnlockApprovalWindowMinutes(raw)).toThrow(
+        /TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES/,
+      );
+    }
+  });
+
+  test("runtime guard fails closed if a test or caller mutates parsed config", () => {
+    for (const value of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 61]) {
+      expect(() => assertTier2UnlockApprovalWindowMinutes(value)).toThrow(
+        /TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES/,
+      );
+    }
+  });
+
+  test("config load rejects an out-of-range or malformed env override", () => {
+    const database = "postgres://owner:secret@localhost:5432/minime";
+    for (const value of ["0", "61", "abc", "-1", "1.5"]) {
+      const result = loadConfigWith(database, database, {
+        TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES: value,
+      });
+      expect(result.code).not.toBe(0);
+      expect(result.output).toContain("TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES");
+    }
+  });
+
+  test("config load defaults to 10 and accepts an explicit in-range override", () => {
+    const database = "postgres://owner:secret@localhost:5432/minime";
+    expect(loadConfigWith(database, database).code).toBe(0);
+    expect(
+      loadConfigWith(database, database, { TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES: "30" }).code,
+    ).toBe(0);
   });
 });
 

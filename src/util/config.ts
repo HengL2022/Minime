@@ -175,6 +175,34 @@ export function assertTier2UnlockMaxMinutes(value: number): void {
   }
 }
 
+// How long a pending tier-2 unlock request stays approvable after it is created (default 10,
+// per docs/GUIDE.md §3). Bounded well below the 24h request-duration ceiling above: this is a
+// window for the owner to notice and act, not a grant duration.
+export const TIER2_UNLOCK_APPROVAL_WINDOW_HARD_MAX_MINUTES = 60;
+
+export function parseTier2UnlockApprovalWindowMinutes(raw: string): number {
+  if (!/^[1-9]\d*$/.test(raw)) {
+    throw new Error("TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES must be a positive decimal integer");
+  }
+  const minutes = Number(raw);
+  if (!Number.isSafeInteger(minutes) || minutes > TIER2_UNLOCK_APPROVAL_WINDOW_HARD_MAX_MINUTES) {
+    throw new Error(
+      `TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES must be between 1 and ${TIER2_UNLOCK_APPROVAL_WINDOW_HARD_MAX_MINUTES}`,
+    );
+  }
+  return minutes;
+}
+
+export function assertTier2UnlockApprovalWindowMinutes(value: number): void {
+  if (
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > TIER2_UNLOCK_APPROVAL_WINDOW_HARD_MAX_MINUTES
+  ) {
+    throw new Error("TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES is invalid");
+  }
+}
+
 // Parse a minimal KEY=VALUE .env (full-line comments, unquoted-inline ` #` comments, blank
 // lines, `export ` prefix, surrounding quotes). Intentionally simple — not a full dotenv: no
 // interpolation or multiline values, none of which Minime's .env uses. Pure (no side effects)
@@ -295,6 +323,10 @@ export const config = {
   bedrockModel: process.env.BEDROCK_MODEL, // required for bedrock; ids aren't guessable
   tz: env("TZ", "Asia/Singapore"),
   tier2UnlockMaxMinutes: parseTier2UnlockMaxMinutes(env("TIER2_UNLOCK_MAX_MINUTES", "60")),
+  // Default stays 10 minutes; override for a wider or narrower blind-approval window.
+  tier2UnlockApprovalWindowMinutes: parseTier2UnlockApprovalWindowMinutes(
+    env("TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES", "10"),
+  ),
   resticRepository: process.env.RESTIC_REPOSITORY,
   resticPasswordFile: process.env.RESTIC_PASSWORD_FILE,
   dreamCron: env("DREAM_CRON", "0 3 * * *"),
