@@ -390,6 +390,68 @@ describe("MCP server", () => {
     expect(p!.last_contact_at).not.toBeNull();
   });
 
+  test("minime_upsert_task: id-only updates, explicit-null clears, completed_at hygiene", async () => {
+    // create without id or title -> BAD_INPUT (title is only required when creating)
+    const noTitle = await call("minime_upsert_task", { body: "no title, no id" });
+    expect(noTitle.isError).toBe(true);
+    expect(noTitle.parsed.error.code).toBe("BAD_INPUT");
+
+    const [goal] = await sql`
+      insert into goals (horizon, statement, source, created_by)
+      values ('quarter', 'Ship the upsert_task ergonomics', 'fixture', 'fixture')
+      returning id`;
+
+    const created = await call("minime_upsert_task", {
+      title: "Ergonomics test task",
+      body: "Body text that must survive an id-only reindex — TASK-BODY-REINDEX-SENTINEL.",
+      due: "2026-09-01",
+      goal_id: goal!.id,
+    });
+    expect(created.isError).toBe(false);
+    const taskId = created.parsed.data.task_id;
+
+    // id-only status update to 'done': title/body/due/goal_id are all left untouched, and
+    // completed_at stamps — this is the "mark it done" ergonomic with no title round-trip.
+    const markedDone = await call("minime_upsert_task", { id: taskId, status: "done" });
+    expect(markedDone.isError).toBe(false);
+    const [afterDone] = await sql`
+      select title, body, status, due, goal_id, completed_at from tasks where id = ${taskId}`;
+    expect(afterDone!.title).toBe("Ergonomics test task"); // NOT blanked/overwritten
+    expect(afterDone!.body).toContain("TASK-BODY-REINDEX-SENTINEL");
+    expect(afterDone!.status).toBe("done");
+    expect(afterDone!.completed_at).not.toBeNull();
+    expect(afterDone!.due?.toISOString().slice(0, 10)).toBe("2026-09-01"); // omitted due kept
+    expect(afterDone!.goal_id).toBe(goal!.id); // omitted goal_id kept
+
+    // index-from-returning regression: the id-only update above omitted body from params,
+    // but the reindex must use the STORED body (via RETURNING), not blank it.
+    const stillFindsBody = await call("minime_search", { query: "TASK-BODY-REINDEX-SENTINEL" });
+    expect(stillFindsBody.raw).toContain("TASK-BODY-REINDEX-SENTINEL");
+
+    // explicit status back to 'active' clears the completed_at stamp (reopen hygiene)
+    const reopened = await call("minime_upsert_task", { id: taskId, status: "active" });
+    expect(reopened.isError).toBe(false);
+    const [afterReopen] = await sql`select status, completed_at from tasks where id = ${taskId}`;
+    expect(afterReopen!.status).toBe("active");
+    expect(afterReopen!.completed_at).toBeNull();
+
+    // explicit null clears due and detaches goal_id; title stays kept since it's omitted
+    const cleared = await call("minime_upsert_task", { id: taskId, due: null, goal_id: null });
+    expect(cleared.isError).toBe(false);
+    const [afterClear] = await sql`select title, due, goal_id from tasks where id = ${taskId}`;
+    expect(afterClear!.title).toBe("Ergonomics test task");
+    expect(afterClear!.due).toBeNull();
+    expect(afterClear!.goal_id).toBeNull();
+
+    // nonexistent id -> NOT_FOUND unchanged
+    const missing = await call("minime_upsert_task", {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      status: "active",
+    });
+    expect(missing.isError).toBe(true);
+    expect(missing.parsed.error.code).toBe("NOT_FOUND");
+  });
+
   test("minime_upsert_task keeps unexpected database errors off the wire", async () => {
     const sentinel = "PRIVATE-TASK-TITLE-SENTINEL";
     const result = await call("minime_upsert_task", {

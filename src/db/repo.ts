@@ -1544,32 +1544,40 @@ export class TaskNotFoundError extends Error {
 export async function upsertTask(
   t: {
     id?: string | null;
-    title: string;
+    title?: string | null;
     body?: string | null;
     status?: string | null;
     due?: string | null;
     goalId?: string | null;
   } & Std,
-): Promise<{ id: string }> {
+): Promise<{ id: string; title: string; body: string | null }> {
   if (t.id) {
+    // due/goal_id are three-state at this boundary: undefined (key omitted) means KEEP,
+    // explicit null means CLEAR. coalesce() can't tell those apart (coalesce(null, col) is
+    // always "keep"), so the provided-flags carry the distinction into the SQL explicitly.
+    const dueProvided = t.due !== undefined;
+    const goalIdProvided = t.goalId !== undefined;
     const [row] = await db()`
-      update tasks set title = ${t.title},
+      update tasks set title = coalesce(${t.title ?? null}, title),
                        body = coalesce(${t.body ?? null}, body),
                        status = coalesce(${t.status ?? null}, status),
-                       due = coalesce(${t.due ?? null}, due),
-                       goal_id = coalesce(${t.goalId ?? null}, goal_id),
-                       completed_at = case when ${t.status ?? null} = 'done' then ${now()} else completed_at end
-      where id = ${t.id} returning id`;
+                       due = case when ${dueProvided} then ${t.due ?? null}::date else due end,
+                       goal_id = case when ${goalIdProvided} then ${t.goalId ?? null}::uuid else goal_id end,
+                       completed_at = case when ${t.status ?? null} = 'done' then ${now()}
+                                           when ${t.status ?? null}::text is not null then null
+                                           else completed_at end
+      where id = ${t.id} returning id, title, body`;
     if (!row) throw new TaskNotFoundError();
     return row as any;
   }
   const id = crypto.randomUUID();
-  await db()`
+  const [row] = await db()`
     insert into tasks (id, title, body, status, due, goal_id, created_by, source, derived_from, tier, completed_at)
-    values (${id}, ${t.title}, ${t.body ?? null}, ${t.status ?? "inbox"}, ${t.due ?? null}, ${t.goalId ?? null},
+    values (${id}, ${t.title ?? null}, ${t.body ?? null}, ${t.status ?? "inbox"}, ${t.due ?? null}, ${t.goalId ?? null},
             ${t.createdBy ?? "human"}, ${t.source ?? "manual"}, ${t.derivedFrom ?? null}, ${t.tier ?? 1},
-            ${t.status === "done" ? now() : null})`;
-  return { id };
+            ${t.status === "done" ? now() : null})
+    returning id, title, body`;
+  return row as any;
 }
 
 // An interaction attaches to EXACTLY ONE subject: a person OR an org (XOR enforced
