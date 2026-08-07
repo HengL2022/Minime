@@ -359,3 +359,18 @@ describe("audit payload boundary", () => {
     ).toThrow("invalid_audit_payload");
   });
 });
+
+// Every registered MCP tool must be in audit-payload's AUDITED_TOOL_NAMES allowlist, or its
+// very first audited call fails as INTERNAL before execution (W1-2 found minime_list_metrics
+// bricked this way). This guard makes the required lockstep update a test failure, not a
+// runtime surprise for the next tool-adding change.
+describe("audited tool-name allowlist", () => {
+  test("accepts an attempt payload for every registered tool", async () => {
+    const { ALL_TOOLS } = await import("../src/mcp/tools/index");
+    const { assertAuditPayloadForVerb } = await import("../src/util/audit-payload");
+    for (const tool of ALL_TOOLS) {
+      const payload = auditPayload.toolAttempt({ paramsHash: "0".repeat(16) });
+      expect(() => assertAuditPayloadForVerb(`tool:${tool.name}:attempt`, payload)).not.toThrow();
+    }
+  });
+});
