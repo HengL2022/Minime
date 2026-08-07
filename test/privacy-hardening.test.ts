@@ -3,6 +3,7 @@
 // or review-queue payloads.
 
 import { beforeEach, describe, expect, test } from "bun:test";
+import postgres from "postgres";
 import {
   chunkPairsSharingPerson,
   chunksMissingEmbedding,
@@ -14,7 +15,8 @@ import {
 } from "../src/db/repo";
 import { toolByName } from "../src/mcp/tools";
 import { invokeTool } from "../src/mcp/tools/registry";
-import { resetDb, testSql as sql } from "./helpers";
+import { expectSqlReject, resetDb, testSql as sql } from "./helpers";
+import { dropTestAppRole, mintTestAppRole } from "./support/app-role";
 import { requestAndApproveTier2, sessionToolCtx } from "./support/unlock";
 
 const ctx = sessionToolCtx("agent:privacy-test");
@@ -354,5 +356,67 @@ describe("tier-2 privacy hardening", () => {
         (row) => row.a_text.includes(sentinel) || row.b_text.includes(sentinel),
       ),
     ).toBe(false);
+  });
+
+  // W2-1: migration 028 grants minime_app UPDATE on exactly (superseded_by, superseded_at) for
+  // the six content tables that previously had no UPDATE grant at all. This is the real runtime
+  // `minime_app` role (SET ROLE, not the independently-cloned test app-role boundary), so it
+  // exercises the actual production grant + the existing tier_update RLS policy together.
+  test("minime_app can stamp superseded_by/at only under its own approved tier-2 unlock, and only on those two columns", async () => {
+    await sql`delete from session_unlocks`;
+    const [original] = await sql`
+      insert into journal_entries (entry_md, tier) values ('ZQX-SUPERSEDE-ORIGINAL', 2) returning id`;
+    const [successor] = await sql`
+      insert into journal_entries (entry_md, tier, supersedes_id)
+      values ('ZQX-SUPERSEDE-SUCCESSOR', 2, ${original!.id}) returning id`;
+
+    const appRole = await mintTestAppRole(process.env.DATABASE_URL!);
+    await sql.unsafe(`grant minime_app to "${appRole.roleName}"`);
+    const app = postgres(appRole.databaseUrl, { max: 1, onnotice: () => {} });
+    const probeCtx = sessionToolCtx("agent:supersede-grant-probe");
+    const stamp = () =>
+      app.begin(async (tx) => {
+        await tx`set local role minime_app`;
+        await tx`select set_config('minime.actor', ${probeCtx.actor}, true)`;
+        await tx`select set_config('minime.session_id', ${probeCtx.sessionId as string}, true)`;
+        return tx`
+          update journal_entries set superseded_by = ${successor!.id}, superseded_at = now()
+          where id = ${original!.id}`;
+      });
+
+    try {
+      // Locked (tier 1 default): the tier_update RLS policy filters the tier-2 row out, so the
+      // grant succeeds at the privilege check but the statement touches zero rows.
+      const locked = await stamp();
+      expect(locked.count).toBe(0);
+      const [stillLive] = await sql`
+        select superseded_by, superseded_at from journal_entries where id = ${original!.id}`;
+      expect(stillLive).toEqual({ superseded_by: null, superseded_at: null });
+
+      await requestAndApproveTier2(probeCtx);
+
+      // Unlocked: the same statement now stamps the row through the column-limited grant.
+      const unlocked = await stamp();
+      expect(unlocked.count).toBe(1);
+      const [superseded] = await sql`
+        select superseded_by, superseded_at from journal_entries where id = ${original!.id}`;
+      expect(superseded!.superseded_by).toBe(successor!.id);
+      expect(superseded!.superseded_at).not.toBeNull();
+
+      // The grant is column-limited: minime_app still cannot touch entry_md directly, even
+      // unlocked and even on the very same row.
+      await expectSqlReject(
+        app.begin(async (tx) => {
+          await tx`set local role minime_app`;
+          await tx`select set_config('minime.actor', ${probeCtx.actor}, true)`;
+          await tx`select set_config('minime.session_id', ${probeCtx.sessionId as string}, true)`;
+          return tx`update journal_entries set entry_md = 'tampered' where id = ${original!.id}`;
+        }),
+        /permission denied/,
+      );
+    } finally {
+      await app.end({ timeout: 2 });
+      await dropTestAppRole(appRole);
+    }
   });
 });

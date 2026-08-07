@@ -2452,3 +2452,40 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   execution — not a bespoke per-task approval. Reconfirmed against the program's
   ratified-decisions record during W1-1 review-finding remediation (2026-08-08); the owner's
   end-of-program review before GitHub publication (program decision 13) remains the final gate.
+
+## 2026-08-07 — Content tables can record their own supersession, with a column-limited grant
+
+- **Context:** Livability-program task W2-1 (migration 028) is the schema foundation for the W2
+  correction loop: an owner or agent needs to amend, retract, or replace a typed content row
+  (journal entry, task, decision, ...) without ever deleting or silently overwriting it (I5
+  provenance). Every PARENTS-map content table (`src/db/repo.ts`) already carries a forward
+  pointer — `supersedes_id`, stamped on a successor row at write time (002_core.sql; the only
+  existing precedent for stamping it programmatically is `retypeOrgToPerson`'s org→person
+  repair) — but nothing on the OLD row recorded that it had been superseded. Separately, six of
+  the twelve tables (`journal_entries`, `interactions`, `commitments`, `goals`, `values_items`,
+  `principles`) have never held any UPDATE grant for `minime_app` at all: 021_runtime_app_role.sql
+  re-granted full table UPDATE only on the other six (`tasks`, `decisions`, `people`, `pages`,
+  `orgs`, `decision_branches`).
+- **Decision:** Add `superseded_by uuid` and `superseded_at timestamptz` to all twelve content
+  tables — plain untyped columns with no foreign key, matching the existing
+  `derived_from`/`supersedes_id` convention. Encoding: both null = live; `superseded_by` and
+  `superseded_at` both set = superseded by that successor row; `superseded_at` set with
+  `superseded_by` null = retracted (soft-deleted, no successor). A per-table check constraint
+  (`<table>_supersede_check`) rejects the fourth, meaningless combination — a recorded successor
+  with no timestamp. Grant `UPDATE (superseded_by, superseded_at)` — those two columns only,
+  never the row — to `minime_app` on the six tables that previously had no UPDATE grant; the
+  other six already have full table UPDATE from 021, which already covers the new columns
+  without any further grant. No new RLS policy: the existing `tier_update` policies (007_rls.sql,
+  extended per-table in 008/014_decision_interview.sql/021) already gate every UPDATE, including
+  this one, by `app_allowed_tier()`.
+- **Why:** A correction feature needs the old row to survive (audit, recoverability, "what did I
+  actually believe on that date") while still being able to name and time its own replacement.
+  Splitting the grant to exactly the two stamp columns keeps the six previously write-locked
+  tables write-locked for everything else — a future correction tool gets only the narrow
+  capability it needs, not a blanket UPDATE that could rewrite journal prose, task titles, or
+  decision content directly. This is a product-visible feature on ordinary content rows, not a
+  change to `events`, which remains insert-only and untouched (I8).
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W2
+  correction-loop workstream — not a bespoke per-task approval; the owner's end-of-program
+  review before any publication remains the final gate.

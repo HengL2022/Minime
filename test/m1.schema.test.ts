@@ -371,6 +371,122 @@ describe("standard columns & triggers", () => {
   });
 });
 
+describe("W2-1 correction/supersede columns", () => {
+  // The 12 PARENTS-map content tables (src/db/repo.ts) that migration 028 extends uniformly.
+  const SUPERSEDE_TABLES = [
+    "pages",
+    "journal_entries",
+    "interactions",
+    "decisions",
+    "decision_branches",
+    "tasks",
+    "goals",
+    "values_items",
+    "principles",
+    "people",
+    "orgs",
+    "commitments",
+  ];
+  // 021_runtime_app_role.sql already grants full table-level UPDATE on these six; migration 028
+  // adds nothing further there since the existing grant already covers new columns.
+  const ALREADY_FULL_UPDATE = new Set([
+    "tasks",
+    "decisions",
+    "people",
+    "pages",
+    "orgs",
+    "decision_branches",
+  ]);
+  const COLUMN_LIMITED_UPDATE = SUPERSEDE_TABLES.filter((t) => !ALREADY_FULL_UPDATE.has(t));
+
+  test("superseded_by/superseded_at exist, correctly typed, on all twelve content tables", async () => {
+    for (const t of SUPERSEDE_TABLES) {
+      const cols = (
+        await sql`
+          select column_name, data_type from information_schema.columns
+          where table_schema = 'public' and table_name = ${t}
+            and column_name in ('superseded_by', 'superseded_at')`
+      ).map((r: any) => ({ column_name: r.column_name, data_type: r.data_type }));
+      expect(cols, `table ${t}`).toContainEqual({
+        column_name: "superseded_by",
+        data_type: "uuid",
+      });
+      expect(cols, `table ${t}`).toContainEqual({
+        column_name: "superseded_at",
+        data_type: "timestamp with time zone",
+      });
+    }
+  });
+
+  test("a <table>_supersede_check constraint exists on all twelve content tables", async () => {
+    for (const t of SUPERSEDE_TABLES) {
+      const [row] = await sql`
+        select constraint_name from information_schema.table_constraints
+        where table_schema = 'public' and table_name = ${t}
+          and constraint_name = ${`${t}_supersede_check`} and constraint_type = 'CHECK'`;
+      expect(row, `table ${t} missing its supersede check constraint`).toBeDefined();
+    }
+  });
+
+  test("the check constraint rejects a successor with no timestamp; retraction and full supersession are both allowed (journal_entries)", async () => {
+    const [row] =
+      await sql`insert into journal_entries (entry_md) values ('constraint probe') returning id`;
+    await expectSqlReject(
+      sql`update journal_entries set superseded_by = gen_random_uuid() where id = ${row!.id}`,
+      /journal_entries_supersede_check/,
+    );
+    // retracted: superseded_at alone is a legal soft-delete with no successor
+    await sql`update journal_entries set superseded_at = now() where id = ${row!.id}`;
+    const [retracted] = await sql`
+      select superseded_by, superseded_at from journal_entries where id = ${row!.id}`;
+    expect(retracted!.superseded_by).toBeNull();
+    expect(retracted!.superseded_at).not.toBeNull();
+    // superseded: both columns set once a successor exists
+    const [successor] =
+      await sql`insert into journal_entries (entry_md) values ('successor') returning id`;
+    await sql`update journal_entries set superseded_by = ${successor!.id} where id = ${row!.id}`;
+    const [superseded] = await sql`
+      select superseded_by, superseded_at from journal_entries where id = ${row!.id}`;
+    expect(superseded!.superseded_by).toBe(successor!.id);
+    expect(superseded!.superseded_at).not.toBeNull();
+  });
+
+  test("the check constraint rejects a successor with no timestamp (people)", async () => {
+    const [row] = await sql`
+      insert into people (canonical_name) values ('Constraint Probe Person') returning id`;
+    await expectSqlReject(
+      sql`update people set superseded_by = gen_random_uuid() where id = ${row!.id}`,
+      /people_supersede_check/,
+    );
+  });
+
+  test("minime_app gets column-limited UPDATE on the six previously write-locked tables, never table-wide", async () => {
+    for (const t of COLUMN_LIMITED_UPDATE) {
+      const tableGrant = await sql`
+        select privilege_type from information_schema.role_table_grants
+        where grantee = 'minime_app' and table_name = ${t} and privilege_type = 'UPDATE'`;
+      expect(tableGrant.length, `table ${t} must not have table-wide UPDATE`).toBe(0);
+
+      const columnGrants = (
+        await sql`
+          select column_name from information_schema.column_privileges
+          where grantee = 'minime_app' and table_name = ${t} and privilege_type = 'UPDATE'
+          order by column_name`
+      ).map((r: any) => r.column_name);
+      expect(columnGrants, `table ${t}`).toEqual(["superseded_at", "superseded_by"]);
+    }
+  });
+
+  test("the six tables with pre-existing full UPDATE keep it, unaffected by the new column grant", async () => {
+    for (const t of ALREADY_FULL_UPDATE) {
+      const [row] = await sql`
+        select 1 as ok from information_schema.role_table_grants
+        where grantee = 'minime_app' and table_name = ${t} and privilege_type = 'UPDATE'`;
+      expect(row, `table ${t} should retain full UPDATE`).toBeDefined();
+    }
+  });
+});
+
 describe("seed + round-trips", () => {
   test("seed loads the demo dataset", async () => {
     const { seed } = await import("../fixtures/seed");
