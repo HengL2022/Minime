@@ -2423,3 +2423,28 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   allowing PostgreSQL's own work to finish naturally under the larger solo-project regression
   suite.
 - **Approved by:** human owner in the approved remediation implementation request on 2026-08-06.
+
+## 2026-08-07 — Journal mood/energy day-averages are agent-readable metrics without a tier-2 unlock
+
+- **Context:** Livability-program task W1-1 (migration 027) seeds `mood`, `energy`, `body_mass`,
+  and `hr_resting` metric definitions and widens `metric_defs_rollup_check` to add an `avg`
+  rollup alongside the `sum`/`last` pair from the 2026-08-06 time-semantics decision (migration
+  026). `mood`/`energy` are day-granularity `round(avg(...), 2)` aggregates over the tier-2
+  `journal_entries.mood`/`.energy` smallint self-report columns — never `entry_md` prose. This
+  extends the existing `journal_streak` precedent — an aggregate that has read tier-2
+  `journal_entries` timestamps (dates only, never content) without an unlock since the original
+  v1 metric seed — to a numeric self-report aggregate from the same tier-2 source. `body_mass`/
+  `hr_resting` are ordinary tier-0 `health_samples` aggregates and raise no new question.
+- **Decision:** Day-granularity mood/energy aggregates computed by `metric_agg` are readable via
+  `minime_query_metric` without a tier-2 unlock, and may surface in `minime_state` metric
+  anomalies alongside every other cached metric. `metric_agg` is `security definer` and remains
+  the only path that can read tier-0/tier-2 source rows to build an aggregate (I3); this decision
+  governs which aggregates the owner curates into `agg_sql`, not a new privilege or write path.
+  If ever reversed, drop the `mood`/`energy` metric_defs rows; `body_mass`/`hr_resting` stand on
+  their own as unambiguous tier-0 aggregates unaffected by this ratification.
+- **Why:** A 1-5 daily mood/energy average is a self-report number, not free text — far less
+  disclosure risk than the journal prose itself, and useful to agent planning (energy-aware
+  scheduling, mood-trend awareness) without a manual unlock for routine use. Widening the rollup
+  vocabulary to `avg`, instead of overloading `sum` or `last`, keeps each metric's week/month
+  combination rule an honest, checked description of its own arithmetic.
+- **Approved by:** human owner, livability-program ratification 2026-08-07 (decision 7).

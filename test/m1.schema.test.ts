@@ -419,6 +419,10 @@ describe("seed + round-trips", () => {
       "steps",
       "deep_work_minutes",
       "journal_streak",
+      "mood",
+      "energy",
+      "body_mass",
+      "hr_resting",
     ]) {
       expect(defs).toContain(m);
     }

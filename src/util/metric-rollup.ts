@@ -1,4 +1,4 @@
-export type MetricRollup = "sum" | "last";
+export type MetricRollup = "sum" | "last" | "avg";
 export type MetricGranularity = "day" | "week" | "month";
 
 export interface DailyMetricValue {
@@ -81,7 +81,7 @@ export function reduceMetricSeries(
 
   const buckets = new Map<
     string,
-    { period_start: string; value: number; label: string | null; lastDate: string }
+    { period_start: string; value: number; count: number; label: string | null; lastDate: string }
   >();
   for (const row of daily) {
     const periodStart = metricPeriodStart(row.period_start, granularity);
@@ -91,11 +91,15 @@ export function reduceMetricSeries(
       buckets.set(key, {
         period_start: periodStart,
         value: row.value,
+        count: 1,
         label: row.label,
         lastDate: row.period_start,
       });
-    } else if (rollup === "sum") {
+    } else if (rollup === "sum" || rollup === "avg") {
+      // 'avg' tracks a running sum + count here and divides only when emitting below, so
+      // interleaved rows (any arrival order) still average correctly within a bucket.
       current.value += row.value;
+      current.count += 1;
     } else if (row.period_start >= current.lastDate) {
       current.value = row.value;
       current.lastDate = row.period_start;
@@ -105,7 +109,7 @@ export function reduceMetricSeries(
   return [...buckets.values()]
     .map((row) => ({
       period_start: row.period_start,
-      value: row.value,
+      value: rollup === "avg" ? row.value / row.count : row.value,
       ...(row.label !== null ? { label: row.label } : {}),
     }))
     .sort(compareSeriesValues);
