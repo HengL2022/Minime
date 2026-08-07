@@ -484,10 +484,15 @@ describe("H1 compiled-note repository and brain sync hardening", () => {
         new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 40)),
       ]);
       expect(settledEarly).toBe(false);
-      const waitingQueries = await testSql`
-        select query from pg_stat_activity
-        where datname = current_database()
-          and wait_event_type = 'Lock' and state = 'active' and query ilike '%pages%'`;
+      let waitingQueries: any[] = [];
+      for (let attempt = 0; attempt < 100; attempt++) {
+        waitingQueries = await testSql`
+          select query from pg_stat_activity
+          where datname = current_database()
+            and wait_event_type = 'Lock' and state = 'active' and query ilike '%pages%'`;
+        if (waitingQueries.length >= 3) break;
+        await Bun.sleep(20);
+      }
       expect(waitingQueries.length).toBeGreaterThanOrEqual(3);
       expect(
         waitingQueries.every((row: any) =>
@@ -500,7 +505,8 @@ describe("H1 compiled-note repository and brain sync hardening", () => {
       try {
         await held`rollback`;
       } catch {}
-      held.release();
+      await Promise.allSettled(pending);
+      await held.release();
     }
   });
 
