@@ -516,7 +516,7 @@
   },
   {
     "name": "minime_agenda",
-    "description": "Forward-looking task agenda for a date range. Answers 'what's due tomorrow / Saturday / this week' — which minime_state CANNOT (it is today-anchored, due<=today only). Defaults to today..+7 days when no dates given. Returns open tasks (inbox/active/waiting) due in [from, to], grouped by due date.",
+    "description": "Forward-looking task agenda for a date range. Answers 'what's due tomorrow / Saturday / this week' — which minime_state CANNOT (it is today-anchored, due<=today only). Defaults to today..+7 days when no dates given. Returns open tasks (inbox/active/waiting) due in [from, to], grouped by due date. include_undated:true also returns open tasks with no due date — the ones that otherwise never resurface — in a separate `undated` list (never mixed into by_day). status:[...] narrows to a subset of open statuses (default: inbox, active, waiting).",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -527,6 +527,20 @@
         "to": {
           "type": "string",
           "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "include_undated": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "inbox",
+              "active",
+              "waiting"
+            ]
+          }
         },
         "time_zone": {
           "type": "string",

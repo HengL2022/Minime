@@ -2739,18 +2739,38 @@ export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Pro
   };
 }
 
+export type OpenTaskStatus = "inbox" | "active" | "waiting";
+const OPEN_TASK_STATUSES: OpenTaskStatus[] = ["inbox", "active", "waiting"];
+
+export interface TasksInRangeOptions {
+  // Also return open tasks with no due date at all (captured but never scheduled) —
+  // otherwise they never resurface anywhere, since minime_state is due-anchored too.
+  includeUndated?: boolean;
+  // Narrow to a subset of open statuses. Defaults to all three (unchanged behavior).
+  statuses?: OpenTaskStatus[];
+}
+
 // Forward-looking agenda: tasks due within an inclusive [from, to] date range.
 // minime_state is today-anchored (due <= today) and CANNOT answer "what's due
 // tomorrow / this week"; this fills that gap. Includes inbox/active/waiting
 // (open work), excludes done/dropped. Ordered by due date then title.
-export async function tasksInRange(from: string, to: string, actor?: AccessActor): Promise<any[]> {
+export async function tasksInRange(
+  from: string,
+  to: string,
+  actor?: AccessActor,
+  options?: TasksInRangeOptions,
+): Promise<any[]> {
   const allowed = await allowedTier(actor);
+  const includeUndated = options?.includeUndated ?? false;
+  const statuses = options?.statuses ?? OPEN_TASK_STATUSES;
+  // The dated branch reproduces the original predicate exactly; includeUndated only ever
+  // ADDS rows (due is null), never relaxes the dated range or the tier predicate below.
   return db()`select id, title, status, due from tasks
-      where status in ('inbox','active','waiting')
-        and due is not null
-        and due >= ${from}::date and due <= ${to}::date
+      where status = any(${statuses})
+        and ((due is not null and due >= ${from}::date and due <= ${to}::date)
+             or (${includeUndated} and due is null))
         and tier >= 1 and tier <= ${allowed}
-      order by due, title`;
+      order by due nulls last, title`;
 }
 
 // Dedup support for the inbox pipeline: find open (non-done/dropped) tasks whose
