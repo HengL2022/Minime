@@ -5,6 +5,7 @@ import { logDecisionTool, reviewDecisionTool } from "./decisions";
 import { logInteractionTool } from "./interactions";
 import { journalTool } from "./journal";
 import { listMetricsTool, queryMetricTool } from "./metric";
+import { refileTool } from "./refile";
 import type { ToolDef } from "./registry";
 import { reviewQueueTool } from "./review-queue";
 import { searchTool } from "./search";
@@ -26,6 +27,7 @@ export const ALL_TOOLS: ToolDef[] = [
   agendaTool,
   logInteractionTool,
   reviewQueueTool,
+  refileTool,
   unlockTool,
 ];
 

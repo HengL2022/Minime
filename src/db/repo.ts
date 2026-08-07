@@ -2544,6 +2544,32 @@ export async function claimInboxItem(id: string): Promise<InboxClaim | null> {
   return row ? { item: inboxItem(row), token } : null;
 }
 
+/**
+ * Claim a pending item for OWNER-DRIVEN manual refiling (minime_refile), regardless of whether
+ * it was already classified. claimInboxItem's 'pending' branch deliberately requires
+ * classifier_output IS NULL, mirroring retryableInboxItems(): an already-classified pending row
+ * (every inbox_unfiled/duplicate review-queue item, per setInboxPendingClaimed) is left for the
+ * owner rather than auto-retried, so claimInboxItem can never claim it. This sibling drops only
+ * that restriction; the stale-processing branch is identical, so a live concurrent claim (fresh
+ * claimed_at, any worker) still fences this exactly as claimInboxItem does.
+ */
+export async function claimPendingInboxItemForRefile(id: string): Promise<InboxClaim | null> {
+  const token = crypto.randomUUID();
+  const [row] = await db()`
+    update inbox_items
+    set status = 'processing', claim_token = ${token}, claimed_at = clock_timestamp()
+    where id = ${id}
+      and tier >= 1 and tier <= app_allowed_tier()
+      and (
+        status = 'pending'
+        or
+        (status = 'processing'
+          and claimed_at <= clock_timestamp() - interval '5 minutes')
+      )
+    returning *`;
+  return row ? { item: inboxItem(row), token } : null;
+}
+
 export async function setInboxArchivePath(
   id: string,
   token: string,
@@ -2717,6 +2743,23 @@ export async function resolveReviewItem(
   status: "resolved" | "dismissed",
 ): Promise<void> {
   await db()`update review_queue set status = ${status}, resolved_at = ${now()} where id = ${id}`;
+}
+
+/**
+ * Auto-resolve any open inbox_unfiled/duplicate review-queue items that point at an inbox item
+ * which has just been filed (minime_refile). Scoped to exactly these two kinds — the only ones
+ * whose payload carries inbox_item_id (review-queue.ts) — so this can never resolve an unrelated
+ * flag (contradiction/stale/decision_review/phantom_person/extract_suspect) by accident.
+ */
+export async function resolveOpenReviewItemsForInbox(inboxItemId: string): Promise<string[]> {
+  const rows = await db()`
+    update review_queue
+    set status = 'resolved', resolved_at = ${now()}
+    where status = 'open'
+      and kind in ('inbox_unfiled', 'duplicate')
+      and payload ->> 'inbox_item_id' = ${inboxItemId}
+    returning id`;
+  return rows.map((row) => String(row.id));
 }
 
 // ---------------------------------------------------------------- state snapshot

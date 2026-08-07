@@ -1,0 +1,212 @@
+// W2-3: minime_refile lets the owner manually file a pending inbox capture (one the automatic
+// classifier left in the review queue, or hasn't reached yet) into a typed row, reusing the
+// exact same fileRow/claim machinery the watcher itself uses (DECISIONS.md 2026-08-06 fenced
+// finalization).
+//
+// Anti-laundering (binding cross-check): a pending capture's free text is tier-2-gated exactly
+// like the review-queue read path, regardless of what the classifier guessed (DECISIONS.md
+// 2026-08-08) — so refiling requires an active tier-2 unlock for the calling session. And a
+// "note" tier override can only raise the tier the capture's own stored classifier evidence
+// implies, never lower it — an agent must never be able to file tier-2-gated capture text as a
+// tier-1 note it can then read without unlocking anything.
+
+import { z } from "zod";
+import { withDbTransaction } from "../../db/client";
+import {
+  allowedTier,
+  assertInboxClaim,
+  claimPendingInboxItemForRefile,
+  getInboxItem,
+  logEvent,
+  resolveOpenReviewItemsForInbox,
+  setInboxFiledClaimed,
+} from "../../db/repo";
+import type { Classification } from "../../pipeline/classify";
+import {
+  type FiledTable,
+  type NoteProjection,
+  fileRow,
+  noteHintTier,
+  publishNoteProjection,
+  readArchivedCapture,
+  storedClassification,
+} from "../../pipeline/watcher";
+import { auditPayload } from "../../util/audit-payload";
+import { ToolError, envelope } from "../envelope";
+import type { ToolDef } from "./registry";
+
+const REFILE_TYPE = ["task", "journal", "note", "interaction", "decision"] as const;
+type RefileType = (typeof REFILE_TYPE)[number];
+
+// Owner-facing refile type -> the Classification type fileRow's switch expects. "decision" maps
+// to "decision_note" (fileRow/classify's internal name); every other name is shared verbatim.
+const CLASSIFICATION_TYPE: Record<RefileType, Classification["type"]> = {
+  task: "task",
+  journal: "journal",
+  note: "note",
+  interaction: "interaction",
+  decision: "decision_note",
+};
+
+// SourceRef.type per filed table: the singular parent-type name other tools already use
+// (upsertTaskTool -> "task", journalTool -> "journal", ...), not the raw SQL table name.
+const SOURCE_TYPE: Record<FiledTable, string> = {
+  tasks: "task",
+  journal_entries: "journal",
+  interactions: "interaction",
+  pages: "page",
+  decisions: "decision",
+};
+
+// The classifier guess stored on the inbox item is metadata the caller can already see without
+// unlocking anything (review-queue convention, DECISIONS.md 2026-08-08). journal/interaction are
+// the two types that always file at tier 2 (insertJournal/insertInteraction default tier=2), so a
+// stored guess of either is positive evidence this capture's free text is tier-2-grade — the
+// floor a "note" tier override may never go below. Any other guess (or none yet) carries no such
+// evidence, so the floor stays at the ordinary tier-1 default.
+function noteEvidenceFloor(stored: Classification | null): 1 | 2 {
+  return stored?.type === "journal" || stored?.type === "interaction" ? 2 : 1;
+}
+
+interface TransactionOutcome {
+  filedTable: FiledTable;
+  filedId: string;
+  resolved: string[];
+  projection?: NoteProjection;
+}
+
+export const refileTool: ToolDef = {
+  name: "minime_refile",
+  description:
+    "File a pending inbox capture (status=pending) into a typed row: task | journal | note | " +
+    "interaction | decision. Requires an approved tier-2 unlock (minime_unlock) — a not-yet-" +
+    "filed capture's text is tier-2-gated regardless of its eventual type (DECISIONS.md " +
+    "2026-08-08). Optional overrides: title, due (YYYY-MM-DD), person_name, kind " +
+    "(meeting|call|message|email|note), question, choice, mood (1-5), and tier (1|2 — honored " +
+    "only when type=note, and floored to 2 whenever this capture's own stored classifier guess " +
+    "was journal/interaction, so tier-2-grade text can never be filed as a lower-tier note). " +
+    "Rejects a non-pending item, and rejects a match against an existing open task (BAD_INPUT) " +
+    "rather than filing a duplicate. Resolves any open inbox_unfiled/duplicate review-queue " +
+    "items for this capture. Never echoes the capture's text back in its response.",
+  schema: {
+    inbox_item_id: z.string().uuid(),
+    type: z.enum(REFILE_TYPE),
+    title: z.string().min(1).optional(),
+    due: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional(),
+    person_name: z.string().min(1).optional(),
+    kind: z.enum(["meeting", "call", "message", "email", "note"]).optional(),
+    question: z.string().min(1).optional(),
+    choice: z.string().optional(),
+    mood: z.number().int().min(1).max(5).optional(),
+    tier: z.union([z.literal(1), z.literal(2)]).optional(),
+  },
+  handler: async (params, ctx) => {
+    const item = await getInboxItem(params.inbox_item_id);
+    if (!item) throw new ToolError("NOT_FOUND", "inbox item not found");
+    if (item.status !== "pending") {
+      throw new ToolError("BAD_INPUT", "already filed — use minime_correct to amend the filed row");
+    }
+    // Anti-laundering gate: see file header. Applies regardless of the requested target type —
+    // reading the archive below is itself the disclosure this gate protects.
+    if ((await allowedTier(ctx.actor)) !== 2) {
+      throw new ToolError(
+        "BAD_INPUT",
+        "refiling requires an approved tier-2 unlock (minime_unlock) — this capture's text is " +
+          "tier-2-gated until filed",
+      );
+    }
+    const text = await readArchivedCapture(item);
+    if (text === null) throw new ToolError("NOT_FOUND", "capture archive unavailable");
+
+    const type = CLASSIFICATION_TYPE[params.type as RefileType];
+    const fields: Record<string, unknown> = {};
+    if (params.title !== undefined) fields.title = params.title;
+    if (params.due !== undefined) fields.due = params.due;
+    if (params.person_name !== undefined) fields.person_name = params.person_name;
+    if (params.kind !== undefined) fields.kind = params.kind;
+    if (params.question !== undefined) fields.question = params.question;
+    if (params.choice !== undefined) fields.choice = params.choice;
+    if (params.mood !== undefined) fields.mood = params.mood;
+    if (type === "note") {
+      // Anti-laundering floor: see file header. Always computed (not only when an override is
+      // given) so the ordinary no-override path is protected too.
+      const floor = Math.max(
+        noteEvidenceFloor(storedClassification(item.classifier_output)),
+        noteHintTier(text),
+      ) as 1 | 2;
+      fields.tier = params.tier !== undefined ? Math.max(params.tier, floor) : floor;
+    }
+
+    const classification: Classification = {
+      type,
+      confidence: 1,
+      fields,
+      reason: "owner refile",
+    };
+
+    // A tool handler runs inside ONE ambient actor transaction (executeTool -> withActorDbSession)
+    // for its whole call, so withDbTransaction here is reentrant, not a separate commit boundary:
+    // if the handler throws AFTER this returns, postgres.js rolls back everything in it too. A
+    // duplicate match therefore throws immediately (below fileRow's call, inside this block) —
+    // there is no way to keep fileRow's queued duplicate review item while still failing the
+    // overall call, so this simply undoes the claim along with it, leaving the item exactly as it
+    // was. The standard tool:minime_refile:result audit event (I8) still records the attempt on
+    // its own separate durable connection, independent of this rollback.
+    const outcome = await withDbTransaction<TransactionOutcome>(async () => {
+      // claimPendingInboxItemForRefile (not claimInboxItem) so a concurrent watcher replay OR a
+      // second concurrent refile call is fenced exactly like the automatic pipeline, even though
+      // this item was already classified (claimInboxItem's 'pending' branch deliberately excludes
+      // that case — see its repo.ts doc comment).
+      const claim = await claimPendingInboxItemForRefile(item.id);
+      if (!claim) {
+        throw new ToolError(
+          "BAD_INPUT",
+          "capture is currently claimed by another process — retry shortly",
+        );
+      }
+      await assertInboxClaim(item.id, claim.token);
+      const result = await fileRow(classification, text, item.id);
+      if (result === "duplicate") {
+        throw new ToolError(
+          "BAD_INPUT",
+          "this capture matches an existing open task — file it as a different type, or " +
+            "resolve the match first",
+        );
+      }
+      if (!result) {
+        // Unreachable: CLASSIFICATION_TYPE only emits types fileRow's switch recognizes.
+        throw new Error("refile_unfileable_type");
+      }
+      const [filedTable, filedId] = result.primary;
+      await setInboxFiledClaimed(item.id, claim.token, filedTable, filedId, classification);
+      const resolved = await resolveOpenReviewItemsForInbox(item.id);
+      await logEvent({
+        actor: ctx.actor,
+        verb: "inbox:refiled",
+        entityType: "inbox_item",
+        entityId: item.id,
+        payload: auditPayload.inboxRefiled({ type: classification.type, filedTable, filedId }),
+      });
+      return { filedTable, filedId, resolved, projection: result.projection };
+    });
+
+    // The Markdown mirror publishes only after the database commit, exactly like
+    // processInboxSnapshot: a rolled-back finalization must never leave a visible projection.
+    if (outcome.projection) await publishNoteProjection(outcome.projection);
+
+    return envelope(
+      {
+        filed_table: outcome.filedTable,
+        filed_id: outcome.filedId,
+        resolved_review_items: outcome.resolved,
+      },
+      [
+        { type: SOURCE_TYPE[outcome.filedTable], id: outcome.filedId },
+        { type: "inbox_item", id: item.id },
+      ],
+    );
+  },
+};

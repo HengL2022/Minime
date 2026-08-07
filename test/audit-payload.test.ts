@@ -148,6 +148,7 @@ describe("audit payload boundary", () => {
       "inboxFiled",
       "inboxLegacyDuplicate",
       "inboxOrphaned",
+      "inboxRefiled",
       "inboxSplitDecision",
       "inboxSplitDoneTask",
       "inboxUnfiled",

@@ -57,14 +57,14 @@ import { findDuplicate } from "./dedup";
 const ACTOR = "agent:classifier";
 const CONFIDENCE_FLOOR = 0.7;
 const RETRY_BACKOFF_MS = 5_000;
-type FiledTable = "tasks" | "journal_entries" | "interactions" | "pages" | "decisions";
+export type FiledTable = "tasks" | "journal_entries" | "interactions" | "pages" | "decisions";
 
-interface NoteProjection {
+export interface NoteProjection {
   absolutePath: string;
   body: string;
 }
 
-interface FiledResult {
+export interface FiledResult {
   primary: [FiledTable, string];
   projection?: NoteProjection;
 }
@@ -183,6 +183,16 @@ export async function readArchivedCapture(item: InboxItem): Promise<string | nul
   return bytes.toString("utf8");
 }
 
+const AGENT_SESSION_HINT_RE = /<!-- hint: agent work session -->/;
+
+// Default note tier from the capture text alone: agent-session captures (SessionEnd hook)
+// carry a fixed hint marker and file at tier 2 like journal/interactions; everything else
+// defaults to tier 1. Exported so minime_refile (W2-3) can reuse the same signal when it
+// floors an owner-requested note tier override against the capture's own evidence.
+export function noteHintTier(text: string): 1 | 2 {
+  return AGENT_SESSION_HINT_RE.test(text) ? 2 : 1;
+}
+
 function firstLineOf(text: string): string {
   return text
     .split("\n")[0]!
@@ -207,7 +217,7 @@ function noteProjection(c: Classification, text: string, inboxId: string): NoteP
   };
 }
 
-async function publishNoteProjection(projection: NoteProjection): Promise<void> {
+export async function publishNoteProjection(projection: NoteProjection): Promise<void> {
   await publishSnapshot(
     projection.absolutePath,
     Buffer.from(projection.body),
@@ -233,7 +243,7 @@ export function storedClassification(value: unknown): Classification | null {
 // Insert the typed row for a classification. Returns its primary row plus an optional note
 // projection when filed, "duplicate" when it matched an existing open task (the duplicate review
 // item is queued here), or null when unfileable. The caller owns the surrounding transaction.
-async function fileRow(
+export async function fileRow(
   c: Classification,
   text: string,
   inboxId: string,
@@ -456,8 +466,11 @@ async function fileRow(
       // notes become brain pages so they live in the markdown archive (I4). Agent-session
       // captures (SessionEnd hook) carry verbatim prompt/outcome text from arbitrary
       // projects, so they file at tier 2 like journal/interactions — searchable, but
-      // reads stay behind the unlock gate (§12; invariant-review 2026-06-12).
-      const tier = /<!-- hint: agent work session -->/.test(text) ? 2 : 1;
+      // reads stay behind the unlock gate (§12; invariant-review 2026-06-12). A caller may
+      // pin an explicit tier via c.fields.tier (minime_refile, W2-3) — e.g. floored above
+      // the hint default by the capture's own prior classifier evidence — otherwise this
+      // falls back to the hint-based default exactly as before.
+      const tier = c.fields.tier === 1 || c.fields.tier === 2 ? c.fields.tier : noteHintTier(text);
       const projection = noteProjection(c, text, inboxId);
       const relPath = relative(join(config.dataDir, "brain"), projection.absolutePath);
       const hash = sha256(projection.body);

@@ -13,6 +13,7 @@ type AuditPayloadKind =
   | "inboxFiled"
   | "inboxLegacyDuplicate"
   | "inboxOrphaned"
+  | "inboxRefiled"
   | "inboxSplitDecision"
   | "inboxSplitDoneTask"
   | "inboxUnfiled"
@@ -493,6 +494,27 @@ function inboxFiled(input: {
   });
 }
 
+// minime_refile (W2-3): the owner CHOSE this type, so unlike inboxFiled there is no
+// classifier confidence to record — confidence is fixed at 1 in the Classification built for
+// fileRow and is not evidence worth auditing here.
+function inboxRefiled(input: {
+  type: ClassifierKind;
+  filedTable: FiledTable;
+  filedId: string;
+}): AuditPayload {
+  return construct("inboxRefiled", {
+    type: classifierKind(input.type),
+    filed_table: fixed(input.filedTable, [
+      "tasks",
+      "journal_entries",
+      "interactions",
+      "pages",
+      "decisions",
+    ]),
+    filed_id: uuid(input.filedId),
+  });
+}
+
 function inboxUnfiled(input: { kind: ClassifierKind; confidence: number }): AuditPayload {
   return construct("inboxUnfiled", {
     type: classifierKind(input.kind),
@@ -517,6 +539,7 @@ export const auditPayload = Object.freeze({
   inboxFiled,
   inboxLegacyDuplicate,
   inboxOrphaned,
+  inboxRefiled,
   inboxSplitDecision,
   inboxSplitDoneTask,
   inboxUnfiled,
@@ -539,6 +562,7 @@ const AUDITED_TOOL_NAMES = new Set([
   "minime_log_decision",
   "minime_log_interaction",
   "minime_query_metric",
+  "minime_refile",
   "minime_review_decision",
   "minime_review_queue",
   "minime_search",
@@ -571,6 +595,7 @@ function expectedPayloadKind(verb: string, payload: AuditPayload): AuditPayloadK
     "inbox:filed": "inboxFiled",
     "inbox:legacy-duplicate": "inboxLegacyDuplicate",
     "inbox:orphaned": "inboxOrphaned",
+    "inbox:refiled": "inboxRefiled",
     "inbox:split-decision": "inboxSplitDecision",
     "inbox:split-done-task": "inboxSplitDoneTask",
     "inbox:unfiled": "inboxUnfiled",

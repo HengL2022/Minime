@@ -669,6 +669,87 @@
     }
   },
   {
+    "name": "minime_refile",
+    "description": "File a pending inbox capture (status=pending) into a typed row: task | journal | note | interaction | decision. Requires an approved tier-2 unlock (minime_unlock) — a not-yet-filed capture's text is tier-2-gated regardless of its eventual type (DECISIONS.md 2026-08-08). Optional overrides: title, due (YYYY-MM-DD), person_name, kind (meeting|call|message|email|note), question, choice, mood (1-5), and tier (1|2 — honored only when type=note, and floored to 2 whenever this capture's own stored classifier guess was journal/interaction, so tier-2-grade text can never be filed as a lower-tier note). Rejects a non-pending item, and rejects a match against an existing open task (BAD_INPUT) rather than filing a duplicate. Resolves any open inbox_unfiled/duplicate review-queue items for this capture. Never echoes the capture's text back in its response.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "inbox_item_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "task",
+            "journal",
+            "note",
+            "interaction",
+            "decision"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "due": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "person_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "meeting",
+            "call",
+            "message",
+            "email",
+            "note"
+          ]
+        },
+        "question": {
+          "type": "string",
+          "minLength": 1
+        },
+        "choice": {
+          "type": "string"
+        },
+        "mood": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "tier": {
+          "type": "number",
+          "enum": [
+            1,
+            2
+          ]
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "inbox_item_id",
+        "type"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
     "name": "minime_unlock",
     "description": "Request an owner-approved, time-boxed tier-2 read unlock for this MCP connection (journal, interactions, email metadata). Tier 0 is never unlockable.",
     "inputSchema": {
