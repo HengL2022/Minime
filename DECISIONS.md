@@ -2475,13 +2475,18 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   with no timestamp. Grant `UPDATE (superseded_by, superseded_at)` — those two columns only,
   never the row — to `minime_app` on the six tables that previously had no UPDATE grant; the
   other six already have full table UPDATE from 021, which already covers the new columns
-  without any further grant. No new RLS policy: the existing `tier_update` policies (007_rls.sql,
-  extended per-table in 008/014_decision_interview.sql/021) already gate every UPDATE, including
-  this one, by `app_allowed_tier()`. This migration also updates the `mood`/`energy`
-  `metric_defs.agg_sql` bodies seeded in 027_life_metrics_seed.sql, adding
-  `and superseded_at is null` to each WHERE clause: `journal_entries` is the one content table in
-  this migration's list whose rows already feed a numeric aggregate, so the column's meaning and
-  the aggregate that reads it move together in the same migration.
+  without any further grant. The pre-existing `tier_update` policies (007_rls.sql; orgs in
+  008_orgs.sql; decision_branches in 014_decision_interview.sql) already gate every UPDATE,
+  including this one, by the upper bound `tier <= app_allowed_tier()` — no new grant target
+  changes that. This migration also updates the `mood`/`energy` `metric_defs.agg_sql` bodies
+  seeded in 027_life_metrics_seed.sql, adding `and superseded_at is null` to each WHERE clause:
+  `journal_entries` is the one content table in this migration's list whose rows already feed a
+  numeric aggregate, so the column's meaning and the aggregate that reads it move together in the
+  same migration. It also extends the `tier_update` policy itself on all twelve tables
+  (`alter policy ... using (tier >= 1 and tier <= app_allowed_tier())`), adding the same
+  `tier >= 1` lower bound that 019_tier0_prose_quarantine.sql already gave `tier_read` and that
+  021_runtime_app_role.sql already gave `tier_delete` — `tier_update` was the one command type
+  still missing it on every table that has it, not only the six this migration grants UPDATE on.
 - **Why:** A correction feature needs the old row to survive (audit, recoverability, "what did I
   actually believe on that date") while still being able to name and time its own replacement.
   Splitting the grant to exactly the two stamp columns keeps the six previously write-locked
@@ -2493,11 +2498,22 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   double-count: the superseded original's value and its successor's value would both fall inside
   the same `avg()`, corrupting exactly the numeric surface I6 exists to protect. Fixing the
   aggregate now, rather than waiting for a future task to remember it, means the metric is never
-  observably wrong even for one release.
+  observably wrong even for one release. Separately, without the `tier_update` lower bound, a
+  WHERE-less or constant-predicate UPDATE issued by a locked `minime_app` session could still
+  stamp a tier-0 quarantined row on any of these twelve tables — a row that same session could
+  never discover through any `tier_read`-gated SELECT — because the upper bound alone
+  (`tier <= app_allowed_tier()`) does not exclude tier 0 (`0 <= 1` is true while locked). No
+  `repo.ts`/tool code path issues such an update today, so this was defense-in-depth, not an
+  active leak; closing it keeps I3's "tier 0 is an absorbing quarantine state" postcondition true
+  on the write side, not only for reads and deletes.
 - **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
   that authorized this branch's fully autonomous, wave-by-wave execution across the W2
   correction-loop workstream — not a bespoke per-task approval; the owner's end-of-program
   review before any publication remains the final gate. The `agg_sql` fix above was added during
   W2-1 review-finding remediation (2026-08-08): a numeric-correctness gap in an aggregate this
   same migration already governs, not a new privilege or schema-meaning question, so it did not
-  need separate ratification.
+  need separate ratification. The `tier_update` lower-bound fix was added in a second W2-1
+  review-finding remediation pass the same day: it strictly tightens an existing policy to match
+  the boundary already documented for `tier_read`/`tier_delete` and already modeled by the test
+  harness (`test/support/app-role.ts`), grants no new access, and was applied directly to
+  migration 028 rather than a follow-up migration because 028 had not shipped past this branch.

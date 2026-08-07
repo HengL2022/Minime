@@ -21,11 +21,17 @@
 -- touch the `events` table, which remains insert-only and unmodified by this migration --
 -- content supersession is an audited product feature, not an I8 violation (review 2026-08-07).
 --
--- This migration does NOT build the correction tool itself (minime_correct is a later W2 task)
--- and does not change any tier_read/tier_update RLS policy -- the existing tier_update policies
--- (007_rls.sql, decision_branches in 014_decision_interview.sql, orgs in 008_orgs.sql, all
--- extended in 021_runtime_app_role.sql) already gate every UPDATE on these tables by
--- app_allowed_tier(), including the new column-limited grant below.
+-- This migration does NOT build the correction tool itself (minime_correct is a later W2 task).
+-- It does not touch tier_read at all. It DOES extend tier_update (review finding, 2026-08-08):
+-- the original tier_update policies (007_rls.sql; decision_branches in 014_decision_interview.sql;
+-- orgs in 008_orgs.sql) gate every UPDATE on these tables by app_allowed_tier(), including the
+-- new column-limited grant below, but -- unlike tier_read (019_tier0_prose_quarantine.sql,
+-- 021_runtime_app_role.sql) and tier_delete (021_runtime_app_role.sql) -- they never received the
+-- `tier >= 1` lower bound, so a WHERE-less or constant-predicate UPDATE from a locked session
+-- could still stamp a tier-0 quarantined row it can never SELECT. The alter-policy loop near the
+-- bottom of this file closes that gap on all twelve PARENTS tables, not only the six this
+-- migration grants UPDATE to -- the other six already had full table UPDATE from 021 and carried
+-- the same gap.
 --
 -- journal_entries is also the one PARENTS table whose content already feeds a numeric aggregate:
 -- the 'mood'/'energy' metric_defs seeded in 027_life_metrics_seed.sql average every row with a
@@ -94,3 +100,28 @@ where name = 'energy';
 grant update (superseded_by, superseded_at) on
   journal_entries, interactions, commitments, goals, values_items, principles
 to minime_app;
+
+-- Close the write-side half of the tier-0 quarantine gap (review finding, 2026-08-08): every
+-- tier_update policy on these twelve tables was created with only the upper bound
+-- (`tier <= app_allowed_tier()`), so a WHERE-less or constant-predicate UPDATE from a locked
+-- minime_app session could still touch a tier-0 row -- one it could never discover through any
+-- tier_read-gated SELECT in the first place. This brings tier_update in line with tier_read
+-- (019_tier0_prose_quarantine.sql, 021_runtime_app_role.sql) and tier_delete
+-- (021_runtime_app_role.sql), and matches the boundary test/support/app-role.ts's synthetic
+-- test-role policies already model for UPDATE. The gap applies to all twelve PARENTS tables, not
+-- only the six granted UPDATE above -- the other six (tasks, decisions, people, pages, orgs,
+-- decision_branches) already had full table UPDATE from 021_runtime_app_role.sql and carried the
+-- same missing lower bound. ALTER POLICY on an already-existing policy is inherently idempotent
+-- (unlike CREATE POLICY, it needs no drop-then-create dance).
+do $$
+declare t text;
+begin
+  foreach t in array array[
+    'pages', 'journal_entries', 'interactions', 'decisions', 'decision_branches', 'tasks',
+    'goals', 'values_items', 'principles', 'people', 'orgs', 'commitments'
+  ] loop
+    execute format(
+      'alter policy tier_update on %I to minime_app using (tier >= 1 and tier <= app_allowed_tier())',
+      t);
+  end loop;
+end $$;

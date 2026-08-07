@@ -419,4 +419,44 @@ describe("tier-2 privacy hardening", () => {
       await dropTestAppRole(appRole);
     }
   });
+
+  // W2-1 review finding (2026-08-08): the tier_update RLS policies on these tables carried only
+  // the upper bound (`tier <= app_allowed_tier()`); unlike tier_read
+  // (019_tier0_prose_quarantine.sql/021_runtime_app_role.sql) and tier_delete
+  // (021_runtime_app_role.sql), they never got the `tier >= 1` lower bound. A WHERE-less or
+  // constant-predicate UPDATE from a LOCKED session could therefore still stamp a tier-0
+  // quarantined row -- one that same session could never discover via any tier_read-gated SELECT.
+  // This is the real runtime minime_app role and the actual tier_update policy from the
+  // migrations, not the independently-cloned test app-role boundary.
+  test("minime_app cannot stamp superseded_at on a tier-0 quarantined row via a WHERE-less update, even locked", async () => {
+    await sql`delete from session_unlocks`;
+    const [quarantined] = await sql`
+      insert into journal_entries (entry_md, tier) values ('ZQX-TIER0-QUARANTINE-SUPERSEDE', 0)
+      returning id`;
+
+    const appRole = await mintTestAppRole(process.env.DATABASE_URL!);
+    await sql.unsafe(`grant minime_app to "${appRole.roleName}"`);
+    const app = postgres(appRole.databaseUrl, { max: 1, onnotice: () => {} });
+    const probeCtx = sessionToolCtx("agent:supersede-tier0-probe");
+
+    try {
+      // Locked (tier 1 default) and no WHERE clause at all: before the lower-bound fix, this
+      // bulk statement matched every row the UPDATE policy's upper bound alone didn't exclude --
+      // including tier 0, since 0 <= 1. It must now touch zero rows.
+      const bulk = await app.begin(async (tx) => {
+        await tx`set local role minime_app`;
+        await tx`select set_config('minime.actor', ${probeCtx.actor}, true)`;
+        await tx`select set_config('minime.session_id', ${probeCtx.sessionId as string}, true)`;
+        return tx`update journal_entries set superseded_at = now()`;
+      });
+      expect(bulk.count).toBe(0);
+
+      const [stillLive] = await sql`
+        select superseded_by, superseded_at from journal_entries where id = ${quarantined!.id}`;
+      expect(stillLive).toEqual({ superseded_by: null, superseded_at: null });
+    } finally {
+      await app.end({ timeout: 2 });
+      await dropTestAppRole(appRole);
+    }
+  });
 });
