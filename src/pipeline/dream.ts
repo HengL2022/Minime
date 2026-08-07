@@ -15,6 +15,7 @@ import {
   reviewItemExists,
   runMetricAgg,
   staleItems,
+  staleRecentlyFlagged,
   upsertMetricValue,
 } from "../db/repo";
 import { drainEmbedBacklog } from "../search/index-parent";
@@ -118,6 +119,23 @@ export async function phantomPersonScan(): Promise<number> {
       reason,
       suggestion: "retype to org, or dismiss if this really is a person",
     });
+    flagged++;
+  }
+  return flagged;
+}
+
+// -- step 4: stale detection -------------------------------------------------
+//
+// staleItems(referencedSinceDays, untouchedDays) already applies the untouched-AND-referenced
+// conjunction (repo.ts); this loop's own job is re-flag suppression. staleRecentlyFlagged
+// (unlike the plain reviewItemExists other steps use) also counts recently-created dismissed
+// items, so a dismissal stays quiet for its suppression window instead of being re-flagged the
+// very next night (review-triage.md: "dismissed means dismissed").
+export async function staleScan(): Promise<number> {
+  let flagged = 0;
+  for (const item of await staleItems(7, 180)) {
+    if (await staleRecentlyFlagged(item.id)) continue;
+    await insertReviewItem("stale", { id: item.id, type: item.type, label: item.label });
     flagged++;
   }
   return flagged;
@@ -233,15 +251,7 @@ export async function dream(): Promise<Record<string, unknown>> {
     const { validateEdges } = await import("./validate-edges");
     return validateEdges();
   });
-  await step("4_stale", async () => {
-    let flagged = 0;
-    for (const item of await staleItems(7, 180)) {
-      if (await reviewItemExists("stale", "id", item.id)) continue;
-      await insertReviewItem("stale", { id: item.id, type: item.type, label: item.label });
-      flagged++;
-    }
-    return flagged;
-  });
+  await step("4_stale", () => staleScan());
   await step("5_rollups", () => rollupMetrics());
   await step("6_decision_reviews", () => enqueueDecisionReviews(todayStr(config.tz)));
   await step("7_backup", () => backup());

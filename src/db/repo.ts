@@ -3085,6 +3085,15 @@ export async function allPeopleWithAliases(): Promise<{ id: string; names: strin
   return rows.map((r: any) => ({ id: r.id, names: r.names }));
 }
 
+// Untouched-AND-referenced conjunction: a row only surfaces as stale if it is BOTH old
+// (the untouchedDays predicate below) AND was referenced again recently (either signal):
+//   - a released minime_get_context drill-in naming it as the primary result, mirroring the
+//     accessCounts join shape (repo.ts accessCounts) over the append-only events log — ids
+//     only, never content (I8); or
+//   - a fresh edge touching it in either direction (it mentioned something, or something
+//     mentions it) within referencedSinceDays (edges.created_at, 003_graph_audit.sql).
+// Existing row-level `tier >= 1` floor is unchanged — staleItems output flows through the
+// tier-masking review-queue tool, so this is a boolean existence gate, not a content read.
 export async function staleItems(
   referencedSinceDays: number,
   untouchedDays: number,
@@ -3094,10 +3103,50 @@ export async function staleItems(
     select 'page' as type, id, title as label, updated_at from pages
     where status = 'active' and tier >= 1
       and updated_at < ${t}::timestamptz - make_interval(days => ${untouchedDays})
+      and (
+        exists (
+          select 1
+          from events r
+          join events d
+            on d.verb = 'tool:minime_get_context:disposition'
+           and d.payload->>'result_event_id' = r.id::text
+           and d.payload->>'status' = 'released'
+          where r.verb = 'tool:minime_get_context'
+            and r.payload->>'delivery' = 'transport'
+            and r.at >= ${t}::timestamptz - make_interval(days => ${referencedSinceDays})
+            and r.payload->'returned_ids'->>0 = pages.id::text
+        )
+        or exists (
+          select 1 from edges e
+          where ((e.dst_type = 'page' and e.dst_id = pages.id)
+              or (e.src_type = 'page' and e.src_id = pages.id))
+            and e.created_at >= ${t}::timestamptz - make_interval(days => ${referencedSinceDays})
+        )
+      )
     union all
     select 'person' as type, id, canonical_name as label, updated_at from people
     where tier >= 1
-      and coalesce(last_contact_at, updated_at) < ${t}::timestamptz - make_interval(days => ${untouchedDays})`;
+      and coalesce(last_contact_at, updated_at) < ${t}::timestamptz - make_interval(days => ${untouchedDays})
+      and (
+        exists (
+          select 1
+          from events r
+          join events d
+            on d.verb = 'tool:minime_get_context:disposition'
+           and d.payload->>'result_event_id' = r.id::text
+           and d.payload->>'status' = 'released'
+          where r.verb = 'tool:minime_get_context'
+            and r.payload->>'delivery' = 'transport'
+            and r.at >= ${t}::timestamptz - make_interval(days => ${referencedSinceDays})
+            and r.payload->'returned_ids'->>0 = people.id::text
+        )
+        or exists (
+          select 1 from edges e
+          where ((e.dst_type = 'person' and e.dst_id = people.id)
+              or (e.src_type = 'person' and e.src_id = people.id))
+            and e.created_at >= ${t}::timestamptz - make_interval(days => ${referencedSinceDays})
+        )
+      )`;
 }
 
 // Phantom-person watchdog candidates (dream step 3b). Surfaces person rows that actually
@@ -3407,6 +3456,25 @@ export async function reviewItemExists(
 ): Promise<boolean> {
   const rows = await db()`select 1 from review_queue where kind = ${kind} and status = 'open'
     and payload ->> ${payloadKey} = ${payloadValue} limit 1`;
+  return rows.length > 0;
+}
+
+// Stale-item re-flag suppression window (review-triage.md: "dismissed means dismissed").
+// Conservative and trivially tunable — see W1-7 spec risk note.
+const STALE_SUPPRESSION_DAYS = 90;
+
+/** True if a stale item for this payload id is currently open (never duplicate an open flag)
+ * OR was created within the suppression window regardless of status (a dismissal stays quiet
+ * for a bounded time rather than forever — it can legitimately resurface later). Dream step 4
+ * uses this in place of reviewItemExists, which only checked status = 'open' and so re-flagged
+ * a dismissed item the very next night. */
+export async function staleRecentlyFlagged(id: string): Promise<boolean> {
+  const rows = await db()`
+    select 1 from review_queue
+    where kind = 'stale' and payload ->> 'id' = ${id}
+      and (status = 'open'
+        or created_at >= ${now()}::timestamptz - make_interval(days => ${STALE_SUPPRESSION_DAYS}))
+    limit 1`;
   return rows.length > 0;
 }
 
