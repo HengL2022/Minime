@@ -2447,4 +2447,8 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   scheduling, mood-trend awareness) without a manual unlock for routine use. Widening the rollup
   vocabulary to `avg`, instead of overloading `sum` or `last`, keeps each metric's week/month
   combination rule an honest, checked description of its own arithmetic.
-- **Approved by:** human owner, livability-program ratification 2026-08-07 (decision 7).
+- **Approved by:** human owner, decision 7 of 14 in the upfront livability-program plan
+  ratification (2026-08-07) that authorized this branch's fully autonomous, wave-by-wave
+  execution — not a bespoke per-task approval. Reconfirmed against the program's
+  ratified-decisions record during W1-1 review-finding remediation (2026-08-08); the owner's
+  end-of-program review before GitHub publication (program decision 13) remains the final gate.
