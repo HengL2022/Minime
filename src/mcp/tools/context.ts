@@ -85,7 +85,16 @@ export const getContextTool: ToolDef = {
         type = "org";
         row = await resolveOrg(params.person_name, ctx.actor);
       }
-      if (!row) throw new ToolError("NOT_FOUND", "no person or org matching that name");
+      // Wording MUST be byte-identical whether a tier-2 row exists or nothing exists at all —
+      // resolvePerson/resolveOrg already return null for both cases (repo.ts tier predicate),
+      // so no extra query may be added here to distinguish them (would introduce an oracle for
+      // otherwise RLS-hidden tier-2 identities, e.g. people minted by minime_log_interaction).
+      if (!row)
+        throw new ToolError(
+          "NOT_FOUND",
+          "no person or org matching that name at the current access tier — a match may exist " +
+            "at tier 2; offer an owner-approved unlock (minime_unlock)",
+        );
     } else if (params.type && params.id) {
       type = params.type;
       row = await getRow(type, params.id, ctx.actor);

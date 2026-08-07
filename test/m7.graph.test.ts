@@ -445,3 +445,59 @@ describe("minime_review_queue tool", () => {
     expect(item.payload.label).toBe("[above current tier]");
   });
 });
+
+// W1-5: the person_name NOT_FOUND message must never distinguish "exists at tier 2, locked"
+// from "does not exist at all" — that distinction would be an oracle for otherwise
+// RLS-hidden tier-2 identities (e.g. people minted by minime_log_interaction via
+// ensurePerson({tier:2}), interactions.ts:65).
+describe("minime_get_context person_name NOT_FOUND (tier-aware, no oracle)", () => {
+  const TIER_AWARE_NOT_FOUND =
+    "no person or org matching that name at the current access tier — a match may exist " +
+    "at tier 2; offer an owner-approved unlock (minime_unlock)";
+
+  test("locked tier-2 person and a name matching nothing at all emit byte-identical NOT_FOUND", async () => {
+    const { ensurePerson } = await import("../src/db/repo");
+    const { toolByName } = await import("../src/mcp/tools");
+    const { invokeTool } = await import("../src/mcp/tools/registry");
+    const ctx = { actor: "agent:w1-5-test" };
+    const tool = toolByName("minime_get_context");
+
+    await ensurePerson("Rikke Solstad", "agent:w1-5-test", "capture", { tier: 2 });
+
+    const tier2Result = await invokeTool(tool, { person_name: "Rikke Solstad" }, ctx);
+    if (tier2Result.ok) throw new Error("expected NOT_FOUND for a locked tier-2 person");
+    expect(tier2Result.error.code).toBe("NOT_FOUND");
+    expect(tier2Result.error.message).toBe(TIER_AWARE_NOT_FOUND);
+
+    const noMatchResult = await invokeTool(
+      tool,
+      { person_name: "Nobody Ever Logged This Name" },
+      ctx,
+    );
+    if (noMatchResult.ok) throw new Error("expected NOT_FOUND for a name matching nothing");
+    expect(noMatchResult.error.code).toBe("NOT_FOUND");
+    expect(noMatchResult.error.message).toBe(TIER_AWARE_NOT_FOUND);
+
+    // The oracle-risk assertion itself: identical wording regardless of which case occurred.
+    expect(tier2Result.error.message).toBe(noMatchResult.error.message);
+  });
+
+  test("a tier-1 person still resolves normally (unchanged by the tier-aware wording)", async () => {
+    const { ensurePerson } = await import("../src/db/repo");
+    const { toolByName } = await import("../src/mcp/tools");
+    const { invokeTool } = await import("../src/mcp/tools/registry");
+    const ctx = { actor: "agent:w1-5-test" };
+
+    const { id: personId } = await ensurePerson("Tier One Ola Berg", "agent:w1-5-test", "capture", {
+      tier: 1,
+    });
+
+    const result = await invokeTool(
+      toolByName("minime_get_context"),
+      { person_name: "Tier One Ola Berg" },
+      ctx,
+    );
+    if (!result.ok) throw new Error(`expected tier-1 person to resolve: ${result.error.message}`);
+    expect(result.envelope.sources[0]).toMatchObject({ type: "person", id: personId });
+  });
+});
