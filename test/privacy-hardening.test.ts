@@ -459,4 +459,56 @@ describe("tier-2 privacy hardening", () => {
       await dropTestAppRole(appRole);
     }
   });
+
+  test("minime_app can neither re-promote a tier-0 chunk nor demote any row to tier 0", async () => {
+    await sql`delete from session_unlocks`;
+    // Quarantined tier-0 page prose physically lives in chunks.text (019). Before 028's
+    // tier_update lower bound covered chunks, a WHERE-less `update chunks set tier = 1` from a
+    // locked minime_app session re-promoted it to the agent-readable tier (invariant review,
+    // 2026-08-08). Both directions must now fail closed: no re-promotion out of tier 0, and no
+    // demotion into it (the replaced USING clause is also the implicit WITH CHECK).
+    const [page] = await sql`
+      insert into pages (path, title, body_md, tier)
+      values ('probe/zqx-quarantined.md', 'ZQX quarantine probe', 'fictional probe body', 1)
+      returning id`;
+    const [chunk] = await sql`
+      insert into chunks (parent_type, parent_id, ord, text, tier)
+      values ('page', ${page!.id}, 0, 'ZQX-TIER0-QUARANTINED-CHUNK-PROSE', 0)
+      returning id`;
+
+    const appRole = await mintTestAppRole(process.env.DATABASE_URL!);
+    await sql.unsafe(`grant minime_app to "${appRole.roleName}"`);
+    const app = postgres(appRole.databaseUrl, { max: 1, onnotice: () => {} });
+    const probeCtx = sessionToolCtx("agent:tier0-chunk-probe");
+
+    try {
+      const repromote = await app.begin(async (tx) => {
+        await tx`set local role minime_app`;
+        await tx`select set_config('minime.actor', ${probeCtx.actor}, true)`;
+        await tx`select set_config('minime.session_id', ${probeCtx.sessionId as string}, true)`;
+        return tx`update chunks set tier = 1`;
+      });
+      expect(repromote.count).toBe(0);
+      const [still0] = await sql`select tier from chunks where id = ${chunk!.id}`;
+      expect(still0!.tier).toBe(0);
+
+      let demoteError = "";
+      try {
+        await app.begin(async (tx) => {
+          await tx`set local role minime_app`;
+          await tx`select set_config('minime.actor', ${probeCtx.actor}, true)`;
+          await tx`select set_config('minime.session_id', ${probeCtx.sessionId as string}, true)`;
+          return tx`update pages set tier = 0 where id = ${page!.id}`;
+        });
+      } catch (e) {
+        demoteError = e instanceof Error ? e.message : String(e);
+      }
+      expect(demoteError).toContain("row-level security");
+      const [still1] = await sql`select tier from pages where id = ${page!.id}`;
+      expect(still1!.tier).toBe(1);
+    } finally {
+      await app.end({ timeout: 2 });
+      await dropTestAppRole(appRole);
+    }
+  });
 });

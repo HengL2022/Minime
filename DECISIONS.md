@@ -2482,11 +2482,20 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   seeded in 027_life_metrics_seed.sql, adding `and superseded_at is null` to each WHERE clause:
   `journal_entries` is the one content table in this migration's list whose rows already feed a
   numeric aggregate, so the column's meaning and the aggregate that reads it move together in the
-  same migration. It also extends the `tier_update` policy itself on all twelve tables
+  same migration. It also extends the `tier_update` policy itself
   (`alter policy ... using (tier >= 1 and tier <= app_allowed_tier())`), adding the same
   `tier >= 1` lower bound that 019_tier0_prose_quarantine.sql already gave `tier_read` and that
-  021_runtime_app_role.sql already gave `tier_delete` — `tier_update` was the one command type
-  still missing it on every table that has it, not only the six this migration grants UPDATE on.
+  021_runtime_app_role.sql already gave `tier_delete` — `tier_update` had been untouched since
+  its creation (007/008/013/014) and was the one command type still missing the bound. Coverage
+  is every table where `minime_app` holds any UPDATE grant with a tier column: the twelve
+  PARENTS tables plus `chunks`, `edges`, `calendar_events`, and `inbox_items` — `chunks`
+  matters most, since quarantined tier-0 page prose physically lives in `chunks.text`
+  (`person_aliases`/`org_aliases` already carry the bound from 022; `email_meta` has no UPDATE
+  grant). Deliberate side effect: these policies have no explicit WITH CHECK, so the replaced
+  USING clause also tightens the implicit WITH CHECK — `minime_app` can no longer demote any
+  row to tier 0. Every legitimate tier→0 writer (quarantine, brain-sync, repair) runs on owner
+  connections that bypass RLS; a future child-side quarantine feature will fail loudly here by
+  design rather than silently bypassing the absorbing-state rule.
 - **Why:** A correction feature needs the old row to survive (audit, recoverability, "what did I
   actually believe on that date") while still being able to name and time its own replacement.
   Splitting the grant to exactly the two stamp columns keeps the six previously write-locked

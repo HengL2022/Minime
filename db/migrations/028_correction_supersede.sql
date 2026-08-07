@@ -29,9 +29,10 @@
 -- 021_runtime_app_role.sql) and tier_delete (021_runtime_app_role.sql) -- they never received the
 -- `tier >= 1` lower bound, so a WHERE-less or constant-predicate UPDATE from a locked session
 -- could still stamp a tier-0 quarantined row it can never SELECT. The alter-policy loop near the
--- bottom of this file closes that gap on all twelve PARENTS tables, not only the six this
--- migration grants UPDATE to -- the other six already had full table UPDATE from 021 and carried
--- the same gap.
+-- bottom of this file closes that gap on every minime_app-updatable table with a tier column:
+-- the twelve PARENTS tables (not only the six this migration grants UPDATE to -- the other six
+-- already had full table UPDATE from 021 and carried the same gap) plus chunks, edges,
+-- calendar_events, and inbox_items.
 --
 -- journal_entries is also the one PARENTS table whose content already feeds a numeric aggregate:
 -- the 'mood'/'energy' metric_defs seeded in 027_life_metrics_seed.sql average every row with a
@@ -108,17 +109,26 @@ to minime_app;
 -- tier_read-gated SELECT in the first place. This brings tier_update in line with tier_read
 -- (019_tier0_prose_quarantine.sql, 021_runtime_app_role.sql) and tier_delete
 -- (021_runtime_app_role.sql), and matches the boundary test/support/app-role.ts's synthetic
--- test-role policies already model for UPDATE. The gap applies to all twelve PARENTS tables, not
--- only the six granted UPDATE above -- the other six (tasks, decisions, people, pages, orgs,
--- decision_branches) already had full table UPDATE from 021_runtime_app_role.sql and carried the
--- same missing lower bound. ALTER POLICY on an already-existing policy is inherently idempotent
+-- test-role policies already model for UPDATE. (tier_update itself was untouched between its
+-- creation in 007/008/013/014 and this migration.) The gap applies to every table where
+-- minime_app holds any UPDATE grant and tier_update carried only the upper bound: the twelve
+-- PARENTS tables plus chunks, edges, calendar_events, and inbox_items -- chunks matters most,
+-- since quarantined tier-0 page prose physically lives in chunks.text and a WHERE-less
+-- `update chunks set tier = 1` from a locked session would have re-promoted it.
+-- (person_aliases/org_aliases already carry the bound from 022; email_meta has no UPDATE grant.)
+-- Side effect, deliberate: these policies have no explicit WITH CHECK, so replacing USING also
+-- tightens the implicit WITH CHECK -- minime_app can no longer demote any row to tier 0. Every
+-- legitimate tier->0 writer (quarantine, brain-sync, repair) runs on owner connections that
+-- bypass RLS; a future child-side quarantine feature will fail loudly here by design.
+-- ALTER POLICY on an already-existing policy is inherently idempotent
 -- (unlike CREATE POLICY, it needs no drop-then-create dance).
 do $$
 declare t text;
 begin
   foreach t in array array[
     'pages', 'journal_entries', 'interactions', 'decisions', 'decision_branches', 'tasks',
-    'goals', 'values_items', 'principles', 'people', 'orgs', 'commitments'
+    'goals', 'values_items', 'principles', 'people', 'orgs', 'commitments',
+    'chunks', 'edges', 'calendar_events', 'inbox_items'
   ] loop
     execute format(
       'alter policy tier_update on %I to minime_app using (tier >= 1 and tier <= app_allowed_tier())',
