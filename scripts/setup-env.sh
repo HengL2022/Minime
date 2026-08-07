@@ -40,6 +40,18 @@ get_kv() { # KEY -> current value or empty
   sed -n "s/^$1=//p" "$ENVF" | head -1
 }
 
+# Disconnect backup jobs and credentials without deleting the owner's encryption key file.
+clear_backup_config() {
+  local key
+  for key in \
+    RESTIC_REPOSITORY RESTIC_PASSWORD_FILE BACKUP_CRON \
+    B2_ACCOUNT_ID B2_ACCOUNT_KEY B2_APPLICATION_KEY_ID B2_APPLICATION_KEY \
+    AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION
+  do
+    set_kv "$key" ""
+  done
+}
+
 echo "Minime guided setup — writes $ENVF (stays on this machine, never committed)."
 echo "Press Enter to accept the [default] at any prompt."
 echo
@@ -126,7 +138,7 @@ case "$REPLY" in
      set_kv RESTIC_REPOSITORY "$REPLY"
      ask_secret "AWS_ACCESS_KEY_ID"; [ -n "$REPLY" ] && set_kv AWS_ACCESS_KEY_ID "$REPLY"
      ask_secret "AWS_SECRET_ACCESS_KEY"; [ -n "$REPLY" ] && set_kv AWS_SECRET_ACCESS_KEY "$REPLY" ;;
-  4) set_kv BACKUP_CRON '""'
+  4) clear_backup_config
      BACKUP=skipped
      echo "skipped — re-run this script anytime; until then there are NO backups" ;;
   *) ask "Backup directory" "$HOME/minime-restic"
@@ -134,6 +146,15 @@ case "$REPLY" in
 esac
 
 if [ "$BACKUP" = configured ]; then
+  BACKUP_CRON_DEFAULT="$(get_kv BACKUP_CRON)"
+  if [ -z "$BACKUP_CRON_DEFAULT" ] ||
+     [ "$BACKUP_CRON_DEFAULT" = '""' ] ||
+     [ "$BACKUP_CRON_DEFAULT" = "''" ]; then
+    BACKUP_CRON_DEFAULT="*/15 * * * *"
+  fi
+  ask "Frequent database snapshot cadence (cron)" "$BACKUP_CRON_DEFAULT"
+  set_kv BACKUP_CRON "$REPLY"
+
   # honor a path already configured in .env (~ expanded); default otherwise
   PASSF="$(get_kv RESTIC_PASSWORD_FILE)"
   PASSF="${PASSF/#\~/$HOME}"

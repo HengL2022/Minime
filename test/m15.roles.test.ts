@@ -85,7 +85,19 @@ describe("minime_engineer_ro", () => {
     expect(rows.map((r) => r.title)).toContain("visible task");
   });
 
-  test("RLS hides tier-2 content without an unlock (engineering sessions are agent sessions)", async () => {
+  test("runtime app keeps the audited pgvector write and distance-query surface", async () => {
+    const vector = `[1,${Array.from({ length: 767 }, () => "0").join(",")}]`;
+    const chunkId = crypto.randomUUID();
+    await app`insert into chunks (id, parent_type, parent_id, ord, text, tier, embedding)
+      values (${chunkId}, 'page', ${crypto.randomUUID()}, 0, 'vector boundary probe', 1,
+              ${vector}::vector)`;
+    const [row] = await app`
+      select (embedding <=> ${vector}::vector)::float as distance
+      from chunks where id = ${chunkId}`;
+    expect(row!.distance).toBe(0);
+  });
+
+  test("RLS permanently hides tier-2 content from the engineering role", async () => {
     await testSql`insert into journal_entries (entry_md, tier) values ('secret diary', 2)`;
     const rows = await ro`select entry_md from journal_entries`;
     expect(rows.length).toBe(0);
@@ -132,6 +144,29 @@ describe("minime_engineer_ro", () => {
     await expectSqlReject(ro`select * from health_samples`, /permission denied/);
   });
 
+  test("cannot inspect or replay an MCP session unlock", async () => {
+    const actor = "agent:engineer-replay-fixture";
+    const sessionId = crypto.randomUUID();
+    const [request] = await app.begin(async (tx) => {
+      await tx`select set_config('minime.actor', ${actor}, true)`;
+      await tx`select set_config('minime.session_id', ${sessionId}, true)`;
+      return tx`select app_request_tier2_unlock(5::smallint)::text as id`;
+    });
+    await testSql`
+      update session_unlocks
+      set approved_at = clock_timestamp(), approved_by = 'owner:test',
+          expires_at = clock_timestamp() + interval '5 minutes'
+      where id = ${request!.id}::uuid`;
+
+    await expectSqlReject(ro`select * from session_unlocks`, /permission denied/);
+    const [tier] = await ro.begin(async (tx) => {
+      await tx`select set_config('minime.actor', ${actor}, true)`;
+      await tx`select set_config('minime.session_id', ${sessionId}, true)`;
+      return tx`select app_allowed_tier()::int as tier`;
+    });
+    expect(tier!.tier).toBe(1);
+  });
+
   test("every write verb is denied: INSERT / UPDATE / DELETE / TRUNCATE", async () => {
     await expectSqlReject(ro`insert into tasks (title) values ('nope')`, /permission denied/);
     await expectSqlReject(ro`update tasks set title = 'nope'`, /permission denied/);
@@ -143,15 +178,258 @@ describe("minime_engineer_ro", () => {
     );
   });
 
-  test("future tables are covered by default privileges (SELECT only)", async () => {
+  test("future tables are private until a migration explicitly reviews and grants them", async () => {
     await testSql`create table zz_probe (id int, tier smallint not null default 1)`;
     try {
       await testSql`insert into zz_probe (id) values (1)`;
-      const rows = await ro`select id from zz_probe`;
-      expect(rows.length).toBe(1);
+      await expectSqlReject(ro`select id from zz_probe`, /permission denied/);
       await expectSqlReject(ro`insert into zz_probe (id) values (2)`, /permission denied/);
     } finally {
       await testSql`drop table zz_probe`;
+    }
+  });
+
+  test("un-tiered content carriers stay outside the engineering read boundary", async () => {
+    await expectSqlReject(ro`select payload from review_queue`, /permission denied/);
+    await expectSqlReject(ro`select reason from edge_validations`, /permission denied/);
+    await expectSqlReject(ro`select payload from events`, /permission denied/);
+    await expectSqlReject(ro`select * from session_unlocks`, /permission denied/);
+    await expectSqlReject(ro`select * from inbox_items`, /permission denied/);
+  });
+
+  test("engineer SELECT privileges are an explicit reviewed allow-list", async () => {
+    const rows = await testSql`
+      select table_name
+      from information_schema.role_table_grants
+      where grantee = 'minime_engineer_ro' and privilege_type = 'SELECT'
+        and table_schema = 'public'
+      order by table_name`;
+    expect(rows.map((row) => row.table_name)).toEqual([
+      "calendar_events",
+      "chunks",
+      "commitments",
+      "decision_branches",
+      "decision_transcripts",
+      "decisions",
+      "edges",
+      "email_meta",
+      "goals",
+      "interactions",
+      "journal_entries",
+      "metric_cache_state",
+      "metric_defs",
+      "metric_values",
+      "org_aliases",
+      "orgs",
+      "pages",
+      "people",
+      "person_aliases",
+      "principles",
+      "schema_migrations",
+      "tasks",
+      "values_items",
+    ]);
+  });
+
+  test("role, database, schema, sequence, and function authority is exact", async () => {
+    const [posture] = await testSql`
+      select rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolinherit,
+             rolreplication, rolbypassrls
+      from pg_roles where rolname = 'minime_engineer_ro'`;
+    expect(posture).toEqual({
+      rolcanlogin: true,
+      rolsuper: false,
+      rolcreatedb: false,
+      rolcreaterole: false,
+      rolinherit: false,
+      rolreplication: false,
+      rolbypassrls: false,
+    });
+    const memberships = await testSql`
+      select granted.rolname
+      from pg_auth_members membership
+      join pg_roles granted on granted.oid = membership.roleid
+      join pg_roles member on member.oid = membership.member
+      where member.rolname = 'minime_engineer_ro'`;
+    expect(memberships.length).toBe(0);
+
+    const nonSelect = await testSql`
+      select table_name, privilege_type
+      from information_schema.role_table_grants
+      where grantee = 'minime_engineer_ro' and table_schema = 'public'
+        and privilege_type <> 'SELECT'`;
+    expect(nonSelect.length).toBe(0);
+    const sequences = await testSql`
+      select object_name, privilege_type
+      from information_schema.role_usage_grants
+      where grantee = 'minime_engineer_ro' and object_schema = 'public'`;
+    expect(sequences.length).toBe(0);
+    const routines = await testSql`
+      select routine_name, privilege_type
+      from information_schema.role_routine_grants
+      where grantee = 'minime_engineer_ro' and routine_schema = 'public'
+      order by routine_name, privilege_type`;
+    expect(routines.map((row) => ({ ...row }))).toEqual([
+      { routine_name: "app_allowed_tier", privilege_type: "EXECUTE" },
+      { routine_name: "metric_agg", privilege_type: "EXECUTE" },
+    ]);
+
+    const [authority] = await testSql`
+      select
+        has_database_privilege('minime_engineer_ro', current_database(), 'CONNECT') as connect,
+        has_database_privilege('minime_engineer_ro', current_database(), 'CREATE') as db_create,
+        has_database_privilege('minime_engineer_ro', current_database(), 'TEMPORARY') as db_temp,
+        has_schema_privilege('minime_engineer_ro', 'public', 'USAGE') as schema_usage,
+        has_schema_privilege('minime_engineer_ro', 'public', 'CREATE') as schema_create`;
+    expect(authority).toEqual({
+      connect: true,
+      db_create: false,
+      db_temp: false,
+      schema_usage: true,
+      schema_create: false,
+    });
+    await expectSqlReject(ro`select cjk_fold('not allowlisted')`, /permission denied/);
+    await expectSqlReject(
+      ro`create temporary table no_engineer_temp (id int)`,
+      /permission denied/,
+    );
+    await expectSqlReject(ro`create schema no_engineer_schema`, /permission denied/);
+  });
+
+  test("live role repair fails closed on ownership and removes contaminated residual authority", async () => {
+    const suffix = `${process.pid}_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    const engineerRole = `minime_engineer_fixture_${suffix}`;
+    const carrierRole = `minime_engineer_carrier_${suffix}`;
+    const quoteIdentifier = (value: string): string => {
+      if (!/^[a-z][a-z0-9_]{0,62}$/.test(value)) throw new Error("invalid_fixture_role");
+      return `"${value}"`;
+    };
+    const engineer = quoteIdentifier(engineerRole);
+    const carrier = quoteIdentifier(carrierRole);
+    const migration = readFileSync(
+      join(process.cwd(), "db/migrations/024_engineer_content_boundary.sql"),
+      "utf8",
+    );
+    expect(migration.match(/current_database\(\) = 'minime'/g)).toHaveLength(1);
+    const fixtureMigration = migration
+      .replaceAll("minime_engineer_ro", engineerRole)
+      // 026 replaced the three-argument function; this fixture replays 024's role repair
+      // posture against the current catalog rather than recreating the retired overload.
+      .replaceAll("metric_agg(text, date, date)", "metric_agg(text, date, date, text)")
+      .replaceAll("metric_agg(text,date,date)", "metric_agg(text,date,date,text)")
+      .replace("current_database() = 'minime'", "current_database() = current_database()");
+    const runFixtureMigration = () =>
+      testSql.begin(async (tx) => {
+        await tx.unsafe(fixtureMigration);
+      });
+
+    try {
+      await testSql.unsafe(`create role ${engineer} login noinherit`);
+      await testSql.unsafe(`create role ${carrier} noinherit`);
+      await testSql.unsafe(`grant ${engineer} to minime`);
+      await testSql.unsafe(`grant create on schema public to ${engineer}`);
+      await testSql.begin(async (tx) => {
+        await tx.unsafe(`set local role ${engineer}`);
+        await tx`create table zz_engineer_fixture_owned (id int)`;
+      });
+      await expect(runFixtureMigration()).rejects.toThrow("engineer_role_posture_invalid");
+      await testSql`drop table zz_engineer_fixture_owned`;
+
+      // Leave the inbound membership planted; the replay must remove it as well as the
+      // outbound membership and every database-local authority below.
+      await testSql.unsafe(`alter role ${engineer} createdb createrole inherit`);
+      await testSql.unsafe(`grant ${carrier} to ${engineer}`);
+      await testSql.unsafe(`grant ${carrier} to minime`);
+      await testSql.unsafe(`grant select on transactions to ${carrier} with grant option`);
+      await testSql.begin(async (tx) => {
+        await tx.unsafe(`set local role ${carrier}`);
+        await tx.unsafe(`grant select on transactions to ${engineer}`);
+      });
+      await testSql.unsafe(`grant all privileges on tasks to ${engineer}`);
+      await testSql.unsafe(`grant all privileges on sequence events_id_seq to ${engineer}`);
+      await testSql.unsafe(`grant execute on function cjk_fold(text) to ${engineer}`);
+      await testSql.unsafe(`grant create on schema public to ${engineer}`);
+      const [database] = await testSql`select current_database() as name`;
+      const databaseName = quoteIdentifier(String(database!.name));
+      await testSql.unsafe(`grant create, temporary on database ${databaseName} to ${engineer}`);
+      await testSql.unsafe(
+        `alter default privileges in schema public grant all on tables to ${engineer}`,
+      );
+      await testSql.unsafe(
+        `alter default privileges in schema public grant all on sequences to ${engineer}`,
+      );
+      await testSql.unsafe(
+        `alter default privileges in schema public grant all on functions to ${engineer}`,
+      );
+
+      // A grant issued while acting as another grantor cannot be silently repaired by the
+      // migration owner. The catalog postcondition must stop the replay until that grantor
+      // explicitly removes its ACL; after that, the same migration closes the remaining
+      // owner-repairable posture.
+      await expect(runFixtureMigration()).rejects.toThrow("engineer_role_posture_invalid");
+      await testSql.begin(async (tx) => {
+        await tx.unsafe(`set local role ${carrier}`);
+        await tx.unsafe(`revoke select on transactions from ${engineer}`);
+      });
+      await runFixtureMigration();
+
+      const [closed] = await testSql`
+        select rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolinherit,
+               rolreplication, rolbypassrls
+        from pg_roles where rolname = ${engineerRole}`;
+      expect({
+        rolcanlogin: closed!.rolcanlogin,
+        rolsuper: closed!.rolsuper,
+        rolcreatedb: closed!.rolcreatedb,
+        rolcreaterole: closed!.rolcreaterole,
+        rolinherit: closed!.rolinherit,
+        rolreplication: closed!.rolreplication,
+        rolbypassrls: closed!.rolbypassrls,
+      }).toEqual({
+        rolcanlogin: true,
+        rolsuper: false,
+        rolcreatedb: false,
+        rolcreaterole: false,
+        rolinherit: false,
+        rolreplication: false,
+        rolbypassrls: false,
+      });
+      const residual = await testSql`
+        select 1 from pg_auth_members membership
+        where membership.member = (select oid from pg_roles where rolname = ${engineerRole})
+           or (
+             membership.roleid = (select oid from pg_roles where rolname = ${engineerRole})
+             and (
+               membership.member <> (select oid from pg_roles where rolname = current_user)
+               or membership.inherit_option or membership.set_option
+             )
+           )
+        union all
+        select 1 from pg_default_acl defaults
+        cross join lateral aclexplode(defaults.defaclacl) acl
+        where defaults.defaclobjtype in ('r', 'S', 'f')
+          and acl.grantee in (0, (select oid from pg_roles where rolname = ${engineerRole}))`;
+      expect(residual.length).toBe(0);
+      const direct = await testSql`
+        select privilege_type from information_schema.role_table_grants
+        where grantee = ${engineerRole} and table_schema = 'public'
+          and privilege_type <> 'SELECT'
+        union all
+        select privilege_type from information_schema.role_usage_grants
+        where grantee = ${engineerRole} and object_schema = 'public'`;
+      expect(direct.length).toBe(0);
+    } finally {
+      await testSql`drop table if exists zz_engineer_fixture_owned`.catch(() => {});
+      await testSql.unsafe(`revoke ${carrier} from ${engineer}`).catch(() => {});
+      await testSql.unsafe(`revoke ${engineer} from minime`).catch(() => {});
+      await testSql.unsafe(`revoke ${carrier} from minime`).catch(() => {});
+      await testSql
+        .unsafe(`revoke all privileges on transactions from ${carrier} cascade`)
+        .catch(() => {});
+      await testSql.unsafe(`drop owned by ${engineer}`).catch(() => {});
+      await testSql.unsafe(`drop owned by ${carrier}`).catch(() => {});
+      await testSql.unsafe(`drop role if exists ${engineer}`).catch(() => {});
+      await testSql.unsafe(`drop role if exists ${carrier}`).catch(() => {});
     }
   });
 
@@ -184,9 +462,11 @@ describe("minime_engineer_ro", () => {
       "inbox_items",
       "interactions",
       "journal_entries",
+      "org_aliases",
       "orgs",
       "pages",
       "people",
+      "person_aliases",
       "principles",
       "tasks",
       "values_items",
@@ -319,6 +599,47 @@ describe("repair runner", () => {
     expect(JSON.stringify(events)).not.toContain("Quill Marbury"); // counts/ids only, never contents
     const backups = [...new Bun.Glob("repair-retype-org-to-person-*.sql").scanSync(dumpDir)];
     expect(backups.length).toBeGreaterThan(0);
+  });
+
+  test("completion-audit failure rolls back the repair mutation", async () => {
+    if (!Bun.which("pg_dump")) return; // environment without client tools
+    const name = "Audit Rollback Fixture";
+    const orgId = (
+      await testSql`insert into orgs (canonical_name, tier) values (${name}, 1) returning id`
+    )[0]!.id;
+    const [marker] = await testSql`select coalesce(max(id), 0)::bigint as id from events`;
+    await testSql.unsafe(`
+      create or replace function zz_reject_repair_complete() returns trigger language plpgsql as $$
+      begin
+        if new.actor = 'system:repair' and new.payload ->> 'phase' = 'complete' then
+          raise exception 'injected repair completion audit failure';
+        end if;
+        return new;
+      end;
+      $$;
+      create trigger zz_reject_repair_complete
+        before insert on events for each row execute function zz_reject_repair_complete();
+    `);
+    try {
+      expect(await runRepair("retype-org-to-person", [`--org-id=${orgId}`], { dumpDir })).toBe(1);
+      const [org] = await testSql`select retired_at from orgs where id = ${orgId}`;
+      expect(org!.retired_at).toBeNull();
+      const [people] =
+        await testSql`select count(*)::int as n from people where canonical_name = ${name}`;
+      expect(people!.n).toBe(0);
+      const events = await testSql`
+        select payload from events
+        where id > ${marker!.id}::bigint and verb = 'repair:retype-org-to-person'
+        order by id`;
+      expect(events).toHaveLength(1);
+      expect(events[0]!.payload).toMatchObject({
+        phase: "failed",
+        code: "repair_audit_failed",
+      });
+    } finally {
+      await testSql`drop trigger if exists zz_reject_repair_complete on events`;
+      await testSql`drop function if exists zz_reject_repair_complete()`;
+    }
   });
 
   test("failure path: backup precedes run, failed event content-free, exit 1", async () => {

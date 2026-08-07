@@ -6,6 +6,7 @@ import postgres from "postgres";
 import { migrate } from "../src/db/migrate";
 import { logEvent } from "../src/db/repo";
 import { eventAuditSink } from "../src/mcp/audit";
+import { auditPayload } from "../src/util/audit-payload";
 import { expectSqlReject, resetDb, testSql as sql } from "./helpers";
 import { activeTestDatabaseName, testDatabaseUrl } from "./setup";
 import { dropTestAppRole, mintTestAppRole } from "./support/app-role";
@@ -270,7 +271,20 @@ describe("events append-only (I8)", () => {
   });
 
   test("logEvent exposes lossless decimal text IDs and disposition rows are unique", async () => {
-    const eventId = await logEvent({ actor: "human", verb: "test:identity" });
+    const emptyOnboard = auditPayload.onboardComplete({
+      profile: 0,
+      values: 0,
+      goals: 0,
+      principles: 0,
+      people: 0,
+      tasks: 0,
+      journal: 0,
+    });
+    const eventId = await logEvent({
+      actor: "human",
+      verb: "onboard:complete",
+      payload: emptyOnboard,
+    });
     expect(typeof eventId).toBe("string");
     const [row] = await sql`select id::text as id from events where id = ${eventId}`;
     expect(row!.id).toBe(eventId);
@@ -278,7 +292,11 @@ describe("events append-only (I8)", () => {
     await sql.unsafe(
       "select setval(pg_get_serial_sequence('events', 'id'), 9007199254740991, true)",
     );
-    const largeId = await logEvent({ actor: "human", verb: "test:large-identity" });
+    const largeId = await logEvent({
+      actor: "human",
+      verb: "onboard:complete",
+      payload: emptyOnboard,
+    });
     expect(largeId).toBe("9007199254740992");
     const [largeRow] = await sql`select id::text as id from events where id = ${largeId}`;
     expect(largeRow!.id).toBe(largeId);

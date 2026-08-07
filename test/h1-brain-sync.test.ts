@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   activePagesForCompiledNoteReconciliation,
+  compiledEntityClusterEvidence,
   compiledRepresentationTierEvidence,
   compiledSourceEvidence,
+  noteSourceChunks,
   pageByPath,
   pageChunkSnapshot,
   replaceChunks,
@@ -563,7 +565,7 @@ describe("H1 compiled-note repository and brain sync hardening", () => {
       await testSql`
         insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, tier)
         values ('page', ${pageId}, 'mentions', 'person', ${entityId}, 'chunks', ${representationChunkId}, 2),
-               ('person', ${entityId}, 'mentions', 'page', ${pageId}, 'people', ${entityId}, 2),
+               ('person', ${entityId}, 'mentions', 'page', ${pageId}, 'people', ${entityId}, 1),
                ('page', ${sourcePage!.id}, 'mentions', 'person', ${entityId}, 'chunks', ${sourceId}, 1)`;
       const archive = renderCompiledNoteArchive({ title: "Representation", tier: 1, bodyMd: body });
       await writeBrainFile(root, path, archive.text);
@@ -774,6 +776,65 @@ describe("H1 compiled-note repository and brain sync hardening", () => {
     expect(exact.resolved[0]?.mention_created_at).toBeInstanceOf(Date);
   });
 
+  test("compiled evidence uses readable alias tiers and never matches a tier-zero alias", async () => {
+    const [person] = await testSql`
+      insert into people (canonical_name, tier, source, created_by)
+      values ('Compiled Alias Canonical', 1, 'test', 'test') returning id`;
+    const privateAlias = "Compiled Private Alias";
+    await testSql`
+      insert into person_aliases (person_id, alias, tier, source, created_by)
+      values (${person!.id}, ${privateAlias}, 2, 'test', 'test')`;
+    const [page] = await testSql`
+      insert into pages (path, title, body_md, content_hash, tier)
+      values ('compiled/private-alias.md', 'Private alias', ${privateAlias},
+              'compiled-private-alias', 1) returning id`;
+    const [chunk] = await testSql`
+      insert into chunks (parent_type, parent_id, ord, text, tier)
+      values ('page', ${page!.id}, 0, ${`${privateAlias} source fact.`}, 1) returning id`;
+    await testSql`
+      insert into edges
+        (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, tier)
+      values ('page', ${page!.id}, 'mentions', 'person', ${person!.id},
+              'chunks', ${chunk!.id}, 1)`;
+
+    const source = await compiledSourceEvidence([chunk!.id]);
+    expect(source.owner_entities).toEqual([{ kind: "person", entityId: person!.id }]);
+    expect(source.max_tier).toBe(2);
+    const cluster = await compiledEntityClusterEvidence([{ kind: "person", entityId: person!.id }]);
+    expect(cluster.source_chunk_ids).toContain(chunk!.id);
+    expect(cluster.max_tier).toBe(2);
+    const noteChunks = await noteSourceChunks("person", person!.id);
+    expect(noteChunks.find((row) => row.id === chunk!.id)?.max_tier).toBe(2);
+
+    const [hiddenPerson] = await testSql`
+      insert into people (canonical_name, tier, source, created_by)
+      values ('Hidden Alias Canonical', 1, 'test', 'test') returning id`;
+    const hiddenAlias = "TIER0-COMPILED-ALIAS-SENTINEL";
+    await testSql`
+      insert into person_aliases (person_id, alias, tier, source, created_by)
+      values (${hiddenPerson!.id}, ${hiddenAlias}, 0, 'quarantine', 'owner:test')`;
+    const [hiddenPage] = await testSql`
+      insert into pages (path, title, body_md, content_hash, tier)
+      values ('compiled/hidden-alias.md', 'Hidden alias', ${hiddenAlias},
+              'compiled-hidden-alias', 1) returning id`;
+    const [hiddenChunk] = await testSql`
+      insert into chunks (parent_type, parent_id, ord, text, tier)
+      values ('page', ${hiddenPage!.id}, 0, ${`${hiddenAlias} source fact.`}, 1) returning id`;
+    await testSql`
+      insert into edges
+        (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, tier)
+      values ('page', ${hiddenPage!.id}, 'mentions', 'person', ${hiddenPerson!.id},
+              'pages', ${hiddenPage!.id}, 1)`;
+
+    const hiddenSource = await compiledSourceEvidence([hiddenChunk!.id]);
+    expect(hiddenSource.owner_entities).toEqual([]);
+    const hiddenCluster = await compiledEntityClusterEvidence([
+      { kind: "person", entityId: hiddenPerson!.id },
+    ]);
+    expect(hiddenCluster.source_chunk_ids).not.toContain(hiddenChunk!.id);
+    expect(await noteSourceChunks("person", hiddenPerson!.id)).toEqual([]);
+  });
+
   test("new canonical imports persist normalized body and stable chunks", async () => {
     await withPrivateDataDir(async (root) => {
       const entityId = crypto.randomUUID();
@@ -942,7 +1003,7 @@ describe("H1 compiled-note repository and brain sync hardening", () => {
         returning id`;
       await testSql`
         insert into edges (src_type, src_id, rel, dst_type, dst_id, tier)
-        values ('page', ${pageId}, 'mixed-b', 'person', ${crypto.randomUUID()}, 2)`;
+        values ('page', ${pageId}, 'mixed-b', 'person', ${crypto.randomUUID()}, 1)`;
       await testSql`update edges set tier = 2 where id = ${sourceTableEdge!.id}`;
       const evidence = await compiledRepresentationTierEvidence(pageId);
       expect(evidence.edge_count).toBe(2);

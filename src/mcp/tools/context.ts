@@ -52,9 +52,12 @@ async function resolveEdgeTitles(edges: any[], actor: string): Promise<any[]> {
     }
   }
   return edges.map((e) => ({
+    id: e.id,
     rel: e.rel,
     src: { type: e.src_type, id: e.src_id, title: titles.get(`${e.src_type}:${e.src_id}`) },
     dst: { type: e.dst_type, id: e.dst_id, title: titles.get(`${e.dst_type}:${e.dst_id}`) },
+    source_table: e.source_table,
+    source_id: e.source_id,
     extracted_by: e.extracted_by,
     confidence: e.confidence,
   }));
@@ -107,6 +110,13 @@ export const getContextTool: ToolDef = {
       await edgesAround(type, row.id, 20, ctx.actor),
       ctx.actor,
     );
+    for (const edge of related) {
+      sources.push({
+        type: "edge",
+        id: edge.id,
+        title: edge.rel,
+      });
+    }
 
     let transcript: any[] = [];
     let branches: any[] = [];
@@ -137,7 +147,9 @@ export const getContextTool: ToolDef = {
     if (type === "person") {
       interactions = await recentInteractionsFor(row.id, 20, ctx.actor);
       if (interactions.length === 0 && (await allowedTier(ctx.actor)) < 2) {
-        gaps.push("interactions are tier 2 — locked; call minime_unlock to read them");
+        gaps.push(
+          "interactions are tier 2 — locked; ask the owner first, then call minime_unlock and have them approve the pending request locally",
+        );
       }
       for (const i of interactions) {
         sources.push({
@@ -148,11 +160,27 @@ export const getContextTool: ToolDef = {
         });
       }
       openItems = await openItemsFor(row.canonical_name, ctx.actor);
+      for (const commitment of openItems.commitments) {
+        sources.push({
+          type: "commitment",
+          id: commitment.id,
+          title: commitment.what,
+        });
+      }
+      for (const task of openItems.tasks) {
+        sources.push({
+          type: "task",
+          id: task.id,
+          title: task.title,
+        });
+      }
     } else if (type === "org") {
       // Org-keyed interactions (vendors/institutions) — enabled by 013_interactions_org.sql.
       interactions = await recentInteractionsForOrg(row.id, 20, ctx.actor);
       if (interactions.length === 0 && (await allowedTier(ctx.actor)) < 2) {
-        gaps.push("interactions are tier 2 — locked; call minime_unlock to read them");
+        gaps.push(
+          "interactions are tier 2 — locked; ask the owner first, then call minime_unlock and have them approve the pending request locally",
+        );
       }
       for (const i of interactions) {
         sources.push({

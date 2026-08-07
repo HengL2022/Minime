@@ -128,6 +128,7 @@ const SELECT_TABLES = [
   "people",
   "pages",
   "metric_values",
+  "metric_cache_state",
   "review_queue",
   "inbox_items",
   "orgs",
@@ -154,14 +155,12 @@ const INSERT_TABLES = [
   "decisions",
   "people",
   "pages",
-  "metric_values",
   "review_queue",
   "inbox_items",
   "orgs",
   "events",
   "chunks",
   "edges",
-  "session_unlocks",
   "transactions",
   "health_samples",
 ] as const;
@@ -170,7 +169,6 @@ const UPDATE_TABLES = [
   "decisions",
   "people",
   "pages",
-  "metric_values",
   "review_queue",
   "inbox_items",
   "orgs",
@@ -213,9 +211,19 @@ async function configureBoundary(target: postgres.Sql, roleName: string): Promis
   await target.unsafe(`grant usage, select on sequence events_id_seq to ${role}`);
   for (const fn of [
     "app_allowed_tier()",
-    "metric_agg(text, date, date)",
+    "app_request_tier2_unlock(smallint)",
+    "metric_agg(text, date, date, text)",
     "cjk_fold(text)",
-    "edge_source_tier(text, uuid)",
+    "exact_active_org_exists(text)",
+    "person_has_nonworking_relation(uuid)",
+    "readable_source_tier(text, uuid)",
+    "set_person_relation_if_null(uuid, text)",
+    "touch_person_last_contact(uuid, timestamptz)",
+    "resolve_or_promote_entity(text, text, smallint, text, text, uuid)",
+    "resolve_or_promote_extracted_person(text, smallint, text, text, uuid)",
+    "resolve_or_promote_extracted_org(text, text, smallint, text, text, uuid)",
+    "upsert_derived_alias(text, uuid, text, smallint, text, text, uuid)",
+    "upsert_extracted_edge(text, uuid, text, text, uuid, text, uuid, real)",
   ]) {
     await target.unsafe(`grant execute on function ${fn} to ${role}`);
   }

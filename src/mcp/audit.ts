@@ -3,6 +3,7 @@
 
 import { createHash } from "node:crypto";
 import { logEvent } from "../db/repo";
+import { auditPayload } from "../util/audit-payload";
 
 export function paramsHash(params: unknown): string {
   return createHash("sha256")
@@ -74,14 +75,14 @@ async function result(
   const eventId = await logEvent({
     actor,
     verb: `tool:${tool}`,
-    payload: {
-      params_hash: hash,
-      returned_ids: record.returnedIds.slice(0, 100),
-      returned_count: record.returnedCount,
-      ...(record.error ? { error: record.error } : {}),
-      ...(requestedNameHashValue ? { requested_name_hash: requestedNameHashValue } : {}),
+    payload: auditPayload.toolResult({
+      paramsHash: hash,
+      returnedIds: record.returnedIds,
+      returnedCount: record.returnedCount,
+      ...(record.error ? { errorCode: record.error } : {}),
+      ...(requestedNameHashValue ? { requestedNameHash: requestedNameHashValue } : {}),
       delivery: record.delivery,
-    },
+    }),
   });
   return { eventId };
 }
@@ -92,10 +93,10 @@ export const eventAuditSink: AuditSink = {
     await logEvent({
       actor,
       verb: `tool:${tool}:attempt`,
-      payload: {
-        params_hash: hash,
-        ...(requestedNameHashValue ? { requested_name_hash: requestedNameHashValue } : {}),
-      },
+      payload: auditPayload.toolAttempt({
+        paramsHash: hash,
+        ...(requestedNameHashValue ? { requestedNameHash: requestedNameHashValue } : {}),
+      }),
     });
     return hash;
   },
@@ -106,19 +107,10 @@ export const eventAuditSink: AuditSink = {
     await logEvent({
       actor,
       verb: `tool:${tool}:disposition`,
-      payload:
-        disposition.status === "suppressed"
-          ? {
-              result_event_id: resultEventId,
-              status: "suppressed",
-              returned_ids: [],
-              returned_count: 0,
-              ...(disposition.outcome ? { outcome: disposition.outcome } : {}),
-            }
-          : {
-              result_event_id: resultEventId,
-              status: disposition.status,
-            },
+      payload: auditPayload.toolDisposition({
+        resultEventId,
+        ...disposition,
+      }),
     });
   },
 };

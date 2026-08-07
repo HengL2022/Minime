@@ -14,6 +14,10 @@ const INSTALLER_TEMPLATE = "minime_test";
 const MINI_ADVISORY_KEY = 1296649801;
 const TEST_ADVISORY_KEY = 1413829460;
 const TEARDOWN_MAX_CYCLES = 20;
+// A busy full suite can leave an already-fenced scratch database under autovacuum for several
+// seconds. Give only positively classified server maintenance a longer wait; every client,
+// hidden, mixed, or unknown snapshot keeps the short fail-closed budget above.
+const TEARDOWN_BACKGROUND_MAX_CYCLES = 300;
 const TEARDOWN_RECHECK_INTERVAL_MS = 100;
 const TERMINATE_TIMEOUT_MS = 1_000;
 
@@ -371,7 +375,7 @@ export function createDefaultTestDatabaseDeps(
       };
       const classifySnapshot = async (
         databaseName: string,
-      ): Promise<{ eligiblePids: number[]; blocked: boolean }> => {
+      ): Promise<{ eligiblePids: number[]; blocked: boolean; backgroundOnly: boolean }> => {
         generatedName(databaseName);
         let activityRows: AdapterRow[];
         try {
@@ -384,6 +388,7 @@ export function createDefaultTestDatabaseDeps(
         const eligiblePids: number[] = [];
         const seenPids = new Set<number>();
         let blocked = false;
+        let backgroundOnly = activityRows.length > 0;
         for (const row of activityRows) {
           if (!row || !exactKeys(row, ["backend_type", "pid", "usename"])) {
             throw fixedCleanupError();
@@ -407,11 +412,17 @@ export function createDefaultTestDatabaseDeps(
           seenPids.add(row.pid);
           if (row.backend_type === "client backend" && row.usename === currentRole) {
             eligiblePids.push(row.pid);
+            backgroundOnly = false;
           } else {
             blocked = true;
+            const knownBackground =
+              (row.backend_type === "autovacuum worker" &&
+                (row.usename === currentRole || row.usename === null)) ||
+              (row.backend_type === "parallel worker" && row.usename === currentRole);
+            if (!knownBackground) backgroundOnly = false;
           }
         }
-        return { eligiblePids, blocked };
+        return { eligiblePids, blocked, backgroundOnly: blocked && backgroundOnly };
       };
       const terminateEligible = async (
         databaseName: string,
@@ -458,10 +469,18 @@ export function createDefaultTestDatabaseDeps(
             throw fixedCleanupError();
           }
         };
-        for (let cycle = 0; cycle < TEARDOWN_MAX_CYCLES; cycle += 1) {
-          const { eligiblePids, blocked } = await classifySnapshot(databaseName);
+        let ordinaryCycles = 0;
+        let backgroundCycles = 0;
+        while (true) {
+          const { eligiblePids, blocked, backgroundOnly } = await classifySnapshot(databaseName);
           if (blocked) {
-            if (cycle + 1 >= TEARDOWN_MAX_CYCLES) throw fixedCleanupError();
+            if (backgroundOnly) {
+              backgroundCycles += 1;
+              if (backgroundCycles >= TEARDOWN_BACKGROUND_MAX_CYCLES) throw fixedCleanupError();
+            } else {
+              ordinaryCycles += 1;
+              if (ordinaryCycles >= TEARDOWN_MAX_CYCLES) throw fixedCleanupError();
+            }
             await delayNextCycle();
             continue;
           }
@@ -474,11 +493,11 @@ export function createDefaultTestDatabaseDeps(
             if (errorCode(error) !== "55006") {
               throw fixedCleanupError();
             }
-            if (cycle + 1 >= TEARDOWN_MAX_CYCLES) throw fixedCleanupError();
+            ordinaryCycles += 1;
+            if (ordinaryCycles >= TEARDOWN_MAX_CYCLES) throw fixedCleanupError();
             await delayNextCycle();
           }
         }
-        throw fixedCleanupError();
       };
       const terminateTarget = async (databaseName: string): Promise<void> => {
         generatedName(databaseName);

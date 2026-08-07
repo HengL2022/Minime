@@ -6,9 +6,14 @@
   "include": [
     "scripts/libpq-service.ts",
     "scripts/pick-snapshot.ts",
+    "scripts/recovery-ops.ts",
+    "scripts/restore-schema-gate.ts",
     "scripts/snapshot-manifest.ts",
     "scripts/validate-recovery-endpoints.ts",
+    "scripts/verify-restic-roundtrip.ts",
+    "src/db/restore-schema-gate.ts",
     "src/ops/recovery-endpoints.ts",
+    "src/ops/restore-schema-gate.ts",
     "src/ops/snapshot-manifest.ts",
     "src/util/config.ts",
     "src/util/libpq-service.ts"

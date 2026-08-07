@@ -3,7 +3,7 @@
 
 import { afterAll } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -200,7 +200,7 @@ await bootstrapTestDatabase(
     Reflect.deleteProperty(process.env, "RERANK_URL");
     Reflect.deleteProperty(process.env, "RESTIC_REPOSITORY");
     Reflect.deleteProperty(process.env, "RESTIC_PASSWORD_FILE");
-    process.env.MINIME_DATA_DIR = mkdtempSync(join(tmpdir(), "minime-test-"));
+    process.env.MINIME_DATA_DIR = mkdtempSync(join(realpathSync(tmpdir()), "minime-test-"));
 
     const { migrate } = await import("../src/db/migrate");
     await migrate({ kind: "test" });

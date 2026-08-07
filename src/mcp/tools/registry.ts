@@ -13,6 +13,8 @@ import { redactDeep } from "../redact";
 export interface ToolCtx {
   actor: string; // 'agent:<client>' | 'human'
   timeZone?: string;
+  /** Private MCP connection identity. Never include this in envelopes, audit, or errors. */
+  sessionId?: string;
 }
 
 export interface ToolDef {
@@ -93,15 +95,25 @@ export async function executeTool(tool: ToolDef, params: any, ctx: ToolCtx): Pro
   try {
     const timeZone = ctx.timeZone ?? timeZoneFromParams(params);
     const parsed = z.object(schemaWithCommonParams(tool.schema)).parse(params);
-    const env = await withActorDbSession(ctx.actor, () =>
-      tool.handler(parsed, { ...ctx, timeZone }),
+    const env = await withActorDbSession(
+      ctx.actor,
+      () => tool.handler(parsed, { ...ctx, timeZone }),
+      ctx.sessionId,
     );
     const redacted = redactDeep(env);
     return { ok: true, envelope: redacted };
   } catch (err) {
     const code =
       err instanceof ToolError ? err.code : err instanceof z.ZodError ? "BAD_INPUT" : "INTERNAL";
-    const message = err instanceof Error ? err.message : String(err);
+    // ToolError and schema failures are intentional caller-facing failures. Any
+    // other exception may contain SQL text, filesystem paths, provider bodies, or
+    // captured content, so its wire message is fixed and opaque.
+    const message =
+      code === "INTERNAL"
+        ? "Internal tool error."
+        : err instanceof Error
+          ? err.message
+          : String(err);
     return { ok: false, error: { code, message: redactDeep(message) } };
   }
 }

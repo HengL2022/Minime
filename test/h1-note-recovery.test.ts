@@ -21,6 +21,7 @@ import {
   upsertPage as repoUpsertPage,
   retierPageEdges,
   setPageContentHash,
+  withActorDbSession,
   withCompiledNoteTargetLease,
   withCompiledNotesLease,
 } from "../src/db/repo";
@@ -52,6 +53,7 @@ import {
 } from "../src/util/compiled-note-archive";
 import { config } from "../src/util/config";
 import { resetDb, testSql as sql } from "./helpers";
+import { requestAndApproveTier2, sessionToolCtx } from "./support/unlock";
 
 function recoveryFilenameFor(targetPath: string): string {
   const match = targetPath.match(/^derived\/notes\/(person|org)\/[^/]+--([0-9a-f-]+)\.md$/);
@@ -237,7 +239,7 @@ async function seedEvidenceCandidate(
   return { personId: person!.id, sourcePageIds, sourceChunkIds };
 }
 
-async function expectCandidateEvidenceBlocked(
+async function expectCandidateEvidenceExcluded(
   root: string,
   name: string,
   options: Parameters<typeof seedEvidenceCandidate>[1],
@@ -270,13 +272,8 @@ async function expectCandidateEvidenceBlocked(
   });
 
   expect(writes).toEqual({ model: 0, recovery: 0, page: 0, archive: 0, index: 0 });
-  expect(result.results).toContainEqual({
-    status: "failed",
-    target_hash: opaqueTargetHash(targetPath),
-    code: "tier0_source_blocked",
-    kind: "person",
-  });
-  expect(JSON.stringify(result.results)).not.toContain('"tier":');
+  expect(result.candidates).toBe(0);
+  expect(result.results).toEqual([]);
   expect(await sql`select id from pages where path = ${targetPath}`).toHaveLength(0);
   expect(
     await stat(resolve(root, "brain", targetPath))
@@ -530,7 +527,7 @@ describe("H1 durable compiled-note recovery", () => {
   test("compiled promotion covers legacy canonical-page edges without capturing dst-only edges", () =>
     withPrivateDataDir(async () => {
       await sql`delete from session_unlocks`;
-      const actor = { actor: "agent:h1-legacy-edge" };
+      const actor = sessionToolCtx("agent:h1-legacy-edge");
       const [person] = await sql`
         insert into people (canonical_name, tier)
         values ('Mira Alder', 1)
@@ -764,14 +761,19 @@ Mira keeps a field notebook.
       expect(lockedText).not.toContain(notePage!.id);
       expect(lockedText).not.toContain('"rel":"mentions"');
       expect(lockedText).not.toContain(legacyEdge!.id);
+      const readEdges = () =>
+        withActorDbSession(
+          actor.actor,
+          () => edgesAround("person", person!.id, 20, actor.actor),
+          actor.sessionId,
+        );
       expect(
-        (await edgesAround("person", person!.id, 20, actor.actor)).some(
+        (await readEdges()).some(
           (edge) => edge.id === legacyEdge!.id || edge.id === canonicalEdge!.id,
         ),
       ).toBe(false);
 
-      const unlock = await invokeTool(toolByName("minime_unlock"), { minutes: 5 }, actor);
-      expect(unlock.ok).toBe(true);
+      await requestAndApproveTier2(actor);
       const unlocked = await invokeTool(
         toolByName("minime_get_context"),
         { type: "person", id: person!.id },
@@ -781,11 +783,7 @@ Mira keeps a field notebook.
       expect(unlocked.ok).toBe(true);
       expect(unlockedText).toContain(notePage!.id);
       expect(unlockedText).toContain('"rel":"mentions"');
-      expect(
-        (await edgesAround("person", person!.id, 20, actor.actor)).some(
-          (edge) => edge.id === legacyEdge!.id,
-        ),
-      ).toBe(true);
+      expect((await readEdges()).some((edge) => edge.id === legacyEdge!.id)).toBe(true);
     }));
 
   test("mixed source tiers produce a tier-two canonical archive with one identity opportunity", async () => {
@@ -4830,7 +4828,7 @@ Mira keeps a field notebook.
     });
   });
 
-  test("one tier-zero candidate chunk blocks every model, recovery, archive, page, index, and egress write", async () => {
+  test("one tier-zero candidate chunk is excluded before every model, recovery, archive, page, index, and egress write", async () => {
     await withPrivateDataDir(async (root) => {
       const name = "Zero Candidate Sentinel";
       const personId = await seedCandidate(name, [0, 1, 1]);
@@ -4861,13 +4859,8 @@ Mira keeps a field notebook.
       });
 
       expect(writes).toEqual({ model: 0, recovery: 0, page: 0, archive: 0, index: 0 });
-      expect(result.results).toContainEqual({
-        status: "failed",
-        target_hash: opaqueTargetHash(compiledNotePath("person", name, personId)),
-        code: "tier0_source_blocked",
-        kind: "person",
-      });
-      expect(JSON.stringify(result.results)).not.toContain('"tier":');
+      expect(result.candidates).toBe(0);
+      expect(result.results).toEqual([]);
       expect(
         await sql`select id from pages where source = ${COMPILED_NOTE_SOURCE} and derived_from = ${personId}`,
       ).toHaveLength(0);
@@ -4877,17 +4870,17 @@ Mira keeps a field notebook.
     });
   });
 
-  test("a tier-zero source parent blocks otherwise tier-one evidence before every effect", async () => {
+  test("a tier-zero source parent excludes otherwise tier-one evidence before every effect", async () => {
     await withPrivateDataDir(async (root) => {
-      await expectCandidateEvidenceBlocked(root, "Zero Parent Evidence", {
+      await expectCandidateEvidenceExcluded(root, "Zero Parent Evidence", {
         parentTiers: [0, 1, 1],
       });
     });
   });
 
-  test("a tier-zero target entity blocks otherwise tier-one evidence before every effect", async () => {
+  test("a tier-zero target entity excludes otherwise tier-one evidence before every effect", async () => {
     await withPrivateDataDir(async (root) => {
-      await expectCandidateEvidenceBlocked(root, "Zero Entity Evidence", {
+      await expectCandidateEvidenceExcluded(root, "Zero Entity Evidence", {
         entityTier: 0,
       });
     });
@@ -4958,7 +4951,7 @@ Mira keeps a field notebook.
         {
           status: "failed",
           target_hash: opaqueTargetHash(record.target_path),
-          code: "tier0_source_blocked",
+          code: "source_evidence_unverifiable",
           kind: "org",
         },
       ]);
@@ -4997,8 +4990,9 @@ Mira keeps a field notebook.
       expect(result.results).toContainEqual({
         status: "failed",
         target_hash: opaqueTargetHash(targetPath),
-        code: "tier0_source_blocked",
+        code: "identity_conflict",
         kind: "person",
+        tier: 2,
       });
     });
   });
@@ -5037,12 +5031,7 @@ Mira keeps a field notebook.
       );
       expect(high?.status).toBe("created");
       expect(high).toHaveProperty("tier", 2);
-      expect(zero).toEqual({
-        status: "failed",
-        target_hash: opaqueTargetHash(compiledNotePath("person", zeroName, zeroId)),
-        code: "tier0_source_blocked",
-        kind: "person",
-      });
+      expect(zero).toBeUndefined();
       expect(prompts).toEqual([highName]);
     });
   });

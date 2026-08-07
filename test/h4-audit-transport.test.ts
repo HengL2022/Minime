@@ -2801,50 +2801,65 @@ describe("H4 audited server facade", () => {
 
   test("stdio does not release normal or refusal responses before result audit", async () => {
     const sink = new RecordingSink();
-    let releaseResult!: () => void;
-    sink.resultDurableGate = new Promise<void>((resolve) => {
-      releaseResult = resolve;
-    });
+    const normalResultSubmitted = deferred<void>();
+    const normalResultDurability = deferred<void>();
+    const normalStdout = deferred<void>();
+    const refusalResultSubmitted = deferred<void>();
+    const refusalResultDurability = deferred<void>();
+    const refusalStdout = deferred<void>();
+    const initializedStdout = deferred<void>();
+    sink.resultDurableGate = normalResultDurability.promise;
+    sink.resultSubmitted = () => normalResultSubmitted.resolve();
     const stdin = new PassThrough();
     const stdout = new PassThrough();
     const tool = fictionalTool(async () => envelope({ ok: true }, []));
     const server = buildServer({ auditSink: sink, tools: [tool] });
     await server.connect(new StdioServerTransport(stdin, stdout));
     const bytes: Buffer[] = [];
-    stdout.on("data", (chunk: Buffer) => bytes.push(Buffer.from(chunk)));
-    stdin.write(
-      `${JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2025-03-26",
-          capabilities: {},
-          clientInfo: { name: "stdio", version: "1" },
-        },
-      })}\n`,
-    );
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n');
-    stdin.write(serializeMessage(callMessage(2, "fictional_tool", { value: "ok" })));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(sink.events.map((event) => event.phase)).toEqual(["attempt"]);
-    expect(bytes.join("")).not.toContain('"id":2');
-    releaseResult();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(bytes.join("")).toContain('"id":2');
-
-    let releaseRefusal!: () => void;
-    sink.resultDurableGate = new Promise<void>((resolve) => {
-      releaseRefusal = resolve;
+    stdout.on("data", (chunk: Buffer) => {
+      bytes.push(Buffer.from(chunk));
+      const output = bytes.join("");
+      if (output.includes('"id":1')) initializedStdout.resolve();
+      if (output.includes('"id":2')) normalStdout.resolve();
+      if (output.includes('"id":3')) refusalStdout.resolve();
     });
-    stdin.write(serializeMessage(callMessage(3, "unknown_secret_tool", {})));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(bytes.join("")).not.toContain('"id":3');
-    releaseRefusal();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(bytes.join("")).toContain('"id":3');
-    await server.close();
+    try {
+      stdin.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-03-26",
+            capabilities: {},
+            clientInfo: { name: "stdio", version: "1" },
+          },
+        })}\n`,
+      );
+      await within(initializedStdout.promise, 500, "stdio initialize stdout");
+      stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n');
+      stdin.write(serializeMessage(callMessage(2, "fictional_tool", { value: "ok" })));
+      await within(normalResultSubmitted.promise, 500, "normal result submission");
+      expect(sink.events.map((event) => event.phase)).toEqual(["attempt"]);
+      expect(bytes.join("")).not.toContain('"id":2');
+      normalResultDurability.resolve();
+      await within(normalStdout.promise, 500, "normal response stdout");
+      expect(bytes.join("")).toContain('"id":2');
+
+      sink.resultDurableGate = refusalResultDurability.promise;
+      sink.resultSubmitted = () => refusalResultSubmitted.resolve();
+      stdin.write(serializeMessage(callMessage(3, "unknown_secret_tool", {})));
+      await within(refusalResultSubmitted.promise, 500, "refusal result submission");
+      expect(bytes.join("")).not.toContain('"id":3');
+      refusalResultDurability.resolve();
+      await within(refusalStdout.promise, 500, "refusal response stdout");
+      expect(bytes.join("")).toContain('"id":3');
+      await within(server.close(), 500, "stdio server close");
+    } finally {
+      normalResultDurability.resolve();
+      refusalResultDurability.resolve();
+      await server.close().catch(() => {});
+    }
   });
 
   test("fresh stdio malformed JSON emits one sanitized protocol error and closes", async () => {

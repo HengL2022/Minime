@@ -18,7 +18,9 @@ reflection prompts, then (B) when the owner replies, capture what they say.
    - `"open questions blocked next steps follow up"`
 4. If tier-2 gaps block relevant interaction/journal-derived context, tell the owner what is
    locked and ask whether they want a short audited unlock. Call `minime_unlock` only after an
-   explicit yes, then re-read.
+   explicit yes. Give the owner the returned request ID and local approval command, wait for
+   them to approve it in their terminal, then re-read. Approval is time-boxed and bound to this
+   MCP connection; a reconnect is locked again. Tier 0 is never readable.
 
 Then deliver a short review, in this order. Omit any empty section:
 

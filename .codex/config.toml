@@ -1,0 +1,7 @@
+[mcp_servers.minime]
+command = "bun"
+args = [
+    "run",
+    "src/cli.ts",
+    "serve",
+]

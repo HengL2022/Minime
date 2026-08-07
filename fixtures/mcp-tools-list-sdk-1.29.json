@@ -623,7 +623,7 @@
   },
   {
     "name": "minime_unlock",
-    "description": "Grant a time-boxed tier-2 read unlock (journal, interactions, email metadata). Loudly audited. Tier 0 (transactions, health) is NEVER unlockable.",
+    "description": "Request an owner-approved, time-boxed tier-2 read unlock for this MCP connection (journal, interactions, email metadata). Tier 0 is never unlockable.",
     "inputSchema": {
       "type": "object",
       "properties": {

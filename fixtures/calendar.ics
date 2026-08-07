@@ -24,8 +24,14 @@ DTEND:20260610T030000Z
 SUMMARY:Deep work: reconciliation milestone two
 END:VEVENT
 BEGIN:VEVENT
+UID:evt-floating-20260611@fixture
+DTSTART:20260611T083000
+DTEND:20260611T091500
+SUMMARY:Plan the fictional harbour field test
+END:VEVENT
+BEGIN:VEVENT
 UID:evt-allday-20260612@fixture
-DTSTART:20260612
+DTSTART;VALUE=DATE:20260612
 SUMMARY:Mum's birthday
 END:VEVENT
 BEGIN:VEVENT
@@ -43,5 +49,23 @@ BEGIN:VEVENT
 UID:evt-badstart-20260615@fixture
 DTSTART:not-a-date
 SUMMARY:Malformed DTSTART — must be skipped not fatal
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-badend-20260616@fixture
+DTSTART:20260616T080000Z
+DTEND:not-a-date
+SUMMARY:Malformed DTEND — must skip the whole event
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-unknown-zone-20260617@fixture
+DTSTART;TZID=Mars/Olympus:20260617T090000
+DTEND;TZID=Mars/Olympus:20260617T100000
+SUMMARY:Unknown timezone — must skip the whole event
+END:VEVENT
+BEGIN:VEVENT
+UID:evt-mismatched-types-20260618@fixture
+DTSTART;VALUE=DATE:20260618
+DTEND:20260619T090000Z
+SUMMARY:Mismatched date value types — must skip the whole event
 END:VEVENT
 END:VCALENDAR

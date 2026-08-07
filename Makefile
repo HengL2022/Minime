@@ -9,7 +9,15 @@ override BASE := $(BASE_LITERAL)
 export BASE
 endif
 
-.PHONY: install setup install-hooks onboard update up down psql-ro migrate provision-runtime-role seed embed test lint format typecheck typecheck-ops verify-m0 verify-m0-offline verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 verify-m13 verify-m14 verify-m15 check-subsystems check-tracked-privacy verify-offline verify restore-drill restore-pitr promote-restore eval-search eval-search-live eval-snapshot eval-pmb eval-pmb-official eval-graph-hygiene eval-skills optimize-skill
+# Keep restore selection opaque until the recipe shell expands the exported value as one quoted
+# argv element. In particular, Make functions in command-line TIME are data, never Make actions.
+ifneq ($(origin TIME),undefined)
+override TIME_LITERAL := $(value TIME)
+override TIME := $(TIME_LITERAL)
+export TIME
+endif
+
+.PHONY: install setup install-hooks onboard update up down psql-ro migrate provision-runtime-role seed embed test lint format typecheck typecheck-ops verify-m0 verify-m0-offline verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 verify-m13 verify-m14 verify-m15 check-subsystems check-tracked-privacy verify-offline verify verify-restore-e2e restore-drill restore-pitr promote-restore eval-search eval-search-live eval-snapshot eval-pmb eval-pmb-official eval-graph-hygiene eval-skills optimize-skill
 
 # Every automated child is provisioned by this parent-owned runner. The child receives only
 # the generated loopback URL and (where applicable) one approved compatibility alias.
@@ -61,14 +69,15 @@ provision-runtime-role:
 	if [ -n "$${DATABASE_URL:-}" ] && [ "$$DATABASE_URL" != "$$owner_url" ]; then echo 'runtime_role_configuration_invalid' >&2; exit 2; fi; \
 	app_password="$$(sed -n 's/^MINIME_APP_PASSWORD=//p' .env | tail -n 1)"; \
 	test -n "$$owner_url" || { echo 'runtime_role_configuration_invalid' >&2; exit 2; }; \
-	DATABASE_URL="$$owner_url" $(BUN) run src/cli.ts migrate --context direct; \
+	DATABASE_URL="$$owner_url" $(BUN) --no-env-file -e 'import { parseLocalPostgresUrl } from "./src/util/postgres-url"; parseLocalPostgresUrl(process.env.DATABASE_URL, "minime")' >/dev/null 2>&1 || { echo 'runtime_role_configuration_invalid' >&2; exit 2; }; \
+	DATABASE_URL="$$owner_url" MINIME_APP_DATABASE_URL="$$owner_url" $(BUN) run src/cli.ts migrate --context direct; \
 	if [ -n "$$app_password" ] && ! [[ "$$app_password" =~ ^[A-Za-z0-9_-]{24,128}$$ ]]; then echo 'runtime_role_configuration_invalid' >&2; exit 2; fi; \
 	if [ -z "$$app_password" ]; then \
 		if command -v openssl >/dev/null 2>&1; then app_password="$$(openssl rand -hex 32)"; else app_password="$$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9_-' | cut -c1-64)"; fi; \
 	fi; \
 	[[ "$$app_password" =~ ^[A-Za-z0-9_-]{24,128}$$ ]] || { echo 'runtime_role_configuration_invalid' >&2; exit 2; }; \
-	app_url="$$(DATABASE_URL="$$owner_url" MINIME_APP_PASSWORD="$$app_password" $(BUN) -e 'const u=new URL(process.env.DATABASE_URL);u.username="minime_app";u.password=process.env.MINIME_APP_PASSWORD;console.log(u.toString())')"; \
-	DATABASE_URL="$$owner_url" MINIME_APP_PASSWORD="$$app_password" $(BUN) run scripts/provision-runtime-role.ts; \
+	app_url="$$(DATABASE_URL="$$owner_url" MINIME_APP_PASSWORD="$$app_password" $(BUN) --no-env-file -e 'import { derivePostgresCredentials } from "./src/util/postgres-url"; console.log(derivePostgresCredentials(process.env.DATABASE_URL, "minime_app", process.env.MINIME_APP_PASSWORD, "minime"))')"; \
+	DATABASE_URL="$$owner_url" MINIME_APP_DATABASE_URL="$$app_url" MINIME_APP_PASSWORD="$$app_password" $(BUN) run scripts/provision-runtime-role.ts; \
 	chmod 600 .env; \
 	tmp="$$(mktemp .env.runtime.XXXXXX)"; \
 	MINIME_APP_PASSWORD="$$app_password" MINIME_APP_DATABASE_URL="$$app_url" awk 'BEGIN{seen_password=0;seen_url=0} /^MINIME_APP_PASSWORD=/{if(!seen_password){print "MINIME_APP_PASSWORD=" ENVIRON["MINIME_APP_PASSWORD"];seen_password=1};next} /^MINIME_APP_DATABASE_URL=/{if(!seen_url){print "MINIME_APP_DATABASE_URL=" ENVIRON["MINIME_APP_DATABASE_URL"];seen_url=1};next} {print} END{if(!seen_password) print "MINIME_APP_PASSWORD=" ENVIRON["MINIME_APP_PASSWORD"]; if(!seen_url) print "MINIME_APP_DATABASE_URL=" ENVIRON["MINIME_APP_DATABASE_URL"]}' .env > "$$tmp"; \
@@ -162,27 +171,34 @@ check-subsystems:
 check-tracked-privacy:
 	@$(BUN) run scripts/check-tracked-privacy.ts --base "$${BASE}"
 
-verify-offline: verify-m0-offline test lint typecheck typecheck-ops check-subsystems
+verify-offline:
+	@bash scripts/verify-offline.sh
 
 # Release/search gate: the complete offline verification gate plus retrieval-regression
 # evaluation against committed baseline floors. Do not run both targets separately.
 verify: verify-offline eval-search
 
-# Restores the latest restic snapshot into a scratch DB and runs the m1 suite against it.
+# Restore the latest real restic snapshot into minime_drill, verify its manifest/counts, migrate
+# the scratch schema to the checked-out ledger, validate safety posture, and remove the scratch DB.
 restore-drill:
-	@./scripts/restore-drill.sh
+	@$(BUN) --no-env-file run scripts/recovery-ops.ts drill
+
+# Self-contained release evidence: a fictional snapshot round trip in a private temporary
+# PostgreSQL cluster and local restic repository. Never connects to the configured/live cluster.
+verify-restore-e2e:
+	@$(BUN) --no-env-file run scripts/verify-restic-roundtrip.ts
 
 # Logical snapshot restore into scratch minime_restore (live untouched). The compatibility
 # command name is restore-pitr; it picks the latest db-snap/dream snapshot at or before TIME.
 # This is not WAL/PITR. Usage: make restore-pitr TIME="2026-06-12 14:30"
 restore-pitr:
-	@test -n "$(TIME)" || { echo 'usage: make restore-pitr TIME="2026-06-12 14:30"'; exit 2; }
-	@TIME="$(TIME)" ./scripts/restore-pitr.sh
+	@$(BUN) --no-env-file run scripts/recovery-ops.ts pitr "$${TIME}"
 
-# Promote minime_restore in as the live minime DB (atomic rename; refuses if live is in use,
-# dumps a pre-promote safety snapshot first). Run restore-pitr first. Undo = rename back.
+# Promote minime_restore through a guarded two-step rename. It refuses active sessions/prepared
+# transactions, writes a safety dump first, blocks new connections, and compensates a failed
+# second rename back to the original live name. Run restore-pitr and inspect its scratch first.
 promote-restore:
-	@./scripts/promote-restore.sh
+	@$(BUN) --no-env-file run scripts/recovery-ops.ts promote
 
 # MinimeBench (offline, CI-safe): deterministic mock embeddings, single run, full area table.
 eval-search:
@@ -193,7 +209,7 @@ eval-search:
 EVAL_LME_DATABASE_URL ?= postgres://minime:minime@localhost:5432/minime_eval_lme1
 eval-longmemeval:
 	@createdb $(notdir $(EVAL_LME_DATABASE_URL)) 2>/dev/null || true
-	@DATABASE_URL=$(EVAL_LME_DATABASE_URL) EVAL_LME_DATABASE_URL=$(EVAL_LME_DATABASE_URL) \
+	@DATABASE_URL=$(EVAL_LME_DATABASE_URL) MINIME_APP_DATABASE_URL=$(EVAL_LME_DATABASE_URL) EVAL_LME_DATABASE_URL=$(EVAL_LME_DATABASE_URL) \
 		$(BUN) run scripts/eval-longmemeval.ts --phase all $(if $(ROUND),--round $(ROUND),)
 
 # PrecisionMemBench (public, 89 cases, judge-free): retrieval-PRECISION benchmark.

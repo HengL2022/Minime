@@ -7,7 +7,13 @@
 // with an explicit timeZone makes the boundary correct regardless of process TZ.
 
 import { describe, expect, test } from "bun:test";
-import { localDateStr, localDateTimeToUtc } from "../src/util/clock";
+import {
+  addLocalCalendarDays,
+  formatDateTimeInTimeZone,
+  localDateStr,
+  localDateTimeToUtc,
+  nextLocalMidnight,
+} from "../src/util/clock";
 import { config } from "../src/util/config";
 
 describe("localDateStr honors config.tz independent of process TZ", () => {
@@ -34,5 +40,44 @@ describe("localDateStr honors config.tz independent of process TZ", () => {
     const noonLosAngeles = localDateTimeToUtc(2026, 6, 10, 12, 0, 0, 0, "America/Los_Angeles");
     expect(noonLosAngeles.toISOString()).toBe("2026-06-10T19:00:00.000Z");
     expect(localDateStr(noonLosAngeles, "America/Los_Angeles")).toBe("2026-06-10");
+  });
+
+  test("fall-back overlap deterministically chooses the first New York occurrence", () => {
+    const firstOccurrence = localDateTimeToUtc(2026, 11, 1, 1, 30, 0, 0, "America/New_York");
+    expect(firstOccurrence.toISOString()).toBe("2026-11-01T05:30:00.000Z");
+    expect(formatDateTimeInTimeZone(firstOccurrence, "America/New_York")).toBe(
+      "2026-11-01T01:30:00.000-04:00",
+    );
+  });
+
+  test("spring-forward gap shifts through the gap with the offset before it", () => {
+    const shifted = localDateTimeToUtc(2026, 3, 8, 2, 30, 0, 0, "America/New_York");
+    expect(shifted.toISOString()).toBe("2026-03-08T07:30:00.000Z");
+    expect(formatDateTimeInTimeZone(shifted, "America/New_York")).toBe(
+      "2026-03-08T03:30:00.000-04:00",
+    );
+  });
+
+  test("next local midnight uses calendar arithmetic across a 23-hour DST day", () => {
+    const start = localDateTimeToUtc(2026, 3, 8, 0, 0, 0, 0, "America/New_York");
+    const end = nextLocalMidnight(2026, 3, 8, "America/New_York");
+    expect(start.toISOString()).toBe("2026-03-08T05:00:00.000Z");
+    expect(end.toISOString()).toBe("2026-03-09T04:00:00.000Z");
+    expect(end.getTime() - start.getTime()).toBe(23 * 60 * 60 * 1000);
+  });
+
+  test("invalid calendar components are rejected instead of normalized by Date", () => {
+    expect(() => localDateTimeToUtc(2026, 2, 29, 9, 0, 0, 0, "UTC")).toThrow(RangeError);
+    expect(() => localDateTimeToUtc(2026, 13, 1, 9, 0, 0, 0, "UTC")).toThrow(RangeError);
+    expect(() => localDateTimeToUtc(2026, 6, 1, 24, 0, 0, 0, "UTC")).toThrow(RangeError);
+  });
+
+  test("calendar-day addition does not repeat the fall-back date", () => {
+    const beforeFallBack = new Date("2026-11-01T04:30:00.000Z"); // 00:30 in New York
+    expect(addLocalCalendarDays(beforeFallBack, 1, "America/New_York")).toBe("2026-11-02");
+    // A fixed 24-hour duration lands at 23:30 on November 1 after the offset change.
+    expect(localDateStr(new Date(beforeFallBack.getTime() + 86_400_000), "America/New_York")).toBe(
+      "2026-11-01",
+    );
   });
 });

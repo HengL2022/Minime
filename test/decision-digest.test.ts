@@ -1,12 +1,17 @@
 import { beforeEach, describe, expect, test } from "bun:test";
+import { stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { withActorDbSession } from "../src/db/repo";
 import { toolByName } from "../src/mcp/tools";
 import { invokeTool } from "../src/mcp/tools/registry";
 import { brainSync } from "../src/pipeline/brain-sync";
 import { compileDecisionDigests } from "../src/pipeline/decision-digest";
 import { hybridSearch } from "../src/search/hybrid";
+import { config } from "../src/util/config";
 import { resetDb, testSql as sql } from "./helpers";
+import { requestAndApproveTier2, sessionToolCtx } from "./support/unlock";
 
-const ctx = { actor: "agent:decision-digest-test" };
+const ctx = sessionToolCtx("agent:decision-digest-test");
 const call = async (name: string, params: any) => {
   const r = await invokeTool(toolByName(name), params, ctx);
   if (!r.ok) throw new Error(`${name} failed: ${r.error.code} ${r.error.message}`);
@@ -49,6 +54,10 @@ describe("decision digest pages", () => {
     expect(draft.derived_from).toBe(decisionId);
     expect(draft.body_md).toContain("compiler: inline-draft");
     expect(draft.body_md).toContain("## Source\n- decision:");
+    const archivePath = join(config.dataDir, "brain", draft.path);
+    expect((await stat(config.dataDir)).mode & 0o777).toBe(0o700);
+    expect((await stat(dirname(archivePath))).mode & 0o777).toBe(0o700);
+    expect((await stat(archivePath)).mode & 0o777).toBe(0o600);
     const [draftChunks] =
       await sql`select count(*)::int as n from chunks where parent_type = 'page' and parent_id = ${draft.id}`;
     expect(draftChunks!.n).toBeGreaterThan(0);
@@ -114,14 +123,19 @@ describe("decision digest pages", () => {
     });
     expect(locked.some((h) => h.id === digest.id || h.id === decisionId)).toBe(false);
 
-    await invokeTool(toolByName("minime_unlock"), { minutes: 5 }, ctx);
-    const hits = await hybridSearch({
-      query: "uncertain vendor support quality before annual billing",
-      types: ["page", "decision"],
-      includeDerived: true,
-      limit: 5,
-      actor: ctx.actor,
-    });
+    await requestAndApproveTier2(ctx);
+    const hits = await withActorDbSession(
+      ctx.actor,
+      () =>
+        hybridSearch({
+          query: "uncertain vendor support quality before annual billing",
+          types: ["page", "decision"],
+          includeDerived: true,
+          limit: 5,
+          actor: ctx.actor,
+        }),
+      ctx.sessionId,
+    );
     const digestRank = hits.findIndex((h) => h.id === digest.id);
     const rawRank = hits.findIndex((h) => h.id === decisionId);
     expect(digestRank).toBeGreaterThanOrEqual(0);

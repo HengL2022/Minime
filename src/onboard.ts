@@ -20,6 +20,7 @@ import {
   valuesCount,
 } from "./db/repo";
 import { indexParent } from "./search/index-parent";
+import { auditPayload } from "./util/audit-payload";
 import { todayStr } from "./util/clock";
 
 const SOURCE = "onboard";
@@ -204,7 +205,19 @@ export async function onboard(
     counts.tasks = await sectionProjects(io);
     counts.journal = await sectionSnapshot(io);
 
-    await logEvent({ actor: ACTOR, verb: "onboard:complete", payload: counts });
+    await logEvent({
+      actor: ACTOR,
+      verb: "onboard:complete",
+      payload: auditPayload.onboardComplete({
+        profile: counts.profile!,
+        values: counts.values!,
+        goals: counts.goals!,
+        principles: counts.principles!,
+        people: counts.people!,
+        tasks: counts.tasks!,
+        journal: counts.journal!,
+      }),
+    });
     const total = Object.values(counts).reduce((a, b) => a + b, 0);
     io.say(`\nDone — ${total} entries seeded: ${JSON.stringify(counts)}`);
     io.say("Next: `bun run src/cli.ts serve`, then ask your agent for a morning brief.");

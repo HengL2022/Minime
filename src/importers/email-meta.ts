@@ -4,6 +4,7 @@
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { logEvent, upsertEmailMeta } from "../db/repo";
+import { auditPayload } from "../util/audit-payload";
 import type { ImportStats } from "./calendar";
 
 export function parseHeaders(raw: string): Map<string, string> {
@@ -40,7 +41,11 @@ export async function importEmailFile(raw: string, stats: ImportStats): Promise<
     await logEvent({
       actor: "importer:email-meta",
       verb: "import:malformed",
-      payload: { reason: "missing message-id/from/date" },
+      payload: auditPayload.importMalformed({
+        importer: "email_meta",
+        reason: "missing_required_fields",
+        recordNumber: stats.total,
+      }),
     });
     return;
   }
@@ -78,7 +83,7 @@ export async function importEmailMeta(maildirPath: string): Promise<ImportStats>
   await logEvent({
     actor: "importer:email-meta",
     verb: "import:email-meta",
-    payload: stats as any,
+    payload: auditPayload.importSummary({ importer: "email_meta", ...stats }),
   });
   return stats;
 }

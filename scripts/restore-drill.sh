@@ -25,9 +25,11 @@ ADMIN_URL_VALUE="${ADMIN_URL:-postgres://minime:minime@localhost:5432/postgres}"
 DRILL_URL_VALUE="${DRILL_URL:-postgres://minime:minime@localhost:5432/minime_drill}"
 LIVE_URL_VALUE="${LIVE_URL:-postgres://minime:minime@localhost:5432/minime}"
 RESTORE_URL_VALUE="${RESTORE_URL:-postgres://minime:minime@localhost:5432/minime_restore}"
+REQUIRE_RESTIC="${MINIME_RESTORE_REQUIRE_RESTIC:-0}"
+case "$REQUIRE_RESTIC" in 0|1) ;; *) echo "restore drill failed (configuration)" >&2; exit 1 ;; esac
 export -n SOURCE_URL ADMIN_URL_VALUE DRILL_URL_VALUE LIVE_URL_VALUE RESTORE_URL_VALUE
 export -n raw
-unset DATABASE_URL ADMIN_URL DRILL_URL LIVE_URL RESTORE_URL
+unset DATABASE_URL ADMIN_URL DRILL_URL LIVE_URL RESTORE_URL MINIME_RESTORE_REQUIRE_RESTIC
 
 TMP_ROOT_CANDIDATE="${TMPDIR:-/tmp}"
 case "$TMP_ROOT_CANDIDATE" in /*) ;; *) echo "restore drill failed (workspace)" >&2; exit 1 ;; esac
@@ -128,10 +130,11 @@ if [ -n "${RESTIC_REPOSITORY:-}" ] || [ -n "$RESTIC_CANDIDATE" ]; then
 fi
 
 if ! printf '%s\0' "$SOURCE_URL" "$ADMIN_URL_VALUE" "$DRILL_URL_VALUE" "$LIVE_URL_VALUE" "$RESTORE_URL_VALUE" |
-  "$TRUSTED_BUN" run "$SCRIPT_DIR/validate-recovery-endpoints.ts" > /dev/null 2>&1; then
+  "$TRUSTED_BUN" --no-env-file run "$SCRIPT_DIR/validate-recovery-endpoints.ts" > /dev/null 2>&1; then
   echo "restore drill failed (endpoint_boundary)" >&2
   exit 1
 fi
+readonly SOURCE_URL ADMIN_URL_VALUE DRILL_URL_VALUE LIVE_URL_VALUE RESTORE_URL_VALUE
 
 DUMP_ROOT="$REPO_ROOT/db-dump"
 # Compatibility anchor for the fixture's legacy-path regression; the fixed path is never used.
@@ -256,7 +259,7 @@ bridge_service() {
   local raw="$1" output="$2"
   export -n raw output
   : > "$BRIDGE_STDERR"
-  if ! printf '%s' "$raw" | "$TRUSTED_BUN" run "$SCRIPT_DIR/libpq-service.ts" "$output" > /dev/null 2>"$BRIDGE_STDERR"; then
+  if ! printf '%s' "$raw" | "$TRUSTED_BUN" --no-env-file run "$SCRIPT_DIR/libpq-service.ts" "$output" > /dev/null 2>"$BRIDGE_STDERR"; then
     echo "restore drill failed (service_handoff)" >&2; return 1
   fi
 }
@@ -297,16 +300,22 @@ adopt_restored_pair() {
 }
 
 if [ -n "${RESTIC_REPOSITORY:-}" ]; then
+  echo "restore source: restic"
   echo "==> restoring latest private snapshot"
   if ! quiet_utility "$TRUSTED_MKDIR" -m 700 "$RESTORE_DIR"; then echo "restore drill failed (workspace)" >&2; exit 1; fi
   if ! "$TRUSTED_RESTIC" snapshots --json >"$RESTIC_STDOUT" 2>"$RESTIC_STDERR"; then echo "restore drill failed (restic_snapshots)" >&2; exit 1; fi
-  if ! PICK="$(LATEST=1 "$TRUSTED_BUN" run "$SCRIPT_DIR/pick-snapshot.ts" < "$RESTIC_STDOUT" 2>"$MANIFEST_VERIFY_STDERR")"; then echo "restore drill failed (snapshot_selection)" >&2; exit 1; fi
+  if ! PICK="$(LATEST=1 "$TRUSTED_BUN" --no-env-file run "$SCRIPT_DIR/pick-snapshot.ts" < "$RESTIC_STDOUT" 2>"$MANIFEST_VERIFY_STDERR")"; then echo "restore drill failed (snapshot_selection)" >&2; exit 1; fi
   SNAP_ID="${PICK%%$'\t'*}"
   case "$SNAP_ID" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_.:-]*) echo "restore drill failed (snapshot_selection)" >&2; exit 1 ;; esac
   if ! "$TRUSTED_RESTIC" restore "$SNAP_ID" --target "$RESTORE_DIR" --include "**/db-dump/minime.sql" --include "**/db-dump/minime.manifest.json" >"$RESTIC_STDOUT" 2>"$RESTIC_STDERR"; then echo "restore drill failed (restic_restore)" >&2; exit 1; fi
   if ! capture_utility "$WORK_DIR/found.dump" "$TRUSTED_FIND" "$RESTORE_DIR" \( -name minime.sql -o -name minime.manifest.json \) -print; then echo "restore drill failed (snapshot_dump_missing)" >&2; exit 1; fi
   if ! adopt_restored_pair; then echo "restore drill failed (snapshot_dump_missing)" >&2; exit 1; fi
 else
+  if [ "$REQUIRE_RESTIC" = 1 ]; then
+    echo "restore drill failed (restic_required)" >&2
+    exit 2
+  fi
+  echo "restore source: fresh-live-dump"
   echo "==> creating fresh source database dump"
   if ! : > "$DUMP" 2>/dev/null || ! "$TRUSTED_CHMOD" 600 "$DUMP" >/dev/null 2>&1; then echo "restore drill failed (dump_staging)" >&2; exit 1; fi
   if [ ! -f "$DUMP" ] || [ -L "$DUMP" ] || [ "$(mode_of "$DUMP")" != 600 ]; then echo "restore drill failed (dump_staging)" >&2; exit 1; fi
@@ -319,7 +328,7 @@ else
   if ! PGSERVICE=minime_ephemeral PGSERVICEFILE="$SERVICE_FILE" "$TRUSTED_PG_DUMP" --no-password --no-owner --no-comments -f "$DUMP" > /dev/null 2>"$PG_DUMP_STDERR"; then echo "restore drill failed (pg_dump)" >&2; exit 1; fi
   if ! assert_owned_dump; then echo "restore drill failed (pg_dump_output)" >&2; exit 1; fi
   if ! close_dump_descriptor; then echo "restore drill failed (pg_dump_output)" >&2; exit 1; fi
-  if ! "$TRUSTED_BUN" run "$SCRIPT_DIR/snapshot-manifest.ts" write "$DUMP" "$MANIFEST" > /dev/null 2>"$MANIFEST_VERIFY_STDERR"; then echo "restore drill failed (snapshot_manifest)" >&2; exit 1; fi
+  if ! "$TRUSTED_BUN" --no-env-file run "$SCRIPT_DIR/snapshot-manifest.ts" write "$DUMP" "$MANIFEST" > /dev/null 2>"$MANIFEST_VERIFY_STDERR"; then echo "restore drill failed (snapshot_manifest)" >&2; exit 1; fi
   if ! MANIFEST_IDENTITY="$(identity_of "$MANIFEST")"; then echo "restore drill failed (snapshot_manifest)" >&2; exit 1; fi
   if ! assert_owned_manifest; then echo "restore drill failed (snapshot_manifest)" >&2; exit 1; fi
 fi
@@ -330,7 +339,7 @@ admin_psql() { PGSERVICE=minime_ephemeral PGSERVICEFILE="$ADMIN_SERVICE_FILE" "$
 drill_psql() { PGSERVICE=minime_ephemeral PGSERVICEFILE="$DRILL_SERVICE_FILE" "$TRUSTED_PSQL" "$@" > /dev/null 2>"$PSQL_STDERR"; }
 
 echo "==> restoring into private scratch database"
-if ! "$TRUSTED_BUN" run "$SCRIPT_DIR/snapshot-manifest.ts" verify "$DUMP" "$MANIFEST" > /dev/null 2>"$MANIFEST_VERIFY_STDERR"; then echo "restore drill failed (snapshot_manifest)" >&2; exit 1; fi
+if ! "$TRUSTED_BUN" --no-env-file run "$SCRIPT_DIR/snapshot-manifest.ts" verify "$DUMP" "$MANIFEST" > /dev/null 2>"$MANIFEST_VERIFY_STDERR"; then echo "restore drill failed (snapshot_manifest)" >&2; exit 1; fi
 if ! admin_psql -qAt -c "do \$\$ begin if current_database() <> 'postgres' then raise exception 'recovery_endpoint_invalid'; end if; end \$\$;"; then echo "restore drill failed (endpoint_boundary)" >&2; exit 1; fi
 if ! admin_psql -qAt -c "drop database if exists minime_drill"; then echo "restore drill failed (psql)" >&2; exit 1; fi
 if ! admin_psql -qAt -c "create database minime_drill with owner minime template minime_test"; then echo "restore drill failed (psql)" >&2; exit 1; fi
@@ -341,6 +350,7 @@ if ! drill_psql -q -v ON_ERROR_STOP=1 -f "$DUMP"; then echo "restore drill faile
 echo "==> validating restored database"
 if drill_psql -v ON_ERROR_STOP=1 -qAt -c "select 1"; then :; else status=$?; echo "restore validation failed; promotion refused" >&2; exit "$status"; fi
 if ! PGSERVICE=minime_ephemeral PGSERVICEFILE="$DRILL_SERVICE_FILE" "$TRUSTED_PSQL" -qAt -F "$(printf '\t')" -c "select 'm', name, '-' from schema_migrations union all select 'c', 'tasks', count(*)::text from tasks union all select 'c', 'people', count(*)::text from people union all select 'c', 'journal_entries', count(*)::text from journal_entries union all select 'c', 'chunks', count(*)::text from chunks union all select 'c', 'events', count(*)::text from events order by 1,2" >"$COUNTS_OUTPUT" 2>"$PSQL_STDERR"; then echo "restore drill failed (restore_counts)" >&2; exit 1; fi
-if ! "$TRUSTED_BUN" run "$SCRIPT_DIR/snapshot-manifest.ts" compare "$MANIFEST" <"$COUNTS_OUTPUT" > /dev/null 2>"$MANIFEST_VERIFY_STDERR"; then echo "restore drill failed (restore_counts)" >&2; exit 1; fi
+if ! "$TRUSTED_BUN" --no-env-file run "$SCRIPT_DIR/snapshot-manifest.ts" compare "$MANIFEST" <"$COUNTS_OUTPUT" > /dev/null 2>"$MANIFEST_VERIFY_STDERR"; then echo "restore drill failed (restore_counts)" >&2; exit 1; fi
+if ! printf '%s' "$DRILL_URL_VALUE" | "$TRUSTED_BUN" --no-env-file run "$SCRIPT_DIR/restore-schema-gate.ts" > /dev/null 2>"$MANIFEST_VERIFY_STDERR"; then echo "restore drill failed (schema_gate)" >&2; exit 1; fi
 if ! admin_psql -qAt -c "drop database if exists minime_drill"; then echo "restore drill failed (psql)" >&2; exit 1; fi
 echo "==> restore drill green"

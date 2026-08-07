@@ -14,6 +14,8 @@ import { embedTexts } from "./embed";
 
 export interface IndexParentOptions {
   extractEdges?: boolean;
+  strictEdgeExtraction?: boolean;
+  deferEmbeddings?: boolean;
   tierMode?: "replace" | "promote-page-floor";
 }
 
@@ -38,11 +40,22 @@ export async function indexParent(
   // the dream backlog pass catches anything missed here
   if (options.extractEdges !== false) {
     const { extractAndLink } = await import("../pipeline/extract-edges");
-    await extractAndLink(parentType, parentId, [title, md].filter(Boolean).join("\n\n"), {
-      replaceSourceEdges: true,
-    }).catch(() => {});
+    const extraction = extractAndLink(
+      parentType,
+      parentId,
+      [title, md].filter(Boolean).join("\n\n"),
+      {
+        replaceSourceEdges: true,
+        tier,
+        derivedFrom: parentId,
+      },
+    );
+    if (options.strictEdgeExtraction) await extraction;
+    else await extraction.catch(() => {});
   }
-  await drainEmbedBacklog(64).catch(() => {});
+  // Inbox finalization keeps its database transaction short and deterministic: chunks and
+  // graph edges commit with the parent, while network-backed embeddings drain after commit.
+  if (!options.deferEmbeddings) await drainEmbedBacklog(64).catch(() => {});
   return chunks.length;
 }
 

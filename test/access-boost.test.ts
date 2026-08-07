@@ -4,7 +4,7 @@
 // or results would boost their own rank.
 
 import { beforeAll, describe, expect, test } from "bun:test";
-import { accessCounts, logEvent, upsertPage } from "../src/db/repo";
+import { accessCounts, upsertPage } from "../src/db/repo";
 import { eventAuditSink } from "../src/mcp/audit";
 import { hybridSearch } from "../src/search/hybrid";
 import { indexParent } from "../src/search/index-parent";
@@ -26,6 +26,15 @@ async function drillInto(id: string, times: number): Promise<void> {
   }
 }
 
+async function insertLegacyEvent(
+  actor: string,
+  verb: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  await sql`insert into events (actor, verb, payload)
+            values (${actor}, ${verb}, ${sql.json(payload as any)})`;
+}
+
 beforeAll(async () => {
   const [current] = await sql`select current_database() as name`;
   expect(current!.name).toMatch(/^minime_test_[a-z0-9_]+$/);
@@ -37,30 +46,29 @@ beforeAll(async () => {
 describe("accessCounts", () => {
   test("historical exact results lacking delivery do not count", async () => {
     const id = crypto.randomUUID();
-    await logEvent({
-      actor: ACTOR,
-      verb: "tool:minime_get_context",
-      payload: { returned_ids: [id], returned_count: 1 },
+    await insertLegacyEvent(ACTOR, "tool:minime_get_context", {
+      returned_ids: [id],
+      returned_count: 1,
     });
     expect((await accessCounts([id], 90)).size).toBe(0);
   });
 
   test("direct exact results do not count as transport access", async () => {
     const id = crypto.randomUUID();
-    await logEvent({
-      actor: ACTOR,
-      verb: "tool:minime_get_context",
-      payload: { delivery: "direct", returned_ids: [id], returned_count: 1 },
+    await insertLegacyEvent(ACTOR, "tool:minime_get_context", {
+      delivery: "direct",
+      returned_ids: [id],
+      returned_count: 1,
     });
     expect((await accessCounts([id], 90)).size).toBe(0);
   });
 
   test("transport results without a disposition do not count", async () => {
     const id = crypto.randomUUID();
-    await logEvent({
-      actor: ACTOR,
-      verb: "tool:minime_get_context",
-      payload: { delivery: "transport", returned_ids: [id], returned_count: 1 },
+    await insertLegacyEvent(ACTOR, "tool:minime_get_context", {
+      delivery: "transport",
+      returned_ids: [id],
+      returned_count: 1,
     });
     expect((await accessCounts([id], 90)).size).toBe(0);
   });
@@ -83,10 +91,9 @@ describe("accessCounts", () => {
 
   test("ignores other verbs — search returns must not feed back into ranking", async () => {
     const id = crypto.randomUUID();
-    await logEvent({
-      actor: ACTOR,
-      verb: "tool:minime_search",
-      payload: { returned_ids: [id], returned_count: 1 },
+    await insertLegacyEvent(ACTOR, "tool:minime_search", {
+      returned_ids: [id],
+      returned_count: 1,
     });
     expect((await accessCounts([id], 90)).size).toBe(0);
   });
@@ -94,15 +101,14 @@ describe("accessCounts", () => {
   test("attempt and disposition verbs never contribute their own IDs", async () => {
     const attemptId = crypto.randomUUID();
     const dispositionId = crypto.randomUUID();
-    await logEvent({
-      actor: ACTOR,
-      verb: "tool:minime_get_context:attempt",
-      payload: { returned_ids: [attemptId], returned_count: 1 },
+    await insertLegacyEvent(ACTOR, "tool:minime_get_context:attempt", {
+      returned_ids: [attemptId],
+      returned_count: 1,
     });
-    await logEvent({
-      actor: ACTOR,
-      verb: "tool:minime_get_context:disposition",
-      payload: { result_event_id: dispositionId, returned_ids: [dispositionId], returned_count: 1 },
+    await insertLegacyEvent(ACTOR, "tool:minime_get_context:disposition", {
+      result_event_id: dispositionId,
+      returned_ids: [dispositionId],
+      returned_count: 1,
     });
     const counts = await accessCounts([attemptId, dispositionId], 90);
     expect(counts.size).toBe(0);
@@ -128,10 +134,10 @@ describe("accessCounts", () => {
   test("released transport results count once and actor filters remain unchanged", async () => {
     const released = crypto.randomUUID();
     await drillInto(released, 1);
-    await logEvent({
-      actor: "agent:other",
-      verb: "tool:minime_get_context",
-      payload: { delivery: "transport", returned_ids: [released], returned_count: 1 },
+    await insertLegacyEvent("agent:other", "tool:minime_get_context", {
+      delivery: "transport",
+      returned_ids: [released],
+      returned_count: 1,
     });
     const counts = await accessCounts([released], 90, ACTOR);
     expect(counts.get(released)).toBe(1);

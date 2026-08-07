@@ -3,63 +3,122 @@ import { Cron } from "croner";
 import { withAdminDbScope } from "./db/client";
 import { dbSnapshot } from "./pipeline/backup";
 import { dream } from "./pipeline/dream";
-import { REPO_ROOT, config } from "./util/config";
+import { REPO_ROOT, config, parseProviderEnvironment } from "./util/config";
+import { parseLocalPostgresUrl } from "./util/postgres-url";
 
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
-const PRIVATE_RUNTIME_ENV = new Set([
-  "B2_ACCOUNT_ID",
-  "B2_ACCOUNT_KEY",
-  "B2_APPLICATION_KEY",
-  "B2_APPLICATION_KEY_ID",
+const RUNTIME_SETTING_ENV = new Set([
+  "ANTHROPIC_MODEL",
+  "BEDROCK_MODEL",
+  "CLASSIFY_MODEL",
+  "CLASSIFY_PROVIDER",
+  "CLOUD_MAX_TIER",
   "DATABASE_URL",
-  "EVAL_DATABASE_URL",
-  "EVAL_PMB_DATABASE_URL",
-  "EVAL_SKILLS_DATABASE_URL",
+  "EMBED_MODEL",
+  "EMBED_PROVIDER",
   "MINIME_APP_DATABASE_URL",
-  "MINIME_APP_PASSWORD",
+  "MINIME_DATA_DIR",
   "MINIME_RUNTIME_CHILD",
-  "MINIME_TEST_DATABASE_URL",
-  "RESTIC_PASSWORD",
-  "RESTIC_PASSWORD_COMMAND",
-  "RESTIC_PASSWORD_FILE",
-  "RESTIC_REPOSITORY",
+  "MINIME_SKIP_REPO_DOTENV",
+  "OLLAMA_URL",
+  "OPENAI_BASE_URL",
+  "OPENAI_EMBED_MODEL",
+  "OPENAI_MODEL",
+  "OPENROUTER_BASE_URL",
+  "OPENROUTER_EMBED_MODEL",
+  "OPENROUTER_MODEL",
+  "PROVIDER_ROUTE_TIER1",
+  "PROVIDER_ROUTE_TIER2",
+  "RERANK_MODEL",
+  "RERANK_TOP_IN",
+  "RERANK_URL",
+  "TIER2_UNLOCK_MAX_MINUTES",
 ]);
-const AWS_CREDENTIAL_ENV = new Set([
-  "AWS_ACCESS_KEY_ID",
-  "AWS_SECRET_ACCESS_KEY",
-  "AWS_SESSION_TOKEN",
-  "AWS_PROFILE",
-  "AWS_SHARED_CREDENTIALS_FILE",
-  "AWS_CONFIG_FILE",
-  "AWS_WEB_IDENTITY_TOKEN_FILE",
-  "AWS_ROLE_ARN",
-  "AWS_REGION",
-  "AWS_DEFAULT_REGION",
-]);
+const RUNTIME_OS_ENV = new Set(["LANG", "LC_ALL", "PATH", "TMPDIR", "TZ"]);
+const PROVIDER_CREDENTIAL_ENV: Record<string, readonly string[]> = {
+  anthropic: ["ANTHROPIC_API_KEY"],
+  openai: ["OPENAI_API_KEY"],
+  openrouter: ["OPENROUTER_API_KEY"],
+  bedrock: ["BEDROCK_AWS_ACCESS_KEY_ID", "BEDROCK_AWS_SECRET_ACCESS_KEY", "BEDROCK_AWS_REGION"],
+};
+const OPTIONAL_PROVIDER_CREDENTIAL_ENV: Record<string, readonly string[]> = {
+  bedrock: ["BEDROCK_AWS_SESSION_TOKEN"],
+};
 
-function usesBedrock(source: NodeJS.ProcessEnv): boolean {
-  return [source.CLASSIFY_PROVIDER, source.PROVIDER_ROUTE_TIER1, source.PROVIDER_ROUTE_TIER2].some(
-    (provider) => provider?.trim().toLowerCase() === "bedrock",
-  );
+function cloudMaxTier(source: NodeJS.ProcessEnv): number {
+  const tier = Number(source.CLOUD_MAX_TIER ?? "2");
+  if (!Number.isInteger(tier) || tier < 0 || tier > 2) {
+    throw new Error("runtime_child_boundary_invalid");
+  }
+  return tier;
 }
 
-function restrictedAppUrl(raw: string): URL {
-  let url: URL;
+function selectedProviders(source: NodeJS.ProcessEnv): Set<string> {
+  let providers: ReturnType<typeof parseProviderEnvironment>;
   try {
-    url = new URL(raw);
+    providers = parseProviderEnvironment(source);
   } catch {
     throw new Error("runtime_child_boundary_invalid");
   }
-  if (
-    (url.protocol !== "postgres:" && url.protocol !== "postgresql:") ||
-    url.username !== "minime_app" ||
-    !url.password ||
-    decodeURIComponent(url.pathname.replace(/^\//, "")) !== "minime" ||
-    !LOOPBACK_HOSTS.has(url.hostname.toLowerCase())
-  ) {
+  if (source.NODE_ENV === "test" && source.MINIME_MOCK_OLLAMA === "1") {
+    return new Set(["ollama"]);
+  }
+  const selected = new Set<string>([providers.embedProvider]);
+  const ceiling = cloudMaxTier(source);
+  // The MCP child classifies only raw inbox captures, which are routed as tier 2. Tier-1
+  // classification belongs to the owner-side dream scheduler and keeps its credentials there.
+  const explicitRoute = providers.providerRouteTier2;
+  const provider = explicitRoute ?? providers.classifyProvider;
+  if (provider !== "ollama" && 2 > ceiling) {
+    // Explicit routes above the ceiling are invalid. An implicit cloud fallback is a
+    // supported degraded route: jobs reject before provider construction or network use.
+    if (explicitRoute) throw new Error("runtime_child_boundary_invalid");
+    return selected;
+  }
+  selected.add(provider);
+  return selected;
+}
+
+function restrictedAppUrl(raw: string): URL {
+  try {
+    const parsed = parseLocalPostgresUrl(raw, "minime");
+    if (decodeURIComponent(parsed.url.username) !== "minime_app" || !parsed.url.password) {
+      throw new Error("runtime_child_boundary_invalid");
+    }
+    return parsed.url;
+  } catch {
     throw new Error("runtime_child_boundary_invalid");
   }
-  return url;
+}
+
+function copyProviderCredentials(
+  source: NodeJS.ProcessEnv,
+  target: Record<string, string>,
+  selected: ReadonlySet<string>,
+): void {
+  for (const provider of selected) {
+    for (const name of PROVIDER_CREDENTIAL_ENV[provider] ?? []) {
+      const value = source[name];
+      if (!value) throw new Error("runtime_provider_credentials_required");
+      target[name] = value;
+    }
+    for (const name of OPTIONAL_PROVIDER_CREDENTIAL_ENV[provider] ?? []) {
+      const value = source[name];
+      if (value) target[name] = value;
+    }
+  }
+}
+
+function allowedRuntimeEnvironment(source: NodeJS.ProcessEnv): Set<string> {
+  const allowed = new Set([...RUNTIME_SETTING_ENV, ...RUNTIME_OS_ENV]);
+  if (source.NODE_ENV === "test") {
+    allowed.add("NODE_ENV");
+    if (source.MINIME_MOCK_OLLAMA === "1") allowed.add("MINIME_MOCK_OLLAMA");
+  }
+  for (const provider of selectedProviders(source)) {
+    for (const name of PROVIDER_CREDENTIAL_ENV[provider] ?? []) allowed.add(name);
+    for (const name of OPTIONAL_PROVIDER_CREDENTIAL_ENV[provider] ?? []) allowed.add(name);
+  }
+  return allowed;
 }
 
 /** Build the complete environment for the MCP-reachable child, excluding owner/backup authority. */
@@ -69,25 +128,16 @@ export function runtimeChildEnvironment(
 ): Record<string, string> {
   const app = restrictedAppUrl(appDatabaseUrl).toString();
   const child: Record<string, string> = {};
-  const bedrock = usesBedrock(source);
-  if (
-    bedrock &&
-    (!source.BEDROCK_AWS_ACCESS_KEY_ID ||
-      !source.BEDROCK_AWS_SECRET_ACCESS_KEY ||
-      !source.BEDROCK_AWS_REGION)
-  ) {
-    throw new Error("runtime_bedrock_credentials_required");
+  const selected = selectedProviders(source);
+  for (const name of [...RUNTIME_SETTING_ENV, ...RUNTIME_OS_ENV]) {
+    const value = source[name];
+    if (value !== undefined) child[name] = value;
   }
-  for (const [name, value] of Object.entries(source)) {
-    if (
-      value !== undefined &&
-      !PRIVATE_RUNTIME_ENV.has(name) &&
-      !name.startsWith("PG") &&
-      !AWS_CREDENTIAL_ENV.has(name)
-    ) {
-      child[name] = value;
-    }
+  if (source.NODE_ENV === "test") {
+    child.NODE_ENV = "test";
+    if (source.MINIME_MOCK_OLLAMA === "1") child.MINIME_MOCK_OLLAMA = "1";
   }
+  copyProviderCredentials(source, child, selected);
   child.DATABASE_URL = app;
   child.MINIME_APP_DATABASE_URL = app;
   child.MINIME_RUNTIME_CHILD = "1";
@@ -109,40 +159,28 @@ export function assertRuntimeChildBoundary(env: NodeJS.ProcessEnv = process.env)
     throw new Error("runtime_child_boundary_invalid");
   }
   restrictedAppUrl(runtime);
-  if (Object.keys(env).some((name) => name.startsWith("PG") && env[name] !== undefined)) {
+  const allowed = allowedRuntimeEnvironment(env);
+  if (Object.keys(env).some((name) => env[name] !== undefined && !allowed.has(name))) {
     throw new Error("runtime_child_boundary_invalid");
   }
-  if ([...AWS_CREDENTIAL_ENV].some((name) => env[name] !== undefined)) {
+  try {
+    copyProviderCredentials(env, {}, selectedProviders(env));
+  } catch {
     throw new Error("runtime_child_boundary_invalid");
-  }
-  if (
-    usesBedrock(env) &&
-    (!env.BEDROCK_AWS_ACCESS_KEY_ID ||
-      !env.BEDROCK_AWS_SECRET_ACCESS_KEY ||
-      !env.BEDROCK_AWS_REGION)
-  ) {
-    throw new Error("runtime_child_boundary_invalid");
-  }
-  for (const name of PRIVATE_RUNTIME_ENV) {
-    if (
-      name !== "DATABASE_URL" &&
-      name !== "MINIME_APP_DATABASE_URL" &&
-      name !== "MINIME_RUNTIME_CHILD" &&
-      env[name] !== undefined
-    ) {
-      throw new Error("runtime_child_boundary_invalid");
-    }
   }
 }
 
 export function spawnRuntimeChild(appDatabaseUrl: string) {
-  return Bun.spawn([process.execPath, join(REPO_ROOT, "src", "cli.ts"), "serve:runtime"], {
-    cwd: REPO_ROOT,
-    env: runtimeChildEnvironment(process.env, appDatabaseUrl),
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
-  });
+  return Bun.spawn(
+    [process.execPath, "--no-env-file", "run", join(REPO_ROOT, "src", "cli.ts"), "serve:runtime"],
+    {
+      cwd: REPO_ROOT,
+      env: runtimeChildEnvironment(process.env, appDatabaseUrl),
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+    },
+  );
 }
 
 export async function superviseRuntimeChild(
@@ -165,9 +203,25 @@ export interface OwnerMaintenanceSchedule {
   close(): Promise<void>;
 }
 
+interface MaintenanceCron {
+  nextRun(): Date | null;
+  stop(): void;
+}
+
+type MaintenanceCronFactory = (
+  pattern: string,
+  options: { timezone: string },
+  callback: () => void,
+) => MaintenanceCron;
+
+const createMaintenanceCron: MaintenanceCronFactory = (pattern, options, callback) =>
+  new Cron(pattern, options, callback);
+
 /** Trusted maintenance scheduler. The MCP child never receives restic or owner DB credentials. */
-export function startOwnerMaintenanceSchedule(): OwnerMaintenanceSchedule {
-  const crons: Cron[] = [];
+export function startOwnerMaintenanceSchedule(
+  createCron: MaintenanceCronFactory = createMaintenanceCron,
+): OwnerMaintenanceSchedule {
+  const crons: MaintenanceCron[] = [];
   const active = new Set<Promise<unknown>>();
   const run = (label: string, work: () => Promise<unknown>) => {
     const task = work()
@@ -191,7 +245,7 @@ export function startOwnerMaintenanceSchedule(): OwnerMaintenanceSchedule {
     void task.finally(() => active.delete(task));
   };
 
-  const nightly = new Cron(config.dreamCron, () =>
+  const nightly = createCron(config.dreamCron, { timezone: config.tz }, () =>
     run("dream", () => withAdminDbScope(() => dream())),
   );
   crons.push(nightly);
@@ -200,7 +254,9 @@ export function startOwnerMaintenanceSchedule(): OwnerMaintenanceSchedule {
   );
 
   if (config.backupCron && config.resticRepository && config.resticPasswordFile) {
-    const snapshot = new Cron(config.backupCron, () => run("db snapshot", dbSnapshot));
+    const snapshot = createCron(config.backupCron, { timezone: config.tz }, () =>
+      run("db snapshot", dbSnapshot),
+    );
     crons.push(snapshot);
     console.error(
       `[minime] db snapshot scheduled: ${config.backupCron} (next: ${snapshot.nextRun()?.toISOString()})`,

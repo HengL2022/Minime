@@ -19,6 +19,7 @@ const KINDS = [
   "extract_suspect",
 ] as const;
 const HIDDEN = "[above current tier]";
+const OMITTED_KEYS = new Set(["classifier", "classifier_output", "raw_path"]);
 const CONTENT_KEYS = new Set([
   "body",
   "body_md",
@@ -37,6 +38,10 @@ function maskContentKeys(value: unknown): unknown {
   if (!value || typeof value !== "object") return value;
   const out: Record<string, unknown> = {};
   for (const [key, nested] of Object.entries(value)) {
+    // Historical inbox_unfiled rows may contain a host-absolute source path and
+    // the classifier's complete structured response. Neither is needed to triage
+    // the queue, and neither crosses the MCP boundary.
+    if (OMITTED_KEYS.has(key)) continue;
     out[key] = CONTENT_KEYS.has(key) ? HIDDEN : maskContentKeys(nested);
   }
   return out;

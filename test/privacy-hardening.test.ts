@@ -15,10 +15,11 @@ import {
 import { toolByName } from "../src/mcp/tools";
 import { invokeTool } from "../src/mcp/tools/registry";
 import { resetDb, testSql as sql } from "./helpers";
+import { requestAndApproveTier2, sessionToolCtx } from "./support/unlock";
 
-const ctx = { actor: "agent:privacy-test" };
-const ctxAlice = { actor: "agent:alice" };
-const ctxBob = { actor: "agent:bob" };
+const ctx = sessionToolCtx("agent:privacy-test");
+const ctxAlice = sessionToolCtx("agent:alice");
+const ctxBob = sessionToolCtx("agent:bob");
 
 beforeEach(async () => {
   await resetDb();
@@ -68,16 +69,20 @@ describe("tier-2 privacy hardening", () => {
       insert into journal_entries (entry_md, tier)
       values (${journalText}, 2)
       returning id`;
-    await sql`
+    const [edge] = await sql`
       insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by)
       values ('journal', ${journal!.id}, 'mentions', 'person', ${person!.id},
-              'journal_entries', ${journal!.id}, 'system:test')`;
-    await sql`
+              'journal_entries', ${journal!.id}, 'system:test')
+      returning id`;
+    const [task] = await sql`
       insert into tasks (title, status, due, tier)
-      values (${`${taskTitle} for Alex Privacy`}, 'active', '2000-01-01', 2)`;
-    await sql`
+      values (${`${taskTitle} for Alex Privacy`}, 'active', '2000-01-01', 2)
+      returning id`;
+    const [commitment] = await sql`
       insert into commitments (what, to_whom, status, tier)
-      values (${commitmentTitle}, 'Alex Privacy', 'open', 2)`;
+      values (${commitmentTitle}, 'Alex Privacy', 'open', 2)
+      returning id`;
+    const [marker] = await sql`select coalesce(max(id), 0)::bigint as id from events`;
 
     const result = await invokeTool(
       toolByName("minime_get_context"),
@@ -88,6 +93,25 @@ describe("tier-2 privacy hardening", () => {
     expect(JSON.stringify(result)).not.toContain(taskTitle);
     expect(JSON.stringify(result)).not.toContain(commitmentTitle);
     expect(JSON.stringify(result)).not.toContain(String(journal!.id));
+    if (!result.ok) throw new Error(result.error.message);
+    const returnedIds = result.envelope.sources.map((source) => source.id);
+    expect(returnedIds).not.toContain(edge!.id);
+    expect(returnedIds).not.toContain(task!.id);
+    expect(returnedIds).not.toContain(commitment!.id);
+
+    const [resultEvent] = await sql`
+      select payload
+      from events
+      where id > ${marker!.id}::bigint
+        and actor = ${ctx.actor}
+        and verb = 'tool:minime_get_context'
+      order by id desc
+      limit 1`;
+    expect(resultEvent!.payload.returned_ids).toEqual(returnedIds);
+    expect(resultEvent!.payload.returned_count).toBe(returnedIds.length);
+    expect(resultEvent!.payload.returned_ids).not.toContain(edge!.id);
+    expect(resultEvent!.payload.returned_ids).not.toContain(task!.id);
+    expect(resultEvent!.payload.returned_ids).not.toContain(commitment!.id);
   });
 
   test("review queue masks legacy tier-2 titles and questions while locked", async () => {
@@ -162,7 +186,7 @@ describe("tier-2 privacy hardening", () => {
         existing_title: taskTitle,
       })})`;
 
-    await invokeTool(toolByName("minime_unlock"), { minutes: 5 }, ctxAlice);
+    await requestAndApproveTier2(ctxAlice);
 
     const aliceState = await invokeTool(toolByName("minime_state"), {}, ctxAlice);
     const bobState = await invokeTool(toolByName("minime_state"), {}, ctxBob);
@@ -243,7 +267,7 @@ describe("tier-2 privacy hardening", () => {
     expect(JSON.stringify(locked)).not.toContain(secretTranscript);
     expect(JSON.stringify(locked)).not.toContain(secretBranch);
 
-    await invokeTool(toolByName("minime_unlock"), { minutes: 5 }, ctxAlice);
+    await requestAndApproveTier2(ctxAlice);
     const unlocked = await invokeTool(
       toolByName("minime_get_context"),
       { type: "decision", id: decisionId },

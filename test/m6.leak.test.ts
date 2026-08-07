@@ -18,6 +18,7 @@ import { type ToolDef, invokeTool } from "../src/mcp/tools/registry";
 import { indexParent } from "../src/search/index-parent";
 import { setNow } from "../src/util/clock";
 import { expectSqlReject, resetAndSeed, testSql as sql } from "./helpers";
+import { requestAndApproveTier2, sessionToolCtx } from "./support/unlock";
 
 const TIER0_SENTINEL = "ZQX-TIER0-MERCHANT-SENTINEL";
 const TIER2_SENTINEL = "ZQX-TIER2-JOURNAL-SENTINEL";
@@ -25,7 +26,7 @@ const PARAMETER_SENTINEL = "ZQX-PARAMETER-SENTINEL";
 const TITLE_SENTINEL = "ZQX-TITLE-SENTINEL";
 const SOURCE_SENTINEL = "ZQX-SOURCE-SENTINEL";
 const ERROR_SENTINEL = "ZQX-ERROR-SENTINEL";
-const ctx = { actor: "agent:fuzzer" };
+const ctx = sessionToolCtx("agent:fuzzer");
 
 class RecordingSink implements AuditSink {
   events: Array<{
@@ -278,6 +279,11 @@ describe("direct audit disposition compatibility", () => {
       errorSink,
     );
     expect(failed.ok).toBe(false);
+    expect(failed).toEqual({
+      ok: false,
+      error: { code: "INTERNAL", message: "Internal tool error." },
+    });
+    expect(JSON.stringify(failed)).not.toContain(ERROR_SENTINEL);
     expect(errorSink.events).toEqual([
       { phase: "attempt", params: {} },
       {
@@ -399,23 +405,19 @@ describe("direct audit disposition compatibility", () => {
       },
       { status: "send_uncertain" as const },
     ];
+    const returnedId = crypto.randomUUID();
     const durable: Array<{ eventId: string; status: string }> = [];
     for (const disposition of cases) {
-      const result = await eventAuditSink.result(
-        ctx.actor,
-        "m6_disposition_guard",
-        "0".repeat(16),
-        {
-          returnedIds: [SOURCE_SENTINEL],
-          returnedCount: 137,
-          error: "INTERNAL",
-          delivery: "transport",
-        },
-      );
+      const result = await eventAuditSink.result(ctx.actor, "minime_get_context", "0".repeat(16), {
+        returnedIds: [returnedId],
+        returnedCount: 137,
+        error: "INTERNAL",
+        delivery: "transport",
+      });
       durable.push({ eventId: result.eventId, status: disposition.status });
       await eventAuditSink.disposition(
         ctx.actor,
-        "m6_disposition_guard",
+        "minime_get_context",
         result.eventId,
         disposition,
       );
@@ -425,12 +427,13 @@ describe("direct audit disposition compatibility", () => {
       select id::text as id, verb, payload
       from events
       where verb in (
-        'tool:m6_disposition_guard',
-        'tool:m6_disposition_guard:disposition'
+        'tool:minime_get_context',
+        'tool:minime_get_context:disposition'
       )
+        and id > ${"9007199254740992"}::bigint
       order by id asc`;
     expect(rows).toHaveLength(6);
-    const results = rows.filter((row) => row.verb === "tool:m6_disposition_guard");
+    const results = rows.filter((row) => row.verb === "tool:minime_get_context");
     const dispositions = rows.filter((row) => row.verb.endsWith(":disposition"));
     expect(results).toHaveLength(3);
     expect(dispositions).toHaveLength(3);
@@ -439,7 +442,7 @@ describe("direct audit disposition compatibility", () => {
       const disposition = dispositions[index]!;
       expect(result.id).toBe(durable[index]!.eventId);
       expect(result.payload).toMatchObject({
-        returned_ids: [SOURCE_SENTINEL],
+        returned_ids: [returnedId],
         returned_count: 137,
         error: "INTERNAL",
         delivery: "transport",
@@ -471,7 +474,7 @@ describe("direct audit disposition compatibility", () => {
     expect(JSON.stringify(dispositions)).not.toContain(SOURCE_SENTINEL);
 
     await expectSqlReject(
-      eventAuditSink.disposition(ctx.actor, "m6_disposition_guard", durable[0]!.eventId, {
+      eventAuditSink.disposition(ctx.actor, "minime_get_context", durable[0]!.eventId, {
         status: "released",
       }),
       /events_tool_disposition_result_event_uidx/,
@@ -479,21 +482,20 @@ describe("direct audit disposition compatibility", () => {
     const [duplicateCount] = await sql`
       select count(*)::int as n
       from events
-      where verb = 'tool:m6_disposition_guard:disposition'
+      where verb = 'tool:minime_get_context:disposition'
         and payload->>'result_event_id' = ${durable[0]!.eventId}`;
     expect(duplicateCount!.n).toBe(1);
   });
 });
 
 describe("unlock flow", () => {
-  test("unlock grants tier 2, expiry restores tier 1, never tier 0", async () => {
-    expect(await allowedTier(ctx.actor)).toBe(1);
+  test("owner approval grants this session tier 2; expiry restores tier 1; tier 0 stays closed", async () => {
+    expect(await allowedTier(ctx.actor, ctx.sessionId)).toBe(1);
 
     const t0 = new Date();
     setNow(t0);
-    const r = await invokeTool(toolByName("minime_unlock"), { minutes: 5 }, ctx);
-    expect(r.ok).toBe(true);
-    expect(await allowedTier(ctx.actor)).toBe(2);
+    const { requestId } = await requestAndApproveTier2(ctx);
+    expect(await allowedTier(ctx.actor, ctx.sessionId)).toBe(2);
 
     // tier-2 sentinel now visible (that is the whole point of unlock)
     const s = await invokeTool(
@@ -506,16 +508,19 @@ describe("unlock flow", () => {
     expect(JSON.stringify(s)).not.toContain(TIER0_SENTINEL);
 
     // loud audit trail
-    const [unlockEvent] =
-      await sql`select count(*)::int as n from events where verb = 'unlock:tier2'`;
-    expect(unlockEvent!.n).toBeGreaterThanOrEqual(1);
+    const [unlockEvents] = await sql`
+      select count(*)::int as n from events
+      where verb in ('unlock:tier2:requested', 'unlock:tier2:approved')
+        and entity_id = ${requestId}::uuid`;
+    expect(unlockEvents!.n).toBe(2);
 
     // expiry honored
     await sql`
       update session_unlocks
-      set expires_at = clock_timestamp() - interval '1 second'
-      where granted_via = ${ctx.actor}`;
-    expect(await allowedTier(ctx.actor)).toBe(1);
+      set approved_at = clock_timestamp() - interval '2 seconds',
+          expires_at = clock_timestamp() - interval '1 second'
+      where id = ${requestId}::uuid`;
+    expect(await allowedTier(ctx.actor, ctx.sessionId)).toBe(1);
     const locked = await invokeTool(
       toolByName("minime_search"),
       { query: "private thought marker sentinel" },
@@ -547,11 +552,54 @@ describe("RLS belt-and-braces (spec §12)", () => {
 
   test("metric_agg() is the only door to tier-0 and rejects unknown metrics", async () => {
     await expectSqlReject(
-      sql`select * from metric_agg('not_a_metric', '2026-01-01', '2026-01-31')`,
+      sql`select * from metric_agg('not_a_metric', '2026-01-01', '2026-01-31', 'UTC')`,
       /UNKNOWN_METRIC/,
     );
-    const rows = await sql`select * from metric_agg('spend_total', '2026-05-01', '2026-06-10')`;
+    await expectSqlReject(
+      sql`select * from metric_agg('steps', '2026-01-01', '2026-01-31', 'not/a-zone')`,
+      /INVALID_TIME_ZONE/,
+    );
+    await sql`select * from metric_agg('steps', '2026-01-01', '2026-01-31', 'asia/singapore')`;
+    const rows =
+      await sql`select * from metric_agg('spend_total', '2026-05-01', '2026-06-10', 'UTC')`;
     expect(rows.length).toBeGreaterThan(0);
     for (const r of rows) expect(JSON.stringify(r)).not.toContain(TIER0_SENTINEL);
+
+    const [boundary] = await sql`
+      select
+        to_regprocedure('public.metric_agg(text,date,date)') is null as old_removed,
+        has_function_privilege('public', 'public.metric_agg(text,date,date,text)', 'EXECUTE') as public_execute,
+        has_function_privilege('minime_app', 'public.metric_agg(text,date,date,text)', 'EXECUTE') as app_execute,
+        has_function_privilege('minime_engineer_ro', 'public.metric_agg(text,date,date,text)', 'EXECUTE') as engineer_execute,
+        has_table_privilege('minime_app', 'public.transactions', 'SELECT') as app_transactions,
+        has_table_privilege('minime_app', 'public.health_samples', 'SELECT') as app_health,
+        has_table_privilege('minime_app', 'public.metric_values', 'INSERT') as app_metric_insert,
+        has_table_privilege('minime_app', 'public.metric_values', 'UPDATE') as app_metric_update,
+        has_table_privilege('minime_engineer_ro', 'public.transactions', 'SELECT') as engineer_transactions,
+        has_table_privilege('minime_engineer_ro', 'public.health_samples', 'SELECT') as engineer_health`;
+    expect(boundary).toEqual({
+      old_removed: true,
+      public_execute: false,
+      app_execute: true,
+      engineer_execute: true,
+      app_transactions: false,
+      app_health: false,
+      app_metric_insert: false,
+      app_metric_update: false,
+      engineer_transactions: false,
+      engineer_health: false,
+    });
+  });
+
+  test("metric definitions declare checked sum/last rollup semantics", async () => {
+    const defs = await sql`select name, rollup from metric_defs order by name`;
+    expect(defs.find((row) => row.name === "journal_streak")?.rollup).toBe("last");
+    expect(
+      defs.filter((row) => row.name !== "journal_streak").every((row) => row.rollup === "sum"),
+    ).toBe(true);
+    await expectSqlReject(
+      sql`update metric_defs set rollup = 'average' where name = 'steps'`,
+      /metric_defs_rollup_check/,
+    );
   });
 });

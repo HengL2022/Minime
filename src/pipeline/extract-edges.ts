@@ -10,23 +10,18 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   type EntityRef,
-  addAlias,
-  addOrgAlias,
   allOrgsWithAliases,
   allPeopleWithAliases,
   deleteExtractedEdgesForSource,
-  edgeExists,
-  ensureOrg,
-  ensurePerson,
-  insertEdge,
+  ensureExtractedOrg,
+  ensureExtractedPerson,
   parentTable,
-  peopleByFirstName,
-  personById,
+  personHasNonWorkingRelation,
   resolveOrg,
   resolvePerson,
-  setOrgCanonicalName,
-  setPersonCanonicalName,
   setPersonRelationIfNull,
+  sourceTierForParent,
+  upsertExtractedEdge,
 } from "../db/repo";
 import { config } from "../util/config";
 
@@ -169,23 +164,12 @@ const ORG_ROLE = new RegExp(
   "giu",
 );
 
-// Fix A (2026-06-16): non-org stoplist — cities, generic nouns, and lab/therapy
-// concepts the extractor used to mis-type as orgs. Exact (case-folded) phrase match
-// only, so real multi-word orgs containing these words ("Goddard School") are unaffected.
-// See docs/known-issues/extractor-phantom-orgs.md.
+// Fix A (2026-06-16): generic non-org nouns the extractor used to mis-type as orgs.
+// Exact (case-folded) phrase match only, so fictional multi-word orgs containing these
+// words ("Acme School") are unaffected. Owner-specific places and domain concepts belong
+// only in the local, gitignored stoplist. See docs/known-issues/extractor-phantom-orgs.md.
 const NON_ORG_TERMS = new Set(
   [
-    // cities / places
-    "wuhan",
-    "beijing",
-    "shanghai",
-    "shenzhen",
-    "guangzhou",
-    "singapore",
-    "huangpu",
-    "zhuhai",
-    "guangdong",
-    // generic nouns
     "school",
     "lab",
     "laboratory",
@@ -199,19 +183,6 @@ const NON_ORG_TERMS = new Set(
     "group",
     "team",
     "department",
-    // lab / therapy / assay concepts
-    "car-t",
-    "cart",
-    "crispr",
-    "facs",
-    "pcr",
-    "elisa",
-    "antibody",
-    "plasmid",
-    "ldlr",
-    "egfrviii",
-    "il-13",
-    "il13",
   ].map((s) => s.toLowerCase()),
 );
 
@@ -255,11 +226,12 @@ function personsIn(sentence: string): DiscoveredPerson[] {
 }
 
 // Owner-editable non-org stoplist, loaded from a local gitignored file
-// ($MINIME_DATA_DIR/non-org-terms.txt). Complements the built-in NON_ORG_TERMS constant
-// above: cities, generic nouns, lab/assay/therapy jargon ("Wuhan", "CAR-T") that look like
-// orgs but aren't, and which carry no structural signal separating them from real
-// single-word orgs ("Equinor"). Matched case-folded and EXACT, so a multi-word org that
-// merely contains a listed word ("Goddard School") still extracts. Pure; unit-tested.
+// ($MINIME_DATA_DIR/non-org-terms.txt). Complements the generic built-in NON_ORG_TERMS
+// constant above with owner-specific places and domain terms (the committed template uses
+// fictional examples such as "Springfield", "Downtown", and "atlas") that look like orgs
+// but aren't, and which carry no structural signal separating them from real
+// single-word orgs ("Fjordsonics"). Matched case-folded and EXACT, so a multi-word org that
+// merely contains a listed word ("Acme School") still extracts. Pure; unit-tested.
 export function parseNonOrgTerms(text: string): Set<string> {
   const out = new Set<string>();
   for (const raw of text.split("\n")) {
@@ -294,26 +266,26 @@ function orgsIn(
   const cued = WORK_CUE.test(sentence);
   const out: string[] = [];
   // Names to reject as orgs: people found in this sentence + all known people in
-  // the lexicon (so a bare first name like "Heng" is caught even when the only
-  // stored alias is the fuller "Heng Liu"). Fix A, 2026-06-16.
+  // the lexicon (so a bare first name like "Priya" is caught even when the only
+  // stored alias is the fuller "Priya Raghunathan"). Fix A, 2026-06-16.
   const blocked = new Set(
     [...personNames, ...knownPersonNames].flatMap((n) => {
       const lower = n.toLowerCase();
-      // also block the bare first token ("Heng Liu" → "heng") and the possessive form
+      // also block the bare first token ("Priya Raghunathan" → "priya") and the possessive form
       return [lower, lower.split(/\s+/)[0]!];
     }),
   );
   const consider = (phrase: string, ok: boolean) => {
     const p = phrase
       .replace(/['’]s\s.*$/u, "") // "NTNU's Department of Marine Technology" → "NTNU"
-      .replace(/[,.;:]+$/u, "") // trailing punctuation first, so "Max's." reduces cleanly
-      .replace(/['’]s$/u, "") // "Max's" → "Max", then caught by the person guard
+      .replace(/[,.;:]+$/u, "") // trailing punctuation first, so "Sigrid's." reduces cleanly
+      .replace(/['’]s$/u, "") // "Sigrid's" → "Sigrid", then caught by the person guard
       .trim();
     if (p.length < 3 || !ok) return;
     if (!/\p{Lu}/u.test(p)) return; // "11-week" and other digit-led phrases are not orgs
     const lower = p.toLowerCase();
     if (NAME_STOP.has(lower)) return;
-    if (NON_ORG_TERMS.has(lower)) return; // built-in: city / generic noun / lab concept
+    if (NON_ORG_TERMS.has(lower)) return; // built-in generic noun
     if (nonOrgTerms.has(lower)) return; // owner's local stoplist (non-org-terms.txt)
     if (blocked.has(lower)) return; // candidate IS a known person (or their first name)
     if (personNames.some((n) => n.toLowerCase() === lower || lower.includes(n.toLowerCase())))
@@ -347,28 +319,6 @@ function knownIn(text: string, entries: { id: string; names: string[] }[]): Map<
 }
 
 const WORK_ROLES = new RegExp(`^(manager|boss|colleague|collaborator|${TITLES})$`, "iu");
-
-// Non-working child/care relations: a person stored with one of these can never
-// be the subject of a works_at edge. Family narratives co-mention a child + an org + a
-// work cue ("school", "therapy", "violin class") in one paragraph, and the paragraph-scope
-// / page-dominant-org inference would otherwise mint phantom edges like
-// "Mia works_at Hehuang Pharma". Adult family roles (sister, father, spouse) are allowed:
-// real corpora often state where they work. See DECISIONS.md 2026-06-16.
-const NON_WORKING_RELATIONS = new Set([
-  "son",
-  "daughter",
-  "child",
-  "grandson",
-  "granddaughter",
-  "domestic_helper",
-  "nanny",
-  "babysitter",
-]);
-
-function isNonWorkingRelation(relation: string | null | undefined): boolean {
-  if (!relation) return false;
-  return NON_WORKING_RELATIONS.has(relation.trim().toLowerCase());
-}
 
 export function extractFacts(
   text: string,
@@ -496,45 +446,26 @@ export function extractFacts(
 // "Tomasz" later seen as "Tomasz Wójcik" (or vice versa) must not fork into two people:
 // exact alias match first, then unique-first-name match, upgrading the canonical name
 // when the new form is fuller.
-async function resolveOrCreatePerson(name: string): Promise<{ id: string; created: boolean }> {
-  const exact = await resolvePerson(name);
-  if (exact) return { id: exact.id, created: false };
-  const tokens = name.split(/\s+/);
-  if (tokens.length === 1) {
-    const matches = await peopleByFirstName(tokens[0]!);
-    if (matches.length === 1) {
-      await addAlias(matches[0]!.id, name);
-      return { id: matches[0]!.id, created: false };
-    }
-  } else {
-    const short = await resolvePerson(tokens[0]!);
-    if (short && short.canonical_name.toLowerCase() === tokens[0]!.toLowerCase()) {
-      await setPersonCanonicalName(short.id, name);
-      await addAlias(short.id, name);
-      return { id: short.id, created: false };
-    }
-  }
-  const { id } = await ensurePerson(name, ACTOR, "extract");
-  return { id, created: true };
+interface ExtractionDerivation {
+  tier: 1 | 2;
+  derivedFrom: string;
+}
+
+async function resolveOrCreatePerson(
+  name: string,
+  derivation: ExtractionDerivation,
+): Promise<{ id: string; created: boolean }> {
+  return ensureExtractedPerson(name, ACTOR, derivation);
 }
 
 // "Fjordsonics" / "Fjordsonics AS" are one org: match on the legal-suffix-stripped base
 // name via aliases, preferring the suffixed form as canonical.
-async function resolveOrCreateOrg(name: string): Promise<{ id: string; created: boolean }> {
-  const exact = await resolveOrg(name);
-  if (exact) return { id: exact.id, created: false };
+async function resolveOrCreateOrg(
+  name: string,
+  derivation: ExtractionDerivation,
+): Promise<{ id: string; created: boolean }> {
   const base = name.replace(LEGAL_SUFFIX, "");
-  if (base !== name) {
-    const baseHit = await resolveOrg(base);
-    if (baseHit) {
-      await setOrgCanonicalName(baseHit.id, name);
-      await addOrgAlias(baseHit.id, name);
-      return { id: baseHit.id, created: false };
-    }
-  }
-  const { id, created } = await ensureOrg(name, ACTOR);
-  if (base !== name) await addOrgAlias(id, base);
-  return { id, created };
+  return ensureExtractedOrg(name, base, ACTOR, derivation);
 }
 
 export interface ExtractStats {
@@ -547,17 +478,22 @@ export async function extractAndLink(
   parentType: string,
   parentId: string,
   text: string,
-  opts: { replaceSourceEdges?: boolean } = {},
+  opts: { replaceSourceEdges?: boolean; tier?: 1 | 2; derivedFrom?: string } = {},
 ): Promise<ExtractStats> {
+  const srcTable = parentTable(parentType).table;
+  const storedTier = await sourceTierForParent(parentType, parentId);
+  const derivation: ExtractionDerivation = {
+    tier: Math.max(storedTier, opts.tier ?? storedTier) as 1 | 2,
+    derivedFrom: opts.derivedFrom ?? parentId,
+  };
   const lexicon = { people: await allPeopleWithAliases(), orgs: await allOrgsWithAliases() };
   const facts = extractFacts(text, lexicon, loadNonOrgTerms());
   const stats: ExtractStats = { edges: 0, people: 0, orgs: 0 };
-  const srcTable = parentTable(parentType).table;
   if (opts.replaceSourceEdges) await deleteExtractedEdgesForSource(srcTable, parentId, ACTOR);
 
   const personIds = new Map<string, string>();
   for (const p of facts.people) {
-    const { id, created } = await resolveOrCreatePerson(p.name);
+    const { id, created } = await resolveOrCreatePerson(p.name, derivation);
     personIds.set(p.name.toLowerCase(), id);
     if (created) stats.people++;
     // manager is both a work-role and an owner-relation; other work-roles are not relations
@@ -566,7 +502,7 @@ export async function extractAndLink(
   }
   const orgIds = new Map<string, string>();
   for (const o of facts.orgs) {
-    const { id, created } = await resolveOrCreateOrg(o);
+    const { id, created } = await resolveOrCreateOrg(o, derivation);
     orgIds.set(o.toLowerCase(), id);
     if (created) stats.orgs++;
   }
@@ -581,8 +517,7 @@ export async function extractAndLink(
     const key = `${ref.type}:${ref.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    if (await edgeExists(parentType, parentId, "mentions", ref.type, ref.id)) continue;
-    await insertEdge({
+    const created = await upsertExtractedEdge({
       srcType: parentType,
       srcId: parentId,
       rel: "mentions",
@@ -590,10 +525,9 @@ export async function extractAndLink(
       dstId: ref.id,
       sourceTable: srcTable,
       sourceId: parentId,
-      extractedBy: ACTOR,
       confidence: 0.8,
     });
-    stats.edges++;
+    if (created) stats.edges++;
   }
 
   for (const w of facts.worksAt) {
@@ -603,15 +537,11 @@ export async function extractAndLink(
     // Family/household relations can't "work at" an org. A child co-mentioned with a
     // school/clinic + work cue used to get a phantom works_at edge from paragraph-scope
     // / page-dominant inference; refuse it here where the stored relation is known.
-    const personRow = await personById(personId);
-    if (isNonWorkingRelation(personRow?.relation)) {
-      console.error(
-        `extract:skip-works-at non-working relation=${personRow?.relation} person=${w.person} org=${w.org}`,
-      );
+    if (await personHasNonWorkingRelation(personId)) {
+      console.error("extract:skip-works-at non-working relation");
       continue;
     }
-    if (await edgeExists("person", personId, "works_at", "org", orgId)) continue;
-    await insertEdge({
+    const created = await upsertExtractedEdge({
       srcType: "person",
       srcId: personId,
       rel: "works_at",
@@ -619,10 +549,9 @@ export async function extractAndLink(
       dstId: orgId,
       sourceTable: srcTable,
       sourceId: parentId,
-      extractedBy: ACTOR,
       confidence: w.confidence,
     });
-    stats.edges++;
+    if (created) stats.edges++;
   }
   return stats;
 }

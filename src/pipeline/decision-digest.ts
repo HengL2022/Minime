@@ -2,7 +2,6 @@
 // query-shaped: retrieve on the digest, then read the raw decision transcript through
 // minime_get_context. Raw decision rows/transcripts remain the source of truth.
 
-import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
   type DecisionDigestInput,
@@ -12,6 +11,7 @@ import {
   upsertPage,
 } from "../db/repo";
 import { indexParent } from "../search/index-parent";
+import { atomicWritePrivate } from "../util/atomic-file";
 import { config } from "../util/config";
 
 const ACTOR = "system:dream";
@@ -149,8 +149,10 @@ async function writeArchive(
   body: string,
 ): Promise<void> {
   const abs = join(config.dataDir, "brain", path);
-  await mkdir(abs.slice(0, abs.lastIndexOf("/")), { recursive: true });
-  await Bun.write(abs, `---\ntitle: "${title.replace(/"/g, '\\"')}"\ntier: ${tier}\n---\n${body}`);
+  await atomicWritePrivate(
+    abs,
+    `---\ntitle: "${title.replace(/"/g, '\\"')}"\ntier: ${tier}\n---\n${body}`,
+  );
 }
 
 export async function draftDecisionDigest(

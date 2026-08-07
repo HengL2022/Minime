@@ -33,9 +33,11 @@ function copiedScripts() {
   const root = mkdtempSync(join(tmpdir(), "minime-h2-shell-"));
   roots.push(root);
   const scripts = join(root, "scripts");
+  const util = join(root, "src", "util");
   const bin = join(root, "bin");
   const trace = join(root, "trace");
   mkdirSync(scripts, { mode: 0o700 });
+  mkdirSync(util, { recursive: true, mode: 0o700 });
   mkdirSync(bin, { mode: 0o700 });
   mkdirSync(join(root, "node_modules", "postgres"), { recursive: true });
   writeFileSync(trace, "", { mode: 0o600 });
@@ -44,17 +46,35 @@ function copiedScripts() {
     "# fictional fixture\nDATABASE_URL=postgres://minime:minime@localhost:5432/minime\n",
     { mode: 0o600 },
   );
+  writeFileSync(join(root, ".bun-version"), "1.3.13\n", { mode: 0o600 });
   for (const name of ["lib.sh", "install.sh", "up.sh"]) {
     const target = join(scripts, name);
     writeFileSync(target, readFileSync(join(REPO, "scripts", name)), { mode: 0o700 });
     chmodSync(target, 0o700);
   }
+  // install.sh validates the database endpoint through the production parser. Keep this
+  // isolated shell fixture production-shaped instead of silently replacing that boundary.
+  writeFileSync(
+    join(util, "postgres-url.ts"),
+    readFileSync(join(REPO, "src", "util", "postgres-url.ts")),
+    { mode: 0o600 },
+  );
   for (const name of ["docker", "brew", "curl", "pg_isready", "psql"]) {
     executable(
       join(bin, name),
       `printf '%s %s\\n' ${JSON.stringify(name)} "$*" >> "$H2_TRACE"; exit 91`,
     );
   }
+  executable(
+    join(bin, "bun"),
+    `if [ "\${1:-}" = "--version" ]; then printf '1.3.13\\n'; exit 0; fi
+if [ -n "\${MINIME_BOOTSTRAP_PROBE_URL:-}" ]; then exit 0; fi
+case "$*" in
+  *scripts/pg-probe.ts*) exit 0 ;;
+  *"select current_database()"*) printf 'owner-probe\\n' >> "$H2_TRACE"; exit 0 ;;
+esac
+exec ${JSON.stringify(process.execPath)} "$@"`,
+  );
   return { root, scripts, bin, trace };
 }
 
@@ -235,7 +255,7 @@ test.each(["install.sh", "up.sh"])(
     }
     expect(readFileSync(f.trace, "utf8")).toBe("");
     expect(readdirSync(f.root).sort()).toEqual(
-      [".env.example", "bin", "node_modules", "scripts", "trace"].sort(),
+      [".bun-version", ".env.example", "bin", "node_modules", "scripts", "src", "trace"].sort(),
     );
   },
 );
@@ -300,7 +320,10 @@ test("inverse duplicate .env order accepts the final loopback value", async () =
     { PATH: `${f.bin}:/usr/bin:/bin`, H2_TRACE: f.trace, OLLAMA_URL: undefined },
   );
   expect(result.code, `${result.out}\n${result.err}`).toBe(0);
-  expect(readFileSync(f.trace, "utf8")).toBe("docker info\n");
+  const trace = readFileSync(f.trace, "utf8");
+  expect(trace).toContain("docker info\n");
+  expect(trace).not.toContain("compose up");
+  expect(trace).not.toContain("services start");
 });
 
 test.each([
@@ -332,7 +355,7 @@ test.each([
     );
     expect(result.code, `${result.out}\n${result.err}`).toBe(0);
     expect(result.out).toContain(detail);
-    expect(readFileSync(f.trace, "utf8")).toBe("docker info\n");
+    expect(readFileSync(f.trace, "utf8")).toBe(native ? "" : "docker info\n");
   },
 );
 
@@ -621,9 +644,27 @@ test("chmod failure is fail-closed and the installed EXIT trap cleans the worksp
 });
 
 function makeUpFixtureCommands(f: ReturnType<typeof copiedScripts>): void {
+  writeFileSync(
+    join(f.root, ".env"),
+    [
+      "DATABASE_URL=postgres://minime:minime@localhost:5432/minime",
+      "MINIME_PG_BACKEND=docker",
+      "MINIME_PG_PORT=5432",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
   executable(
     join(f.bin, "docker"),
-    `printf 'docker %s\\n' "$*" >> "$H2_TRACE"\ncase "$*" in\n  *"select 1 from pg_database"*) printf '1\\n' ;;\nesac\nexit 0`,
+    `printf 'docker %s\\n' "$*" >> "$H2_TRACE"
+case "$*" in
+  "info") exit 0 ;;
+  "compose ps -q --all db") printf 'fixture-container\\n'; exit 0 ;;
+  "compose ps -q db") printf 'fixture-container\\n'; exit 0 ;;
+  inspect*) printf '5432\\n'; exit 0 ;;
+  *"select 1 from pg_database"*) printf '1\\n'; exit 0 ;;
+esac
+exit 0`,
   );
   executable(join(f.bin, "curl"), 'exec "$H2_REAL_CURL" "$@"');
 }
@@ -664,10 +705,37 @@ test("valid up.sh uses hardened tags with pinned Host and ignores proxy/curlrc/O
   ]);
   expect(direct.seen.every((request) => request.host === `LOCALHOST.:${direct.port}`)).toBe(true);
   expect(proxy.seen).toHaveLength(0);
-  expect(`${result.out}\n${result.err}\n${readFileSync(f.trace, "utf8")}`).not.toContain(
-    "198.51.100.9",
+  const serviceTrace = readFileSync(f.trace, "utf8");
+  expect(`${result.out}\n${result.err}\n${serviceTrace}`).not.toContain("198.51.100.9");
+  expect(serviceTrace.indexOf("owner-probe")).toBeLessThan(
+    serviceTrace.indexOf("docker compose exec"),
   );
   expect(readdirSync(tempRoot)).toEqual([]);
+});
+
+test("up.sh refuses pending install state before service mutation", async () => {
+  const f = copiedScripts();
+  makeUpFixtureCommands(f);
+  writeFileSync(
+    join(f.root, ".env"),
+    [
+      "DATABASE_URL=postgres://minime:minime@localhost:5432/minime",
+      "MINIME_PG_BACKEND=docker",
+      "MINIME_PG_PORT=5432",
+      "MINIME_PG_INSTALL_PENDING=1",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+  const result = await run(["bash", join(f.scripts, "up.sh")], f.root, {
+    PATH: `${f.bin}:/usr/bin:/bin`,
+    H2_TRACE: f.trace,
+    OLLAMA_URL: "http://localhost:11434",
+  });
+  expect(result.code).toBe(40);
+  expect(result.err).toContain("installation is incomplete");
+  expect(readFileSync(f.trace, "utf8")).not.toContain("compose up");
+  expect(readFileSync(f.trace, "utf8")).not.toContain("owner-probe");
 });
 
 test.each([
@@ -735,9 +803,35 @@ test.each([307, 308])(
 );
 
 function makeInstallerFixtureCommands(f: ReturnType<typeof copiedScripts>): void {
+  writeFileSync(
+    join(f.scripts, "lib.sh"),
+    `${readFileSync(join(f.scripts, "lib.sh"), "utf8")}\nport_open(){ return 1; }\n`,
+    { mode: 0o700 },
+  );
+  executable(
+    join(f.bin, "docker"),
+    `printf 'docker %s\\n' "$*" >> "$H2_TRACE"
+state="$H2_TRACE.docker-started"
+case "$*" in
+  "info") exit 0 ;;
+  "compose ps -q --all db"|"compose ps -q db") [ ! -f "$state" ] || printf 'fixture-container\\n'; exit 0 ;;
+  "compose up -d --wait") : > "$state"; exit 0 ;;
+  inspect*) printf '5432\\n'; exit 0 ;;
+esac
+exit 0`,
+  );
   executable(
     join(f.bin, "bun"),
-    `printf 'bun %s\\n' "$*" >> "$H2_TRACE"\nif [ "\${1:-}" = "--version" ]; then printf '1.2.0\\n'; exit 0; fi\ncase "$*" in\n  *src/cli.ts*) printf '{"ok":true}\\n' ;;\nesac\nexit 0`,
+    `printf 'bun %s\\n' "$*" >> "$H2_TRACE"
+if [ "\${1:-}" = "--version" ]; then printf '1.3.13\\n'; exit 0; fi
+if [ -n "\${MINIME_BOOTSTRAP_PROBE_URL:-}" ]; then exit 0; fi
+if [ "\${1:-}" = "--no-env-file" ] && [ "\${2:-}" = "-e" ]; then
+  exec ${JSON.stringify(process.execPath)} "$@"
+fi
+case "$*" in
+  *src/cli.ts*) printf '{"ok":true}\\n' ;;
+esac
+exit 0`,
   );
   executable(
     join(f.bin, "ollama"),
@@ -819,9 +913,16 @@ test.each([
   },
 ])("server launch contract for $url", async ({ url, launched, bind, requestUrl, host }) => {
   const f = copiedScripts();
+  makeInstallerFixtureCommands(f);
   executable(
     join(f.bin, "bun"),
-    `printf 'bun %s\\n' "$*" >> "$H2_TRACE"\n[ "\${1:-}" = "--version" ] && printf '1.2.0\\n'\nexit 0`,
+    `printf 'bun %s\\n' "$*" >> "$H2_TRACE"
+if [ "\${1:-}" = "--version" ]; then printf '1.3.13\\n'; exit 0; fi
+if [ -n "\${MINIME_BOOTSTRAP_PROBE_URL:-}" ]; then exit 0; fi
+if [ "\${1:-}" = "--no-env-file" ] && [ "\${2:-}" = "-e" ]; then
+  exec ${JSON.stringify(process.execPath)} "$@"
+fi
+exit 0`,
   );
   executable(join(f.bin, "curl"), 'printf "curl %s\\n" "$*" >> "$H2_TRACE"; exit 7');
   executable(

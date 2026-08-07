@@ -30,7 +30,7 @@ describe("retypeOrgToPerson", () => {
 
   test("converts an org into a person, preserving name + alias", async () => {
     const { id: orgId } = await ensureOrg("Vera Saltmarsh", "system:extract");
-    await sql`insert into org_aliases (org_id, alias) values (${orgId}, '阎海') on conflict do nothing`;
+    await sql`insert into org_aliases (org_id, alias) values (${orgId}, 'Вера Солтмарш') on conflict do nothing`;
 
     const res = await retypeOrgToPerson(orgId, { relation: "boss" });
 
@@ -42,13 +42,13 @@ describe("retypeOrgToPerson", () => {
     const p = await resolvePerson("Vera Saltmarsh");
     expect(p?.id).toBe(res.personId);
     expect(p?.relation).toBe("boss");
-    const byAlias = await resolvePerson("阎海");
+    const byAlias = await resolvePerson("Вера Солтмарш");
     expect(byAlias?.id).toBe(res.personId);
   });
 
   test("repoints edges from the org to the new person and de-dupes collisions", async () => {
     const { id: orgId } = await ensureOrg("Vera Saltmarsh", "system:extract");
-    const { id: keepPerson } = await ensurePerson("Chen Mengwei", "agent:classifier");
+    const { id: keepPerson } = await ensurePerson("Nadia Rossi", "agent:classifier");
     const pageId = (
       await sql`insert into pages (path,title,body_md,content_hash)
       values ('p/1','t','b','h1') returning id`
@@ -90,6 +90,172 @@ describe("retypeOrgToPerson", () => {
     const all =
       await sql`select count(*)::int n from people where lower(canonical_name)='vera saltmarsh'`;
     expect(all[0]!.n).toBe(1);
+  });
+
+  test("preserves tier-2 provenance for both new and reused people", async () => {
+    const [source] = await sql`
+      insert into pages (path, title, body_md, content_hash, tier)
+      values ('retype/private-source', 'Private source', 'fixture', 'retype-private', 2)
+      returning id`;
+
+    const freshOrg = await ensureOrg("Private Fresh Person", "system:extract", "extract", {
+      tier: 2,
+      derivedFrom: source!.id,
+    });
+    await sql`
+      insert into org_aliases (org_id, alias, tier, source, created_by, derived_from)
+      values (${freshOrg.id}, 'Fresh Private Alias', 2, 'extract', 'system:extract', ${source!.id})`;
+    const fresh = await retypeOrgToPerson(freshOrg.id);
+    const [freshPerson] = await sql`
+      select tier, source, created_by, derived_from from people where id = ${fresh.personId}`;
+    expect(freshPerson).toMatchObject({
+      tier: 2,
+      source: "retype",
+      created_by: "agent:retype",
+      derived_from: source!.id,
+    });
+    const freshAliases = await sql`
+      select alias, tier, source, created_by, derived_from
+      from person_aliases where person_id = ${fresh.personId} order by alias`;
+    expect(freshAliases.map((row) => ({ ...row }))).toEqual([
+      {
+        alias: "Fresh Private Alias",
+        tier: 2,
+        source: "retype",
+        created_by: "agent:retype",
+        derived_from: source!.id,
+      },
+      {
+        alias: "Private Fresh Person",
+        tier: 2,
+        source: "retype",
+        created_by: "agent:retype",
+        derived_from: source!.id,
+      },
+    ]);
+
+    const reusedPerson = await ensurePerson("Private Reused Person", "human");
+    const reusedOrg = await ensureOrg("Private Reused Person", "system:extract", "extract", {
+      tier: 2,
+      derivedFrom: source!.id,
+    });
+    const reused = await retypeOrgToPerson(reusedOrg.id);
+    expect(reused.personId).toBe(reusedPerson.id);
+    const [reusedAfter] = await sql`
+      select tier, derived_from from people where id = ${reused.personId}`;
+    expect(reusedAfter).toMatchObject({ tier: 2, derived_from: source!.id });
+    const aliases = await sql`
+      select tier from person_aliases where person_id in (${fresh.personId}, ${reused.personId})`;
+    expect(aliases.length).toBeGreaterThanOrEqual(3);
+    expect(aliases.every((row) => row.tier === 2)).toBe(true);
+  });
+
+  test("mixed alias namespaces survive retype without downgrading the readable alias", async () => {
+    const existing = await ensurePerson("Mixed Namespace Retype", "human");
+    const sharedAlias = "Mixed Namespace Shared Alias";
+    await sql`
+      insert into person_aliases (person_id, alias, tier, source, created_by)
+      values (${existing.id}, ${sharedAlias}, 1, 'manual', 'human')`;
+    const org = await ensureOrg("Mixed Namespace Retype", "system:extract");
+    const [source] = await sql`
+      insert into pages (path, title, body_md, content_hash, tier)
+      values ('retype/mixed-namespace.md', 'Mixed namespace', 'fixture',
+              'retype-mixed-namespace', 0) returning id`;
+    await sql`
+      insert into org_aliases (org_id, alias, tier, source, created_by, derived_from)
+      values (${org.id}, ${sharedAlias}, 0, 'quarantine', 'owner:test', ${source!.id})`;
+
+    const result = await retypeOrgToPerson(org.id);
+    expect(result.personId).toBe(existing.id);
+    const aliases = await sql`
+      select tier, privacy_namespace, source, created_by, derived_from
+      from person_aliases
+      where person_id = ${existing.id} and alias = ${sharedAlias}
+      order by tier`;
+    expect(aliases.map((row) => ({ ...row }))).toEqual([
+      {
+        tier: 0,
+        privacy_namespace: 0,
+        source: "retype",
+        created_by: "agent:retype",
+        derived_from: source!.id,
+      },
+      {
+        tier: 1,
+        privacy_namespace: 1,
+        source: "manual",
+        created_by: "human",
+        derived_from: existing.id,
+      },
+    ]);
+    expect((await resolvePerson(sharedAlias))?.id).toBe(existing.id);
+  });
+
+  test("a tier-zero org cannot reuse a readable person through that person's tier-zero alias", async () => {
+    const readable = await ensurePerson("Readable Namespace Keeper", "human");
+    const hiddenName = "Hidden Retype Namespace";
+    await sql`
+      insert into person_aliases (person_id, alias, tier, source, created_by)
+      values (${readable.id}, ${hiddenName}, 0, 'quarantine', 'owner:test')`;
+    const [org] = await sql`
+      insert into orgs (canonical_name, tier, source, created_by)
+      values (${hiddenName}, 0, 'quarantine', 'owner:test') returning id`;
+
+    const result = await retypeOrgToPerson(org!.id);
+    expect(result.personId).not.toBe(readable.id);
+    const [kept] = await sql`select tier from people where id = ${readable.id}`;
+    const [quarantined] = await sql`select tier from people where id = ${result.personId}`;
+    expect(kept!.tier).toBe(1);
+    expect(quarantined!.tier).toBe(0);
+  });
+
+  test("collision cleanup keeps tier-zero evidence even when it is newer", async () => {
+    const existingPerson = await ensurePerson("Quarantined Retype", "human");
+    await sql`update people set tier = 0 where id = ${existingPerson.id}`;
+    const [org] = await sql`
+      insert into orgs (canonical_name, tier, source, created_by, derived_from)
+      values ('Quarantined Retype', 0, 'quarantine', 'owner:test', gen_random_uuid())
+      returning id, derived_from`;
+    await sql`
+      insert into org_aliases (org_id, alias, tier, source, created_by, derived_from)
+      values (${org!.id}, 'Quarantined Retype', 0, 'quarantine', 'owner:test',
+              ${org!.derived_from})`;
+    const [graphSource] = await sql`
+      insert into pages (path, title, body_md, content_hash, tier)
+      values ('retype/collision.md', 'Collision', 'fixture', 'retype-collision', 1)
+      returning id`;
+    const [tierZeroSource] = await sql`
+      insert into pages (path, title, body_md, content_hash, tier)
+      values ('retype/collision-zero.md', 'Zero source', 'fixture',
+              'retype-collision-zero', 0) returning id`;
+    const [tierTwoSource] = await sql`
+      insert into pages (path, title, body_md, content_hash, tier)
+      values ('retype/collision-two.md', 'Two source', 'fixture',
+              'retype-collision-two', 2) returning id`;
+    await sql`
+      insert into edges
+        (src_type, src_id, rel, dst_type, dst_id, source_table, source_id,
+         extracted_by, tier, source, created_by, derived_from, created_at)
+      values
+        ('page', ${graphSource!.id}, 'mentions', 'person', ${existingPerson.id},
+         'pages', ${tierTwoSource!.id}, 'system:extract', 2, 'extract',
+         'system:extract', ${tierTwoSource!.id}, '2026-01-01T00:00:00Z'),
+        ('page', ${graphSource!.id}, 'mentions', 'org', ${org!.id},
+         'pages', ${tierZeroSource!.id}, 'system:extract', 0, 'extract',
+         'system:extract', ${tierZeroSource!.id}, '2026-01-02T00:00:00Z')`;
+
+    const result = await retypeOrgToPerson(org!.id);
+    expect(result.personId).toBe(existingPerson.id);
+    const [person] = await sql`
+      select tier, derived_from from people where id = ${existingPerson.id}`;
+    expect(person).toEqual({ tier: 0, derived_from: org!.derived_from });
+    const edges = await sql`
+      select tier, source_id, derived_from from edges
+      where src_type = 'page' and src_id = ${graphSource!.id}
+        and rel = 'mentions' and dst_type = 'person' and dst_id = ${existingPerson.id}`;
+    expect(edges.map((row) => ({ ...row }))).toEqual([
+      { tier: 0, source_id: tierZeroSource!.id, derived_from: tierZeroSource!.id },
+    ]);
   });
 
   test("is reversible-friendly: org row is retired (kept), not hard-deleted", async () => {
@@ -139,26 +305,26 @@ describe("detectMistypedEntities (read-only screen)", () => {
   });
 
   test("does NOT flag a legitimate human-confirmed org", async () => {
-    await ensureOrg("Vazyme", "agent:mcp");
+    await ensureOrg("Fjordsonics", "agent:mcp");
     const flags = await detectMistypedEntities();
-    expect(flags.find((f) => f.name === "Vazyme")).toBeUndefined();
+    expect(flags.find((f) => f.name === "Fjordsonics")).toBeUndefined();
   });
 
   test("does NOT flag a single-token extractor org (brand-vs-surname ambiguity)", async () => {
-    // "Vazyme"/"Fapon" are real biotech brands the extractor mints as orgs; a single
+    // "Fjordsonics"/"Glasswing" are fictional brands the extractor mints as orgs; a single
     // capitalized token must not be treated as a person-name false positive.
-    await ensureOrg("Fapon", "system:extract");
+    await ensureOrg("Glasswing", "system:extract");
     const flags = await detectMistypedEntities();
-    expect(flags.find((f) => f.name === "Fapon")).toBeUndefined();
+    expect(flags.find((f) => f.name === "Glasswing")).toBeUndefined();
   });
 
   test("does NOT flag a person-looking org that >= 2 distinct people work_at (workplace signal)", async () => {
-    // "Kiddie Winkie" looks like "First Last" but is a real multi-person workplace.
+    // "Marble Lantern" looks like "First Last" but is a fictional multi-person workplace.
     // An org that is the works_at destination of 2+ distinct people is never a person,
     // so the screen excludes it automatically — no curation needed.
-    const { id: orgId } = await ensureOrg("Kiddie Winkie", "system:extract");
-    const { id: p1 } = await ensurePerson("Mia Liu", "system:extract");
-    const { id: p2 } = await ensurePerson("Noa Tan", "system:extract");
+    const { id: orgId } = await ensureOrg("Marble Lantern", "system:extract");
+    const { id: p1 } = await ensurePerson("Priya Raghunathan", "system:extract");
+    const { id: p2 } = await ensurePerson("Nadia Rossi", "system:extract");
     for (const pid of [p1, p2]) {
       await sql`insert into edges (src_type,src_id,rel,dst_type,dst_id,extracted_by)
         values ('person',${pid},'works_at','org',${orgId},'system:extract')`;
@@ -169,9 +335,9 @@ describe("detectMistypedEntities (read-only screen)", () => {
 
   test("STILL flags a person-looking org that only ONE person works_at (no over-suppression)", async () => {
     // The workplace signal needs >= 2 distinct people; a single employee is structurally
-    // identical to a genuinely mistyped person ("Bert Vogelstein"), so it must still surface.
-    const { id: orgId } = await ensureOrg("Bert Vogelstein", "system:extract");
-    const { id: pid } = await ensurePerson("Heng Liu", "system:extract");
+    // identical to a genuinely mistyped person ("Sigrid Halvorsen"), so it must still surface.
+    const { id: orgId } = await ensureOrg("Sigrid Halvorsen", "system:extract");
+    const { id: pid } = await ensurePerson("Priya Raghunathan", "system:extract");
     await sql`insert into edges (src_type,src_id,rel,dst_type,dst_id,extracted_by)
       values ('person',${pid},'works_at','org',${orgId},'system:extract')`;
     const flags = await detectMistypedEntities();
@@ -179,13 +345,13 @@ describe("detectMistypedEntities (read-only screen)", () => {
   });
 
   test("parseKnownOrgs: comments/blanks ignored, case-folded exact names (allow-list)", () => {
-    // The irreducible semantic case — a single-employee institution ("Johns Hopkins") that
-    // IS an org but looks like a person — is silenced by the owner's known-orgs.txt allow-list.
+    // The irreducible semantic case — a single-employee fictional institution
+    // ("Marble Lantern") that looks like a person — is silenced by known-orgs.txt.
     const set = parseKnownOrgs(
-      "# header\n\nJohns Hopkins\n  Morgan Stanley  \n# trailing comment\n",
+      "# header\n\nMarble Lantern\n  Cobalt Meadow  \n# trailing comment\n",
     );
-    expect([...set].sort()).toEqual(["johns hopkins", "morgan stanley"]);
-    expect(set.has("johns hopkins")).toBe(true);
-    expect(set.has("Johns Hopkins".toLowerCase())).toBe(true);
+    expect([...set].sort()).toEqual(["cobalt meadow", "marble lantern"]);
+    expect(set.has("marble lantern")).toBe(true);
+    expect(set.has("Marble Lantern".toLowerCase())).toBe(true);
   });
 });

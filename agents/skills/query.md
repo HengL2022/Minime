@@ -34,11 +34,16 @@ list of search hits. This is the default skill for any lookup.
    structured. Lead with the answer, not the methodology.
 4. **Disclose.** End with what the database does *not* know, one line: combine the envelope
    `gaps`, tier locks you hit ("2 journal entries matched but are tier-2 locked — say the
-   word and I'll request an unlock"), and missing periods.
+   word and I'll request an unlock"), and missing periods. After an explicit yes, call
+   `minime_unlock`, give the owner its returned request ID and local approval command, wait for
+   them to approve it in their terminal, then re-read. Approval is time-boxed, loudly audited,
+   and bound to the current MCP connection; a reconnect is locked again. Tier 0 is never
+   readable.
 
 ## Anti-patterns
 
 - Dumping snippets and calling it an answer.
 - Re-running the same query verbatim hoping for different hits.
-- Requesting `minime_unlock` without asking the owner first.
+- Requesting `minime_unlock` without asking the owner first, or treating a pending request as
+  approval.
 - Estimating a number because the metric query felt like overkill.

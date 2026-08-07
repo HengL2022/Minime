@@ -6,8 +6,9 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { type AuditPayload, assertAuditPayloadForVerb, auditPayload } from "../util/audit-payload";
 import { cjkFold, isCjkStopToken } from "../util/cjk";
-import { localDateStr, now } from "../util/clock";
+import { configuredTimeZone, localDateStr, now } from "../util/clock";
 import {
   COMPILED_NOTE_MARKER,
   COMPILED_NOTE_SOURCE,
@@ -15,14 +16,17 @@ import {
   type CompiledNoteIdentity,
   recognizeCompiledNote,
 } from "../util/compiled-note-archive";
-import { config } from "../util/config";
+import { type ProviderName, assertTier2UnlockMaxMinutes, config } from "../util/config";
+import { type MetricRollup, metricDateString } from "../util/metric-rollup";
 import {
   type DbExecutor,
+  type DbPool,
   db,
   hasDbTransaction,
   withDbTransaction,
   withReservedDb,
   withRuntimeDbTransaction,
+  withRuntimeReservedDb,
 } from "./client";
 
 export type ParentType =
@@ -61,15 +65,186 @@ export function parentTable(type: string): { table: string; titleCol: string } {
   return p;
 }
 
+// ---------------------------------------------------------------- owner-only migrations & restored-schema posture
+
+export interface RestoreSchemaStructurePosture {
+  readonly extensions: boolean;
+  readonly coreRelations: boolean;
+  readonly migrationLedger: boolean;
+  readonly appendOnlyAudit: boolean;
+  readonly tierBoundary: boolean;
+  readonly inboxIdentity: boolean;
+}
+
+interface RestoreSchemaBaseRow {
+  extensions_ok: boolean;
+  core_relations_ok: boolean;
+  migration_ledger_ok: boolean;
+}
+
+interface RestoreSchemaSafetyRow {
+  append_only_audit_ok: boolean;
+  tier_boundary_ok: boolean;
+  inbox_identity_ok: boolean;
+}
+
+export async function connectedAdminDatabaseName(executor: DbExecutor): Promise<string> {
+  const rows = await executor`select current_database() as name`;
+  const name = rows.length === 1 ? rows[0]?.name : undefined;
+  if (typeof name !== "string") throw new Error("migration_context_target");
+  return name;
+}
+
+export async function schemaMigrationNames(executor: DbExecutor): Promise<string[]> {
+  return (await executor`select name from schema_migrations order by name`).map((row) =>
+    String(row.name),
+  );
+}
+
+export async function ensureSchemaMigrationLedger(executor: DbExecutor): Promise<void> {
+  await executor`create table if not exists schema_migrations (
+    name text primary key, applied_at timestamptz not null default now()
+  )`;
+}
+
+/** Execute one checked-out migration and ledger insertion as one owner transaction. */
+export async function applyCheckedOutMigration(
+  executor: DbPool,
+  name: string,
+  body: string,
+): Promise<void> {
+  await executor.begin(async (tx) => {
+    await tx.unsafe(body);
+    await tx`insert into schema_migrations (name) values (${name})`;
+  });
+}
+
+async function inspectRestoreSchemaBase(executor: DbExecutor): Promise<RestoreSchemaBaseRow> {
+  const rows = await executor<[RestoreSchemaBaseRow]>`select
+    (select count(*) = 2 from pg_extension where extname in ('pgcrypto', 'vector'))
+      as extensions_ok,
+    (select count(*) = 8 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+      where n.nspname = 'public' and c.relkind in ('r', 'p')
+        and c.relname in ('schema_migrations', 'events', 'tasks', 'people',
+          'journal_entries', 'chunks', 'transactions', 'health_samples')) as core_relations_ok,
+    ((select count(*) = 2 and bool_and(a.attnotnull)
+      from pg_attribute a join pg_class c on c.oid = a.attrelid
+      join pg_namespace n on n.oid = c.relnamespace
+      where n.nspname = 'public' and c.relname = 'schema_migrations'
+        and a.attname in ('name', 'applied_at') and not a.attisdropped)
+      and exists (select 1 from pg_constraint con
+        join pg_class c on c.oid = con.conrelid
+        join pg_namespace n on n.oid = c.relnamespace
+        join pg_attribute a on a.attrelid = c.oid and a.attname = 'name'
+        where n.nspname = 'public' and c.relname = 'schema_migrations'
+          and con.contype = 'p' and cardinality(con.conkey) = 1
+          and con.conkey[1] = a.attnum)) as migration_ledger_ok`;
+  return rows[0] ?? { extensions_ok: false, core_relations_ok: false, migration_ledger_ok: false };
+}
+
+async function inspectRestoreSchemaSafety(executor: DbExecutor): Promise<RestoreSchemaSafetyRow> {
+  // pg_trigger.tgtype is a bitmask: row=1, before=2, delete=8, update=16, truncate=32.
+  const rows = await executor<[RestoreSchemaSafetyRow]>`select
+    (select count(*) = 2 and bool_and(
+        t.tgenabled = 'O' and pns.nspname = 'public' and p.proname = 'events_append_only'
+        and p.pronargs = 0 and p.prorettype = 'trigger'::regtype
+        and t.tgfoid = to_regprocedure('public.events_append_only()')
+        and t.tgqual is null and t.tgattr::text = '' and t.tgnargs = 0
+        and t.tgoldtable is null and t.tgnewtable is null
+        and ((t.tgname = 'events_no_update' and t.tgtype = 27)
+          or (t.tgname = 'events_no_truncate' and t.tgtype = 34)))
+      from pg_trigger t join pg_class c on c.oid = t.tgrelid
+      join pg_namespace n on n.oid = c.relnamespace
+      join pg_proc p on p.oid = t.tgfoid join pg_namespace pns on pns.oid = p.pronamespace
+      where n.nspname = 'public' and c.relname = 'events' and not t.tgisinternal
+        and t.tgname in ('events_no_update', 'events_no_truncate'))
+      as append_only_audit_ok,
+    ((select count(*) = 4 and bool_and(c.relrowsecurity) from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public'
+        and c.relname in ('journal_entries', 'inbox_items', 'chunks', 'edges'))
+      and not has_table_privilege('minime_app', 'public.transactions', 'select')
+      and not has_table_privilege('minime_app', 'public.health_samples', 'select')
+      and not has_table_privilege('minime_engineer_ro', 'public.transactions', 'select')
+      and not has_table_privilege('minime_engineer_ro', 'public.health_samples', 'select'))
+      as tier_boundary_ok,
+    ((select count(*) = 4 from pg_attribute a join pg_class c on c.oid = a.attrelid
+      join pg_namespace n on n.oid = c.relnamespace
+      where n.nspname = 'public' and c.relname = 'inbox_items'
+        and a.attname in ('content_hash', 'archive_path', 'claim_token', 'claimed_at')
+        and not a.attisdropped)
+      and exists (select 1 from pg_class idx
+        join pg_namespace idxns on idxns.oid = idx.relnamespace
+        join pg_index i on i.indexrelid = idx.oid
+        join pg_class tbl on tbl.oid = i.indrelid
+        join pg_namespace tblns on tblns.oid = tbl.relnamespace
+        join pg_attribute raw on raw.attrelid = tbl.oid and raw.attname = 'raw_path'
+        join pg_attribute hash on hash.attrelid = tbl.oid and hash.attname = 'content_hash'
+        where idxns.nspname = 'public' and idx.relname = 'inbox_items_raw_path_content_hash_uidx'
+          and tblns.nspname = 'public' and tbl.relname = 'inbox_items'
+          and i.indisunique and i.indisvalid and i.indisready and i.indislive
+          and i.indnkeyatts = 2 and i.indnatts = 2 and i.indexprs is null
+          and i.indkey[0] = raw.attnum and i.indkey[1] = hash.attnum
+          and pg_get_expr(i.indpred, i.indrelid) = '(content_hash IS NOT NULL)')
+      and exists (select 1 from pg_constraint con
+        join pg_class idx on idx.oid = con.conindid
+        join pg_namespace idxns on idxns.oid = idx.relnamespace
+        join pg_index i on i.indexrelid = idx.oid
+        join pg_class tbl on tbl.oid = con.conrelid
+        join pg_namespace n on n.oid = tbl.relnamespace
+        join pg_attribute archive on archive.attrelid = tbl.oid and archive.attname = 'archive_path'
+        where n.nspname = 'public' and tbl.relname = 'inbox_items'
+          and idxns.nspname = 'public' and idx.relname = 'inbox_items_archive_path_key'
+          and con.conname = 'inbox_items_archive_path_key' and con.contype = 'u'
+          and con.convalidated and i.indisunique and i.indisvalid and i.indisready and i.indislive
+          and i.indnkeyatts = 1 and i.indnatts = 1
+          and i.indexprs is null and i.indpred is null and i.indkey[0] = archive.attnum
+          and cardinality(con.conkey) = 1 and con.conkey[1] = archive.attnum)
+      and exists (select 1 from pg_trigger t join pg_class c on c.oid = t.tgrelid
+        join pg_namespace n on n.oid = c.relnamespace
+        join pg_proc p on p.oid = t.tgfoid join pg_namespace pns on pns.oid = p.pronamespace
+        where n.nspname = 'public' and c.relname = 'inbox_items' and not t.tgisinternal
+          and t.tgenabled = 'O' and t.tgname = 'inbox_capture_identity_immutable'
+          and t.tgtype = 19 and pns.nspname = 'public'
+          and p.proname = 'enforce_inbox_capture_identity_immutable'
+          and p.pronargs = 0 and p.prorettype = 'trigger'::regtype
+          and t.tgfoid = to_regprocedure('public.enforce_inbox_capture_identity_immutable()')
+          and t.tgqual is null and t.tgattr::text = '' and t.tgnargs = 0
+          and t.tgoldtable is null and t.tgnewtable is null))
+      as inbox_identity_ok`;
+  return (
+    rows[0] ?? { append_only_audit_ok: false, tier_boundary_ok: false, inbox_identity_ok: false }
+  );
+}
+
+export async function inspectRestoreSchemaStructure(
+  executor: DbExecutor,
+): Promise<RestoreSchemaStructurePosture> {
+  const base = await inspectRestoreSchemaBase(executor);
+  const safety = await inspectRestoreSchemaSafety(executor);
+  return {
+    extensions: base.extensions_ok === true,
+    coreRelations: base.core_relations_ok === true,
+    migrationLedger: base.migration_ledger_ok === true,
+    appendOnlyAudit: safety.append_only_audit_ok === true,
+    tierBoundary: safety.tier_boundary_ok === true,
+    inboxIdentity: safety.inbox_identity_ok === true,
+  };
+}
+
 // ---------------------------------------------------------------- tiers & audit
 
 export type AccessActor = string | null | undefined;
 
-/** Execute one MCP handler in an actor-local transaction. */
-export async function withActorDbSession<T>(actor: string, work: () => Promise<T>): Promise<T> {
+/** Execute one MCP handler in an actor- and connection-local transaction. */
+export async function withActorDbSession<T>(
+  actor: string,
+  work: () => Promise<T>,
+  sessionId?: string,
+): Promise<T> {
   if (hasDbTransaction()) throw new Error("nested_actor_scope");
   return withRuntimeDbTransaction(async (tx) => {
     await tx`select set_config('minime.actor', ${actor}, true)`;
+    await tx`select set_config('minime.session_id', ${sessionId ?? ""}, true)`;
     return work();
   });
 }
@@ -114,7 +289,7 @@ function ownershipNameMatches(text: string, rawName: string): boolean {
   return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, "u").test(haystack);
 }
 
-export async function allowedTier(actor?: AccessActor): Promise<1 | 2> {
+export async function allowedTier(actor?: AccessActor, sessionId?: string): Promise<1 | 2> {
   const readTier = async (): Promise<1 | 2> => {
     const [row] = await db()`select app_allowed_tier()::int as tier`;
     const tier = Number(row?.tier);
@@ -124,22 +299,64 @@ export async function allowedTier(actor?: AccessActor): Promise<1 | 2> {
   if (actor !== undefined && !hasDbTransaction()) {
     return withDbTransaction(async (tx) => {
       await tx`select set_config('minime.actor', ${actor ?? ""}, true)`;
+      await tx`select set_config('minime.session_id', ${sessionId ?? ""}, true)`;
       return readTier();
     });
   }
   return readTier();
 }
 
-export async function insertUnlock(
-  minutes: number,
-  via: string,
-): Promise<{ id: string; expires_at: Date }> {
-  const expires = new Date(now().getTime() + minutes * 60_000);
-  const id = crypto.randomUUID();
-  await db()`
-    insert into session_unlocks (id, scope, granted_at, expires_at, granted_via)
-    values (${id}, 'tier2', ${now()}, ${expires}, ${via})`;
-  return { id, expires_at: expires };
+export async function requestTier2Unlock(minutes: number): Promise<{ id: string }> {
+  const [row] = await db()`
+    select app_request_tier2_unlock(${minutes}::smallint)::text as id`;
+  if (!row || typeof row.id !== "string") throw new Error("unlock_request_failed");
+  return { id: row.id };
+}
+
+export interface ApprovedTier2Unlock {
+  id: string;
+  minutes: number;
+  expires_at: Date;
+}
+
+export const TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES = 10;
+
+/** Approve one pending request inside an owner/control-plane transaction. */
+export async function approveTier2UnlockRequest(
+  id: string,
+  approvedBy = "owner:cli",
+): Promise<ApprovedTier2Unlock> {
+  assertTier2UnlockMaxMinutes(config.tier2UnlockMaxMinutes);
+  const [row] = await db()`
+    with approval_clock as (select clock_timestamp() as at)
+    update session_unlocks u
+    set approved_at = approval_clock.at,
+        approved_by = ${approvedBy},
+        expires_at = approval_clock.at + make_interval(mins => u.requested_minutes::int)
+    from approval_clock
+    where u.id = ${id}::uuid
+      and u.scope = 'tier2'
+      and u.approved_at is null
+      and u.approved_by is null
+      and u.expires_at is null
+      and u.requested_at >= approval_clock.at
+          - make_interval(mins => ${TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES})
+      and u.requested_minutes between 1 and ${config.tier2UnlockMaxMinutes}
+    returning u.id::text as id, u.requested_minutes::int as minutes, u.expires_at`;
+  if (!row) throw new Error("unlock_request_not_approvable");
+  const approved = {
+    id: String(row.id),
+    minutes: Number(row.minutes),
+    expires_at: new Date(row.expires_at),
+  };
+  await logEvent({
+    actor: approvedBy,
+    verb: "unlock:tier2:approved",
+    entityType: "session_unlock",
+    entityId: approved.id,
+    payload: auditPayload.tier2Unlock({ requestId: approved.id, minutes: approved.minutes }),
+  });
+  return approved;
 }
 
 export async function logEvent(e: {
@@ -147,15 +364,100 @@ export async function logEvent(e: {
   verb: string;
   entityType?: string;
   entityId?: string;
-  payload?: unknown;
+  payload: AuditPayload;
 }): Promise<string> {
+  assertAuditPayloadForVerb(e.verb, e.payload);
+  const hasEntityType = e.entityType !== undefined;
+  const hasEntityId = e.entityId !== undefined;
+  if (hasEntityType !== hasEntityId) throw new Error("invalid_audit_payload");
+  const entityIdIsUuid =
+    typeof e.entityId === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(e.entityId);
+  const expectsUnlock = e.verb.startsWith("unlock:tier2:");
+  const expectsInbox = e.verb.startsWith("inbox:");
+  if (
+    (expectsUnlock &&
+      (e.entityType !== "session_unlock" ||
+        !entityIdIsUuid ||
+        e.entityId !== e.payload.request_id)) ||
+    (expectsInbox && (e.entityType !== "inbox_item" || !entityIdIsUuid)) ||
+    (!expectsUnlock && !expectsInbox && (hasEntityType || hasEntityId))
+  ) {
+    throw new Error("invalid_audit_payload");
+  }
   const [row] = await db()`
     insert into events (at, actor, verb, entity_type, entity_id, payload)
     values (${now()}, ${e.actor}, ${e.verb}, ${e.entityType ?? null}, ${e.entityId ?? null},
-            ${db().json((e.payload as any) ?? {})})
+            ${db().json(e.payload as any)})
     returning id::text as id`;
   if (!row || typeof row.id !== "string") throw new Error("event insert returned no id");
   return row.id;
+}
+
+type EgressKind = "embed" | "classify";
+
+async function insertDurableEgressEvent(
+  verb: `egress:${EgressKind}` | `egress:${EgressKind}:outcome`,
+  payload: AuditPayload,
+): Promise<string> {
+  assertAuditPayloadForVerb(verb, payload);
+  return withRuntimeReservedDb(async (connection) => {
+    if (verb.endsWith(":outcome")) {
+      const intentVerb = verb === "egress:embed:outcome" ? "egress:embed" : "egress:classify";
+      const [row] = await connection`
+        insert into events (at, actor, verb, payload)
+        select ${now()}, 'system:llm', ${verb}, ${connection.json(payload as any)}
+        where exists (
+          select 1 from events
+          where id = ${String(payload.intent_event_id)}::bigint and verb = ${intentVerb}
+        )
+        returning id::text as id`;
+      if (!row || typeof row.id !== "string") throw new Error("egress_outcome_intent_invalid");
+      return row.id;
+    }
+    const [row] = await connection`
+      insert into events (at, actor, verb, payload)
+      values (${now()}, 'system:llm', ${verb}, ${connection.json(payload as any)})
+      returning id::text as id`;
+    if (!row || typeof row.id !== "string") throw new Error("event insert returned no id");
+    return row.id;
+  });
+}
+
+/** Persist cloud-egress intent outside any caller transaction before bytes leave the machine. */
+export async function logEgressIntent(input: {
+  kind: EgressKind;
+  provider: ProviderName;
+  model: string;
+  items: number;
+  routeTier?: 1 | 2;
+}): Promise<string> {
+  return insertDurableEgressEvent(
+    `egress:${input.kind}`,
+    auditPayload.llmEgress({
+      kind: input.kind,
+      provider: input.provider,
+      model: input.model,
+      items: input.items,
+      ...(input.routeTier === undefined ? {} : { routeTier: input.routeTier }),
+    }),
+  );
+}
+
+/** Persist the fixed outcome independently as well; never include provider response text. */
+export async function logEgressOutcome(input: {
+  kind: EgressKind;
+  intentEventId: string;
+  status: "succeeded" | "failed";
+}): Promise<string> {
+  return insertDurableEgressEvent(
+    `egress:${input.kind}:outcome`,
+    auditPayload.llmEgressOutcome({
+      kind: input.kind,
+      intentEventId: input.intentEventId,
+      status: input.status,
+    }),
+  );
 }
 
 export async function eventsSince(since: Date): Promise<any[]> {
@@ -350,13 +652,15 @@ export async function entitiesNamedIn(query: string, actor?: AccessActor): Promi
     select distinct p.id from people p
     left join person_aliases a on a.person_id = p.id
     where (${q} like '%' || lower(p.canonical_name) || '%'
-       or (a.alias is not null and ${q} like '%' || lower(a.alias) || '%'))
+       or (a.alias is not null and a.tier >= 1 and a.tier <= ${allowed}
+           and ${q} like '%' || lower(a.alias) || '%'))
       and p.tier >= 1 and p.tier <= ${allowed}`;
   const orgs = await db()`
     select distinct o.id from orgs o
     left join org_aliases a on a.org_id = o.id
     where (${q} like '%' || lower(o.canonical_name) || '%'
-       or (a.alias is not null and ${q} like '%' || lower(a.alias) || '%'))
+       or (a.alias is not null and a.tier >= 1 and a.tier <= ${allowed}
+           and ${q} like '%' || lower(a.alias) || '%'))
       and o.tier >= 1 and o.tier <= ${allowed}`;
   return [
     ...people.map((r: any) => ({ type: "person" as const, id: r.id })),
@@ -422,37 +726,73 @@ export async function resolvePerson(name: string, actor?: AccessActor): Promise<
   const rows = await db()`
     select distinct p.* from people p
     left join person_aliases a on a.person_id = p.id
-    where (lower(p.canonical_name) = lower(${name}) or lower(a.alias) = lower(${name}))
+    where (lower(p.canonical_name) = lower(${name})
+       or (a.tier >= 1 and a.tier <= ${allowed} and lower(a.alias) = lower(${name})))
       and p.tier >= 1 and p.tier <= ${allowed}
     limit 1`;
   return rows[0] ?? null;
 }
 
-// Internal by-id lookup for the extractor's works_at guard. NOT tier-gated: the system
-// extractor (system:extract) needs the stored relation of a person it just resolved to
-// decide whether a works_at edge is legitimate. Returns only structural fields, never
-// tier-2 free text. Do not expose through MCP tools.
-export async function personById(
-  id: string,
-): Promise<{ id: string; canonical_name: string; relation: string | null } | null> {
-  const rows = await db()`
-    select id, canonical_name, relation from people where id = ${id} limit 1`;
-  return (rows[0] as any) ?? null;
+export interface EntityDerivationOptions {
+  tier?: 1 | 2;
+  derivedFrom?: string | null;
+}
+
+export interface AliasDerivationOptions extends EntityDerivationOptions {
+  createdBy?: string;
+  source?: string;
+}
+
+function entityDerivationTier(tier: number | undefined): 1 | 2 {
+  if (tier === undefined) return 1;
+  if (tier === 1 || tier === 2) return tier;
+  throw new Error("entity tier must be 1 or 2");
+}
+
+/** Exact structural guard for extraction; returns no hidden person fields. */
+export async function personHasNonWorkingRelation(id: string): Promise<boolean> {
+  const [row] = await db()`
+    select person_has_nonworking_relation(${id}::uuid) as blocked`;
+  return row?.blocked === true;
+}
+
+/** Exact structural guard for auto-routing; returns no hidden org fields. */
+export async function exactActiveOrgExists(name: string): Promise<boolean> {
+  const [row] = await db()`select exact_active_org_exists(${name}) as exists`;
+  return row?.exists === true;
 }
 
 export async function ensurePerson(
   name: string,
   createdBy: string,
   source = "capture",
+  derivation: EntityDerivationOptions = {},
 ): Promise<{ id: string; created: boolean }> {
-  const existing = await resolvePerson(name);
-  if (existing) return { id: existing.id, created: false };
+  const tier = entityDerivationTier(derivation.tier);
   const [row] = await db()`
-    insert into people (canonical_name, created_by, source)
-    values (${name}, ${createdBy}, ${source}) returning id`;
-  await db()`insert into person_aliases (person_id, alias) values (${row!.id}, ${name})
-            on conflict do nothing`;
-  return { id: row!.id, created: true };
+    select entity_id as id, was_created as created
+    from resolve_or_promote_entity(
+      'person', ${name}, ${tier}::smallint, ${createdBy}, ${source},
+      ${derivation.derivedFrom ?? null}::uuid
+    )`;
+  if (!row) throw new Error("entity_resolver_returned_no_row");
+  return { id: row.id as string, created: row.created as boolean };
+}
+
+export async function ensureExtractedPerson(
+  name: string,
+  createdBy: string,
+  derivation: EntityDerivationOptions,
+): Promise<{ id: string; created: boolean }> {
+  const tier = entityDerivationTier(derivation.tier);
+  const [row] = await db()`
+    select entity_id as id, was_created as created
+    from resolve_or_promote_extracted_person(
+      ${name}, ${tier}::smallint, ${createdBy}, 'extract',
+      ${derivation.derivedFrom ?? null}::uuid
+    )`;
+  if (!row) throw new Error("entity_resolver_returned_no_row");
+  return { id: row.id as string, created: row.created as boolean };
 }
 
 // Owner-relation + free-text context (onboarding interview); never blanks existing values.
@@ -476,20 +816,27 @@ export async function setDecisionOutcome(
              where id = ${id}`;
 }
 
-export async function addAlias(personId: string, alias: string): Promise<void> {
-  await db()`insert into person_aliases (person_id, alias) values (${personId}, ${alias})
-            on conflict do nothing`;
+export async function addAlias(
+  personId: string,
+  alias: string,
+  derivation: AliasDerivationOptions = {},
+): Promise<void> {
+  const tier = entityDerivationTier(derivation.tier);
+  await db()`select upsert_derived_alias(
+    'person', ${personId}::uuid, ${alias}, ${tier}::smallint,
+    ${derivation.createdBy ?? "human"}, ${derivation.source ?? "manual"},
+    ${derivation.derivedFrom ?? null}::uuid
+  )`;
 }
 
 export async function touchLastContact(personId: string, at: Date): Promise<void> {
-  await db()`update people set last_contact_at = greatest(coalesce(last_contact_at, ${at}), ${at})
-            where id = ${personId}`;
+  await db()`select touch_person_last_contact(${personId}::uuid, ${at}::timestamptz)`;
 }
 
 // Owner-relation ("my physiotherapist") detected by extraction: fill only if empty —
 // a human-set relation is never overwritten by a rule.
 export async function setPersonRelationIfNull(personId: string, relation: string): Promise<void> {
-  await db()`update people set relation = ${relation} where id = ${personId} and relation is null`;
+  await db()`select set_person_relation_if_null(${personId}::uuid, ${relation})`;
 }
 
 // Extraction may upgrade "Tomasz" to "Tomasz Wójcik" once the fuller form is seen.
@@ -510,7 +857,8 @@ export async function resolveOrg(name: string, actor?: AccessActor): Promise<any
   const rows = await db()`
     select distinct o.* from orgs o
     left join org_aliases a on a.org_id = o.id
-    where (lower(o.canonical_name) = lower(${name}) or lower(a.alias) = lower(${name}))
+    where (lower(o.canonical_name) = lower(${name})
+       or (a.tier >= 1 and a.tier <= ${allowed} and lower(a.alias) = lower(${name})))
       and o.tier >= 1 and o.tier <= ${allowed}
       and o.retired_at is null
     limit 1`;
@@ -521,20 +869,47 @@ export async function ensureOrg(
   name: string,
   createdBy: string,
   source = "extract",
+  derivation: EntityDerivationOptions = {},
 ): Promise<{ id: string; created: boolean }> {
-  const existing = await resolveOrg(name);
-  if (existing) return { id: existing.id, created: false };
+  const tier = entityDerivationTier(derivation.tier);
   const [row] = await db()`
-    insert into orgs (canonical_name, created_by, source)
-    values (${name}, ${createdBy}, ${source}) returning id`;
-  await db()`insert into org_aliases (org_id, alias) values (${row!.id}, ${name})
-            on conflict do nothing`;
-  return { id: row!.id, created: true };
+    select entity_id as id, was_created as created
+    from resolve_or_promote_entity(
+      'org', ${name}, ${tier}::smallint, ${createdBy}, ${source},
+      ${derivation.derivedFrom ?? null}::uuid
+    )`;
+  if (!row) throw new Error("entity_resolver_returned_no_row");
+  return { id: row.id as string, created: row.created as boolean };
 }
 
-export async function addOrgAlias(orgId: string, alias: string): Promise<void> {
-  await db()`insert into org_aliases (org_id, alias) values (${orgId}, ${alias})
-            on conflict do nothing`;
+export async function ensureExtractedOrg(
+  name: string,
+  baseName: string,
+  createdBy: string,
+  derivation: EntityDerivationOptions,
+): Promise<{ id: string; created: boolean }> {
+  const tier = entityDerivationTier(derivation.tier);
+  const [row] = await db()`
+    select entity_id as id, was_created as created
+    from resolve_or_promote_extracted_org(
+      ${name}, ${baseName}, ${tier}::smallint, ${createdBy}, 'extract',
+      ${derivation.derivedFrom ?? null}::uuid
+    )`;
+  if (!row) throw new Error("entity_resolver_returned_no_row");
+  return { id: row.id as string, created: row.created as boolean };
+}
+
+export async function addOrgAlias(
+  orgId: string,
+  alias: string,
+  derivation: AliasDerivationOptions = {},
+): Promise<void> {
+  const tier = entityDerivationTier(derivation.tier);
+  await db()`select upsert_derived_alias(
+    'org', ${orgId}::uuid, ${alias}, ${tier}::smallint,
+    ${derivation.createdBy ?? "human"}, ${derivation.source ?? "manual"},
+    ${derivation.derivedFrom ?? null}::uuid
+  )`;
 }
 
 export async function setOrgCanonicalName(orgId: string, name: string): Promise<void> {
@@ -547,8 +922,10 @@ export async function allOrgsWithAliases(): Promise<{ id: string; names: string[
     from orgs o
     cross join lateral (
       select o.canonical_name as name
-      union select a.alias from org_aliases a where a.org_id = o.id
+      union select a.alias from org_aliases a
+        where a.org_id = o.id and a.tier in (1,2)
     ) x
+    where o.tier in (1,2) and o.retired_at is null
     group by o.id`;
   return rows.map((r: any) => ({ id: r.id, names: r.names }));
 }
@@ -569,41 +946,101 @@ export async function retypeOrgToPerson(
   orgId: string,
   opts: { relation?: string | null; reason?: string } = {},
 ): Promise<{ personId: string; orgId: string; created: boolean; edgesRepointed: number }> {
-  const [org] = await db()`select id, canonical_name from orgs where id = ${orgId}`;
-  if (!org) throw new Error(`org not found: ${orgId}`);
-  const name = org.canonical_name as string;
-
   return withDbTransaction(async (tx) => {
-    // 1. resolve-or-create the person (no tier predicate here — admin repair path)
+    const [org] = await tx`
+      select id, canonical_name, tier, source, created_by, derived_from
+      from orgs where id = ${orgId} for update`;
+    if (!org) throw new Error(`org not found: ${orgId}`);
+    const name = org.canonical_name as string;
+    const orgTier = Number(org.tier) as 0 | 1 | 2;
+
+    // 1. Resolve within the source identity's privacy namespace. Tier 0 is quarantined:
+    // a readable spelling cannot cause this owner repair to merge with a hidden identity,
+    // while a tier-0 alias remains a valid privacy-preserving match for tier-0 source data.
     const [existingPerson] = await tx`
       select p.id from people p
-      left join person_aliases a on a.person_id = p.id
-      where lower(p.canonical_name) = lower(${name}) or lower(a.alias) = lower(${name})
-      limit 1`;
+      where ((${orgTier} = 0 and p.tier = 0)
+          or (${orgTier} in (1,2) and p.tier in (1,2)))
+        and (
+          lower(p.canonical_name) = lower(${name})
+          or exists (
+            select 1 from person_aliases a
+            where a.person_id = p.id and lower(a.alias) = lower(${name})
+              and ((${orgTier} = 0 and a.tier = 0)
+                or (${orgTier} in (1,2) and a.tier in (1,2)))
+          )
+        )
+      order by case p.tier when 0 then 3 else p.tier end desc, p.id
+      limit 1 for update`;
     let personId: string;
     let created = false;
     if (existingPerson) {
       personId = existingPerson.id as string;
     } else {
       const [row] = await tx`
-        insert into people (canonical_name, created_by, source, supersedes_id)
-        values (${name}, 'agent:retype', 'retype', ${orgId}) returning id`;
+        insert into people
+          (canonical_name, created_by, source, derived_from, supersedes_id, tier)
+        values (${name}, 'agent:retype', 'retype',
+                ${org.derived_from ?? orgId}, ${orgId}, ${orgTier}) returning id`;
       personId = row!.id as string;
       created = true;
     }
-    if (opts.relation) {
-      await tx`update people set relation = coalesce(relation, ${opts.relation}) where id = ${personId}`;
-    }
-    if (!created) {
-      await tx`update people set supersedes_id = coalesce(supersedes_id, ${orgId}) where id = ${personId}`;
-    }
+    const [promoted] = await tx`
+      update people
+      set relation = coalesce(relation, ${opts.relation ?? null}),
+          tier = case when tier = 0 or ${orgTier} = 0 then 0
+                      else greatest(tier, ${orgTier}) end,
+          derived_from = case when tier <> 0 and ${orgTier} = 0
+                              then ${org.derived_from ?? orgId}
+                              else coalesce(derived_from, ${org.derived_from ?? orgId}) end,
+          supersedes_id = coalesce(supersedes_id, ${orgId})
+      where id = ${personId}
+      returning tier, derived_from`;
+    const personTier = Number(promoted!.tier) as 0 | 1 | 2;
+    const personDerivedFrom =
+      (promoted!.derived_from as string | null) ?? org.derived_from ?? orgId;
+    await tx`
+      update person_aliases
+      set tier = case when tier = 0 or ${personTier} = 0 then 0
+                      else greatest(tier, ${personTier}) end,
+          derived_from = case when ${personTier} = 0 then ${personDerivedFrom}
+                              else coalesce(derived_from, ${personDerivedFrom}) end
+      where person_id = ${personId}`;
 
-    // 2. carry over the org's aliases (canonical + alias rows) to the person
-    await tx`insert into person_aliases (person_id, alias)
-             values (${personId}, ${name}) on conflict do nothing`;
-    await tx`insert into person_aliases (person_id, alias)
-             select ${personId}, a.alias from org_aliases a where a.org_id = ${orgId}
-             on conflict do nothing`;
+    // 2. Carry over the org's canonical spelling and aliases. New rows truthfully identify
+    // this repair as their creator; the original row remains on the retired org and its source
+    // evidence is linked through derived_from. Tier 0 is absorbing on insert and collision.
+    await tx`
+      insert into person_aliases
+        (person_id, alias, tier, source, created_by, derived_from)
+      values (${personId}, ${name},
+              case when ${personTier}::smallint = 0 or ${orgTier}::smallint = 0 then 0
+                   else greatest(${personTier}::smallint, ${orgTier}::smallint) end,
+              'retype', 'agent:retype',
+              ${org.derived_from ?? orgId})
+      on conflict (person_id, alias, privacy_namespace) do update
+      set tier = case when person_aliases.tier = 0 or excluded.tier = 0 then 0
+                      else greatest(person_aliases.tier, excluded.tier) end,
+          derived_from = case
+            when person_aliases.tier <> 0 and excluded.tier = 0 then excluded.derived_from
+            else coalesce(person_aliases.derived_from, excluded.derived_from)
+          end`;
+    await tx`
+      insert into person_aliases
+        (person_id, alias, tier, source, created_by, derived_from)
+      select ${personId}, a.alias,
+             case when ${personTier} = 0 or a.tier = 0 then 0
+                  else greatest(${personTier}, a.tier) end,
+             'retype', 'agent:retype',
+             coalesce(a.derived_from, ${org.derived_from ?? orgId})
+      from org_aliases a where a.org_id = ${orgId}
+      on conflict (person_id, alias, privacy_namespace) do update
+      set tier = case when person_aliases.tier = 0 or excluded.tier = 0 then 0
+                      else greatest(person_aliases.tier, excluded.tier) end,
+          derived_from = case
+            when person_aliases.tier <> 0 and excluded.tier = 0 then excluded.derived_from
+            else coalesce(person_aliases.derived_from, excluded.derived_from)
+          end`;
 
     // 3. repoint edges org→person on both sides
     await tx`update edges set src_type = 'person', src_id = ${personId}
@@ -613,12 +1050,21 @@ export async function retypeOrgToPerson(
     // drop self-referential edges created by the repoint (e.g. "X works_at X")
     await tx`delete from edges where src_id = ${personId} and dst_id = ${personId}
              and src_type = 'person' and dst_type = 'person'`;
-    // de-dupe edges that now collide (keep the oldest by created_at, then id)
+    // De-dupe edges that now collide. Privacy strength wins (tier 0, then 2, then 1);
+    // age is only the tie-breaker, so repair can never discard quarantine evidence.
     await tx`
       delete from edges e using edges k
       where e.src_type = k.src_type and e.src_id = k.src_id and e.rel = k.rel
         and e.dst_type = k.dst_type and e.dst_id = k.dst_id
-        and (e.created_at, e.id) > (k.created_at, k.id)
+        and (
+          (case e.tier when 0 then 3 else e.tier end) <
+            (case k.tier when 0 then 3 else k.tier end)
+          or (
+            (case e.tier when 0 then 3 else e.tier end) =
+              (case k.tier when 0 then 3 else k.tier end)
+            and (e.created_at, e.id) > (k.created_at, k.id)
+          )
+        )
         and (e.src_id = ${personId} or e.dst_id = ${personId})`;
     const cntRows = await tx`
       select count(*)::int n from edges where src_id = ${personId} or dst_id = ${personId}`;
@@ -638,15 +1084,15 @@ export async function retypeOrgToPerson(
 //   - person_from_pronoun: a person row whose name is a bare pronoun (She/He/They/...).
 // Conservative by design: only `system:extract` rows are candidates, never human-confirmed.
 //
-// Two false-positive filters keep real orgs that merely LOOK like a personal name
-// ("Kiddie Winkie", "Johns Hopkins") off the screen:
+// Two false-positive filters keep fictional orgs that merely LOOK like a personal name
+// ("Marble Lantern", "Cobalt Meadow") off the screen:
 //   1. workplace signal (automatic): an org that is the `works_at` destination of >= 2
 //      DISTINCT people is a real multi-person workplace — a person is never that. This
-//      excludes "Kiddie Winkie" (3 employees) with zero curation.
+//      excludes "Marble Lantern" (3 employees) with zero curation.
 //   2. owner allow-list (curated): names listed in $MINIME_DATA_DIR/known-orgs.txt are
 //      never flagged. For the irreducible semantic cases — a single-employee institution
-//      like "Johns Hopkins" is structurally identical to a mistyped person ("Bert
-//      Vogelstein"), so only a human can disambiguate. Mirrors the non-org-terms.txt
+//      like "Cobalt Meadow" is structurally identical to a mistyped person ("Sigrid
+//      Halvorsen"), so only a human can disambiguate. Mirrors the non-org-terms.txt
 //      convention used by the extractor. Matched case-folded and EXACT.
 export async function detectMistypedEntities(): Promise<
   {
@@ -661,7 +1107,7 @@ export async function detectMistypedEntities(): Promise<
   const knownOrgs = loadKnownOrgs(); // owner allow-list, case-folded exact names
   // orgs that look like a personal name: 2–3 capitalized tokens ("First Last"), no corp/
   // place suffix, extractor-minted and not retired. Single-token names are deliberately
-  // excluded — they are ambiguous brand-vs-surname (e.g. "Vazyme", "Fapon") and produce
+  // excluded — they are ambiguous brand-vs-surname (e.g. "Fjordsonics", "Glasswing") and produce
   // false positives on a review screen. The `>= 2 distinct works_at people` workplace
   // signal is applied below in JS (per-org distinct count) so the rule stays readable.
   const orgs = await db()`
@@ -702,7 +1148,7 @@ export async function detectMistypedEntities(): Promise<
 }
 
 // Owner-editable allow-list of names that are genuinely orgs even though they look like a
-// personal name ("Johns Hopkins", "Morgan Stanley"). Loaded from
+// personal name ("Marble Lantern", "Cobalt Meadow"). Loaded from
 // $MINIME_DATA_DIR/known-orgs.txt; missing/unreadable file = empty set (filter inactive).
 // Case-folded, EXACT match, '#' comments and blank lines ignored. Memoized.
 let knownOrgsCache: Set<string> | null = null;
@@ -972,9 +1418,11 @@ async function insertDecisionBranchRows(
     ids.push(branchId);
     await tx`
       insert into edges
-        (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by)
+        (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by,
+         source, created_by, derived_from)
       values ('decision', ${decisionId}, ${branchRel(b.status)}, 'decision_branch', ${branchId},
-              'decision_branches', ${branchId}, ${d.createdBy ?? "human"})`;
+              'decision_branches', ${branchId}, ${d.createdBy ?? "human"},
+              ${d.source ?? "manual"}, ${d.createdBy ?? "human"}, ${branchId})`;
   }
   return ids;
 }
@@ -1058,25 +1506,39 @@ export async function reviewDecision(
   lesson: string | null,
   actor: string,
   outcomeScore?: number | null,
-): Promise<{ principleId: string | null }> {
+): Promise<{ principleId: string | null; principleTier: 1 | 2 | null }> {
   let principleId: string | null = null;
+  let principleTier: 1 | 2 | null = null;
   await withDbTransaction(async (tx) => {
     const [dec] = await tx`update decisions
                set actual_outcome = ${actualOutcome}, reviewed_at = ${now()},
                    outcome_score = coalesce(${outcomeScore ?? null}, outcome_score)
-                           where id = ${id} returning id`;
+                           where id = ${id} returning id, tier`;
     if (!dec) throw new Error("decision not found");
+    if (dec.tier !== 1 && dec.tier !== 2) throw new Error("decision tier is not readable prose");
     if (lesson) {
       const [p] = await tx`
-        insert into principles (rule, learned_from_decision, created_by, source)
-        values (${lesson}, ${id}, ${actor}, 'review') returning id`;
+        insert into principles
+          (rule, learned_from_decision, created_by, source, derived_from, tier)
+        values (${lesson}, ${id}, ${actor}, 'review', ${id}, ${dec.tier})
+        returning id, tier`;
       principleId = p!.id;
+      principleTier = p!.tier as 1 | 2;
       await tx`update decisions set principle_id = ${principleId} where id = ${id}`;
-      await tx`insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by)
-               values ('principle', ${principleId}, 'learned_from', 'decision', ${id}, 'decisions', ${id}, ${actor})`;
+      await tx`insert into edges
+        (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by,
+         source, created_by, derived_from)
+        values ('principle', ${principleId}, 'learned_from', 'decision', ${id},
+                'decisions', ${id}, ${actor}, 'review', ${actor}, ${id})`;
     }
   });
-  return { principleId };
+  return { principleId, principleTier };
+}
+
+export class TaskNotFoundError extends Error {
+  constructor() {
+    super("task not found");
+  }
 }
 
 export async function upsertTask(
@@ -1098,7 +1560,7 @@ export async function upsertTask(
                        goal_id = coalesce(${t.goalId ?? null}, goal_id),
                        completed_at = case when ${t.status ?? null} = 'done' then ${now()} else completed_at end
       where id = ${t.id} returning id`;
-    if (!row) throw new Error("task not found");
+    if (!row) throw new TaskNotFoundError();
     return row as any;
   }
   const id = crypto.randomUUID();
@@ -1116,6 +1578,7 @@ export async function upsertTask(
 // person row (the root cause of the phantom-org audit churn).
 export async function insertInteraction(
   i: {
+    id?: string;
     personId?: string;
     orgId?: string;
     kind: string;
@@ -1129,20 +1592,26 @@ export async function insertInteraction(
   const at = i.occurredAt ?? now();
   // See insertJournal: avoid RETURNING on a locked tier-2 write, while retaining a stable id
   // for the interaction's graph edge and the caller's receipt.
-  const id = crypto.randomUUID();
+  const id = i.id ?? crypto.randomUUID();
   await db()`
     insert into interactions (id, person_id, org_id, kind, summary, occurred_at, created_by, source, derived_from, tier)
     values (${id}, ${i.personId ?? null}, ${i.orgId ?? null}, ${i.kind}, ${i.summary}, ${at},
             ${i.createdBy ?? "human"}, ${i.source ?? "manual"}, ${i.derivedFrom ?? null}, ${i.tier ?? 2})`;
   if (i.personId) {
     await touchLastContact(i.personId, at);
-    await db()`insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by)
+    await db()`insert into edges
+              (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by,
+               source, created_by, derived_from)
               values ('interaction', ${id}, 'involves', 'person', ${i.personId},
-                      'interactions', ${id}, ${i.createdBy ?? "human"})`;
+                      'interactions', ${id}, ${i.createdBy ?? "human"}, ${i.source ?? "manual"},
+                      ${i.createdBy ?? "human"}, ${id})`;
   } else {
-    await db()`insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by)
+    await db()`insert into edges
+              (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by,
+               source, created_by, derived_from)
               values ('interaction', ${id}, 'involves', 'org', ${i.orgId ?? null},
-                      'interactions', ${id}, ${i.createdBy ?? "human"})`;
+                      'interactions', ${id}, ${i.createdBy ?? "human"}, ${i.source ?? "manual"},
+                      ${i.createdBy ?? "human"}, ${id})`;
   }
   return { id };
 }
@@ -1214,12 +1683,45 @@ export async function insertEdge(e: {
   sourceTable?: string | null;
   sourceId?: string | null;
   extractedBy?: string;
+  source?: string;
+  createdBy?: string;
+  derivedFrom?: string | null;
   confidence?: number;
 }): Promise<void> {
+  const createdBy = e.createdBy ?? e.extractedBy ?? "human";
   await db()`
-    insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by, confidence)
+    insert into edges
+      (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by,
+       confidence, source, created_by, derived_from)
     values (${e.srcType}, ${e.srcId}, ${e.rel}, ${e.dstType}, ${e.dstId},
-            ${e.sourceTable ?? null}, ${e.sourceId ?? null}, ${e.extractedBy ?? "human"}, ${e.confidence ?? 1.0})`;
+            ${e.sourceTable ?? null}, ${e.sourceId ?? null}, ${e.extractedBy ?? "human"},
+            ${e.confidence ?? 1.0}, ${e.source ?? "manual"}, ${createdBy},
+            ${e.derivedFrom ?? e.sourceId ?? null})`;
+}
+
+export async function upsertExtractedEdge(e: {
+  srcType: string;
+  srcId: string;
+  rel: string;
+  dstType: string;
+  dstId: string;
+  sourceTable: string;
+  sourceId: string;
+  confidence?: number;
+}): Promise<boolean> {
+  const [row] = await db()`select upsert_extracted_edge(
+    ${e.srcType}, ${e.srcId}::uuid, ${e.rel}, ${e.dstType}, ${e.dstId}::uuid,
+    ${e.sourceTable}, ${e.sourceId}::uuid, ${e.confidence ?? 1.0}::real
+  ) as created`;
+  return row?.created === true;
+}
+
+export async function sourceTierForParent(parentType: string, parentId: string): Promise<1 | 2> {
+  const { table } = parentTable(parentType);
+  const [row] = await db()`select readable_source_tier(${table}, ${parentId}::uuid)::int as tier`;
+  const tier = Number(row?.tier);
+  if (tier !== 1 && tier !== 2) throw new Error("extraction_source_provenance_invalid");
+  return tier;
 }
 
 export async function deleteExtractedEdgesForSource(
@@ -1520,12 +2022,13 @@ export async function compiledSourceEvidence(sourceIds: string[]): Promise<Compi
            e.created_at, e.tier,
            coalesce(pp.canonical_name, oo.canonical_name) as entity_name,
            pa.alias as person_alias, oa.alias as org_alias,
+           pa.tier as person_alias_tier, oa.tier as org_alias_tier,
            coalesce(pp.tier, oo.tier) as entity_tier
     from edges e
     left join people pp on e.dst_type = 'person' and e.dst_id = pp.id
-    left join person_aliases pa on pa.person_id = pp.id
+    left join person_aliases pa on pa.person_id = pp.id and pa.tier in (1,2)
     left join orgs oo on e.dst_type = 'org' and e.dst_id = oo.id
-    left join org_aliases oa on oa.org_id = oo.id
+    left join org_aliases oa on oa.org_id = oo.id and oa.tier in (1,2)
     where e.rel = 'mentions'
       and ((e.source_table = 'chunks' and e.source_id = any(${presentIds}::uuid[]))
        or exists (
@@ -1554,23 +2057,31 @@ export async function compiledSourceEvidence(sourceIds: string[]): Promise<Compi
     if (edge.dst_type !== "person" && edge.dst_type !== "org") continue;
     const entityName = edge.entity_name as string | null;
     const entityTier = edge.entity_tier == null ? null : Number(edge.entity_tier);
-    const aliases = [entityName, edge.person_alias, edge.org_alias].filter(
-      (value): value is string => typeof value === "string" && value.trim().length > 0,
+    const readableNames = [
+      { name: entityName, tier: entityTier },
+      { name: edge.person_alias, tier: Number(edge.person_alias_tier) },
+      { name: edge.org_alias, tier: Number(edge.org_alias_tier) },
+    ].filter(
+      (entry): entry is { name: string; tier: number } =>
+        typeof entry.name === "string" &&
+        entry.name.trim().length > 0 &&
+        (entry.tier === 1 || entry.tier === 2),
     );
     for (const chunk of present) {
       const chunkAnchored = edge.source_table === "chunks" && edge.source_id === chunk.id;
       const parentAnchored = edge.src_type === chunk.parent_type && edge.src_id === chunk.parent_id;
-      const literalOwner = aliases.some((name) => ownershipNameMatches(chunk.text, name));
+      const matchedNameTiers = readableNames
+        .filter(({ name }) => ownershipNameMatches(chunk.text, name))
+        .map(({ tier }) => tier);
+      const literalOwner = matchedNameTiers.length > 0;
       if (parentAnchored && entityTier === null) byChunk.get(chunk.id)!.unresolvedOwner = true;
       if (!chunkAnchored && !(parentAnchored && literalOwner)) continue;
+      if (entityTier !== 1 && entityTier !== 2) continue;
       const bucket = byChunk.get(chunk.id)!;
-      if (entityTier === null) {
-        bucket.unresolvedOwner = true;
-      } else {
-        const key = `${edge.dst_type}:${edge.dst_id}`;
-        bucket.entities.set(key, { kind: edge.dst_type, entityId: edge.dst_id });
-        bucket.acceptedEntityTiers.push(entityTier);
-      }
+      const key = `${edge.dst_type}:${edge.dst_id}`;
+      bucket.entities.set(key, { kind: edge.dst_type, entityId: edge.dst_id });
+      bucket.acceptedEntityTiers.push(entityTier);
+      bucket.acceptedEntityTiers.push(...matchedNameTiers);
       const at = edge.created_at ? new Date(edge.created_at) : null;
       if (at && (!bucket.latest || at > bucket.latest)) bucket.latest = at;
       bucket.acceptedEdgeTiers.push(Number(edge.tier));
@@ -1670,27 +2181,41 @@ export async function compiledEntityClusterEvidence(identities: CompiledNoteIden
       ${COMPILED_PARENT_TIER(db())} as parent_tier,
       coalesce(p.tier, o.tier) as entity_tier,
       coalesce(p.canonical_name, o.canonical_name) as entity_name,
-      pa.alias as person_alias, oa.alias as org_alias
+      pa.alias as person_alias, oa.alias as org_alias,
+      pa.tier as person_alias_tier, oa.tier as org_alias_tier
     from edges e
     join chunks c on c.parent_type = e.src_type and c.parent_id = e.src_id
     left join people p on e.dst_type = 'person' and e.dst_id = p.id
-    left join person_aliases pa on pa.person_id = p.id
+    left join person_aliases pa on pa.person_id = p.id and pa.tier in (1,2)
     left join orgs o on e.dst_type = 'org' and e.dst_id = o.id
-    left join org_aliases oa on oa.org_id = o.id
+    left join org_aliases oa on oa.org_id = o.id and oa.tier in (1,2)
     where e.rel = 'mentions' and e.dst_id = any(${ids}::uuid[])
       and e.dst_type in ('person', 'org')
       and (e.src_type <> 'page' or not (e.src_id = any(${excluded}::uuid[])))
       and (c.parent_type <> 'page' or exists (
         select 1 from pages pg where pg.id = c.parent_id and pg.status = 'active'
       ))`) as any[];
-  const accepted = rows.filter((row) => {
+  const accepted = rows.flatMap((row) => {
     const identity = identities.find((candidate) => candidate.entityId === row.dst_id);
-    if (!identity || identity.kind !== row.dst_type) return false;
+    if (!identity || identity.kind !== row.dst_type) return [];
+    const entityTier = Number(row.entity_tier);
+    if (entityTier !== 1 && entityTier !== 2) return [];
     const chunkAnchored = row.source_table === "chunks" && row.source_id === row.id;
-    const aliases = [row.entity_name, row.person_alias, row.org_alias].filter(
-      (value): value is string => typeof value === "string" && value.length > 0,
-    );
-    return chunkAnchored || aliases.some((name) => ownershipNameMatches(row.text, name));
+    const matchedNameTiers = [
+      { name: row.entity_name, tier: entityTier },
+      { name: row.person_alias, tier: Number(row.person_alias_tier) },
+      { name: row.org_alias, tier: Number(row.org_alias_tier) },
+    ]
+      .filter(
+        (entry): entry is { name: string; tier: number } =>
+          typeof entry.name === "string" &&
+          entry.name.length > 0 &&
+          (entry.tier === 1 || entry.tier === 2),
+      )
+      .filter(({ name }) => ownershipNameMatches(row.text, name))
+      .map(({ tier }) => tier);
+    if (!chunkAnchored && matchedNameTiers.length === 0) return [];
+    return [{ ...row, matched_name_tiers: matchedNameTiers }];
   });
   const source_chunk_ids = [...new Set(accepted.map((row) => row.id as string))];
   const tierEvidence = evidenceTier(
@@ -1699,6 +2224,7 @@ export async function compiledEntityClusterEvidence(identities: CompiledNoteIden
       Number(row.edge_tier ?? row.tier),
       ...(row.parent_tier == null ? [] : [Number(row.parent_tier)]),
       ...(row.entity_tier == null ? [] : [Number(row.entity_tier)]),
+      ...row.matched_name_tiers,
     ]),
   );
   const latest_mention_at = accepted.reduce<Date | null>((max, row) => {
@@ -1839,54 +2365,292 @@ export async function tableCount(
 
 // ---------------------------------------------------------------- inbox & review queue
 
+export type InboxStatus = "pending" | "processing" | "filed" | "rejected";
+
+export interface InboxItem {
+  id: string;
+  received_at: Date;
+  raw_path: string;
+  mime: string | null;
+  status: InboxStatus;
+  filed_table: string | null;
+  filed_id: string | null;
+  classifier_output: unknown | null;
+  content_hash: string | null;
+  archive_path: string | null;
+  claim_token: string | null;
+  claimed_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+  created_by: string;
+  source: string;
+  derived_from: string | null;
+  supersedes_id: string | null;
+  tier: number;
+}
+
+export interface InboxClaim {
+  item: InboxItem;
+  token: string;
+}
+
+function inboxItem(row: unknown): InboxItem {
+  return row as InboxItem;
+}
+
+function assertClaimUpdate(rows: unknown[]): void {
+  if (rows.length === 0) throw new Error("inbox_claim_lost");
+}
+
 export async function insertInboxItem(
-  i: { rawPath: string; mime?: string | null } & Std,
+  i: { rawPath: string; mime?: string | null; contentHash?: string | null } & Std,
 ): Promise<{ id: string }> {
   const [row] = await db()`
-    insert into inbox_items (raw_path, mime, created_by, source, tier)
-    values (${i.rawPath}, ${i.mime ?? "text/plain"}, ${i.createdBy ?? "human"}, ${i.source ?? "capture"}, 1)
+    insert into inbox_items (raw_path, mime, content_hash, created_by, source, tier)
+    values (${i.rawPath}, ${i.mime ?? "text/plain"}, ${i.contentHash ?? null},
+            ${i.createdBy ?? "human"}, ${i.source ?? "capture"}, 1)
     returning id`;
-  return row as any;
+  return { id: String(row!.id) };
 }
 
-export async function getInboxItem(id: string): Promise<any | null> {
-  const rows = await db()`select * from inbox_items where id = ${id}`;
-  return rows[0] ?? null;
+/**
+ * Return the existing byte identity, adopt one untouched legacy row, or create a new capture.
+ * The path-scoped lock closes the no-row insertion race without updating an exact replay.
+ */
+export async function ensureInboxItemIdentity(
+  i: { rawPath: string; contentHash: string; mime?: string | null } & Std,
+): Promise<InboxItem> {
+  return withDbTransaction(async (tx) => {
+    await tx`select pg_advisory_xact_lock(hashtextextended(${i.rawPath}, 0))`;
+    const [existing] = await tx`
+      select * from inbox_items
+      where raw_path = ${i.rawPath} and content_hash = ${i.contentHash}
+        and tier >= 1 and tier <= app_allowed_tier()
+      limit 1`;
+    if (existing) return inboxItem(existing);
+
+    const [adopted] = await tx`
+      update inbox_items set content_hash = ${i.contentHash}
+      where id = (
+        select id from inbox_items
+        where raw_path = ${i.rawPath}
+          and content_hash is null
+          and status = 'pending'
+          and classifier_output is null
+          and tier >= 1 and tier <= app_allowed_tier()
+        order by received_at, id
+        for update
+        limit 1
+      )
+      and tier >= 1 and tier <= app_allowed_tier()
+      returning *`;
+    if (adopted) return inboxItem(adopted);
+
+    const [created] = await tx`
+      insert into inbox_items (raw_path, mime, content_hash, created_by, source, tier)
+      values (${i.rawPath}, ${i.mime ?? "text/plain"}, ${i.contentHash},
+              ${i.createdBy ?? "human"}, ${i.source ?? "capture"}, 1)
+      returning *`;
+    return inboxItem(created!);
+  });
 }
 
-export async function findInboxByPath(rawPath: string): Promise<any | null> {
-  const rows =
-    await db()`select * from inbox_items where raw_path = ${rawPath} order by received_at desc limit 1`;
-  return rows[0] ?? null;
+export async function getInboxItem(id: string): Promise<InboxItem | null> {
+  const rows = await db()`select * from inbox_items
+    where id = ${id} and tier >= 1 and tier <= app_allowed_tier()`;
+  return rows[0] ? inboxItem(rows[0]) : null;
 }
 
-export async function pendingInboxItems(): Promise<any[]> {
-  return db()`select * from inbox_items where status = 'pending' order by received_at`;
+export async function findInboxByIdentity(
+  rawPath: string,
+  contentHash: string,
+): Promise<InboxItem | null> {
+  const rows = await db()`select * from inbox_items
+    where raw_path = ${rawPath} and content_hash = ${contentHash}
+      and tier >= 1 and tier <= app_allowed_tier()
+    limit 1`;
+  return rows[0] ? inboxItem(rows[0]) : null;
 }
 
-export async function setInboxFiled(
+export async function findInboxByPath(rawPath: string): Promise<InboxItem | null> {
+  const rows = await db()`select * from inbox_items
+      where raw_path = ${rawPath} and tier >= 1 and tier <= app_allowed_tier()
+      order by received_at desc, id desc limit 1`;
+  return rows[0] ? inboxItem(rows[0]) : null;
+}
+
+export async function claimInboxItem(id: string): Promise<InboxClaim | null> {
+  const token = crypto.randomUUID();
+  const [row] = await db()`
+    update inbox_items
+    set status = 'processing', claim_token = ${token}, claimed_at = clock_timestamp()
+    where id = ${id}
+      and tier >= 1 and tier <= app_allowed_tier()
+      and (
+        (status = 'pending' and classifier_output is null)
+        or
+        (status = 'processing'
+          and claimed_at <= clock_timestamp() - interval '5 minutes')
+      )
+    returning *`;
+  return row ? { item: inboxItem(row), token } : null;
+}
+
+export async function setInboxArchivePath(
   id: string,
+  token: string,
+  archivePath: string,
+): Promise<void> {
+  const rows = await db()`
+    update inbox_items set archive_path = ${archivePath}
+    where id = ${id}
+      and tier >= 1 and tier <= app_allowed_tier()
+      and status = 'processing' and claim_token = ${token}::uuid
+    returning id`;
+  assertClaimUpdate(rows);
+}
+
+export async function setInboxClassification(
+  id: string,
+  token: string,
+  classifierOutput: unknown,
+): Promise<void> {
+  const rows = await db()`
+    update inbox_items set classifier_output = ${db().json(classifierOutput as any)}
+    where id = ${id}
+      and tier >= 1 and tier <= app_allowed_tier()
+      and status = 'processing' and claim_token = ${token}::uuid
+    returning id`;
+  assertClaimUpdate(rows);
+}
+
+/** Lock and validate the fencing token inside the caller's final filing transaction. */
+export async function assertInboxClaim(id: string, token: string): Promise<InboxItem> {
+  const [row] = await db()`
+    select * from inbox_items
+    where id = ${id}
+      and tier >= 1 and tier <= app_allowed_tier()
+      and status = 'processing' and claim_token = ${token}::uuid
+    for update`;
+  if (!row) throw new Error("inbox_claim_lost");
+  return inboxItem(row);
+}
+
+export async function setInboxFiledClaimed(
+  id: string,
+  token: string,
   filedTable: string,
   filedId: string,
   classifierOutput: unknown,
 ): Promise<void> {
-  await db()`update inbox_items set status = 'filed', filed_table = ${filedTable},
-            filed_id = ${filedId}, classifier_output = ${db().json(classifierOutput as any)}
-            where id = ${id}`;
+  const rows = await db()`
+    update inbox_items
+    set status = 'filed', filed_table = ${filedTable}, filed_id = ${filedId},
+        classifier_output = ${db().json(classifierOutput as any)},
+        claim_token = null, claimed_at = null
+    where id = ${id}
+      and tier >= 1 and tier <= app_allowed_tier()
+      and status = 'processing' and claim_token = ${token}::uuid
+    returning id`;
+  assertClaimUpdate(rows);
 }
 
-export async function setInboxPending(id: string, classifierOutput: unknown): Promise<void> {
-  await db()`update inbox_items set classifier_output = ${db().json(classifierOutput as any)} where id = ${id}`;
+export async function setInboxPendingClaimed(
+  id: string,
+  token: string,
+  classifierOutput: unknown,
+): Promise<void> {
+  const rows = await db()`
+    update inbox_items
+    set status = 'pending', classifier_output = ${db().json(classifierOutput as any)},
+        claim_token = null, claimed_at = null
+    where id = ${id}
+      and tier >= 1 and tier <= app_allowed_tier()
+      and status = 'processing' and claim_token = ${token}::uuid
+    returning id`;
+  assertClaimUpdate(rows);
 }
 
-// Mark an inbox row unfileable. Used for orphans whose raw_path no longer exists on this
-// host (e.g. rows synced from another machine — macOS /Users/... paths — whose source text
-// never landed here). Records the reason in classifier_output so the drop is auditable and
-// the row is never retried by drainStartup again.
-export async function setInboxRejected(id: string, reason: string): Promise<void> {
-  await db()`update inbox_items set status = 'rejected',
-            classifier_output = ${db().json({ rejected: true, reason } as any)}
-            where id = ${id}`;
+/** Keep classifier output but expire this token so another worker can reclaim immediately. */
+export async function markInboxClaimRetryable(id: string, token: string): Promise<boolean> {
+  const rows = await db()`
+    update inbox_items
+    set claimed_at = clock_timestamp() - interval '6 minutes'
+    where id = ${id}
+      and tier >= 1 and tier <= app_allowed_tier()
+      and status = 'processing' and claim_token = ${token}::uuid
+    returning id`;
+  return rows.length > 0;
+}
+
+export async function retryableInboxItems(): Promise<InboxItem[]> {
+  const rows = await db()`
+    select * from inbox_items
+    where tier >= 1 and tier <= app_allowed_tier()
+      and (
+        (status = 'pending' and classifier_output is null)
+        or (status = 'processing'
+            and claimed_at <= clock_timestamp() - interval '5 minutes')
+      )
+    order by received_at, id`;
+  return rows.map(inboxItem);
+}
+
+/** Earliest fresh processing lease that will become reclaimable without a filesystem event. */
+export async function nextInboxClaimExpiry(): Promise<Date | null> {
+  const [row] = await db()`
+    select min(claimed_at + interval '5 minutes') as retry_at
+    from inbox_items
+    where status = 'processing'
+      and tier >= 1 and tier <= app_allowed_tier()`;
+  return row?.retry_at ? new Date(row.retry_at) : null;
+}
+
+export async function filedInboxNoteItems(): Promise<InboxItem[]> {
+  const rows = await db()`
+    select * from inbox_items
+    where status = 'filed'
+      and filed_table = 'pages'
+      and archive_path is not null
+      and content_hash is not null
+      and tier >= 1 and tier <= app_allowed_tier()
+    order by received_at, id`;
+  return rows.map(inboxItem);
+}
+
+// Orphan rejection is fenced by the same retryable predicate as claiming. A concurrent fresh
+// claim makes this update lose harmlessly rather than rejecting work owned by another worker.
+export async function rejectRetryableInboxItem(id: string, reason: string): Promise<boolean> {
+  const rows = await db()`
+    update inbox_items
+    set status = 'rejected',
+        classifier_output = ${db().json({ rejected: true, reason } as any)},
+        claim_token = null, claimed_at = null
+    where id = ${id}
+      and tier >= 1 and tier <= app_allowed_tier()
+      and (
+        (status = 'pending' and classifier_output is null)
+        or
+        (status = 'processing'
+          and claimed_at <= clock_timestamp() - interval '5 minutes')
+      )
+    returning id`;
+  return rows.length > 0;
+}
+
+/** Resolve an extra pre-025 pending row after another row has claimed the observed byte identity. */
+export async function rejectDuplicateLegacyInboxItem(id: string): Promise<boolean> {
+  const rows = await db()`
+    update inbox_items
+    set status = 'rejected',
+        classifier_output = ${db().json({ rejected: true, reason: "legacy_duplicate_identity" } as any)}
+    where id = ${id}
+      and tier >= 1 and tier <= app_allowed_tier()
+      and content_hash is null
+      and status = 'pending'
+      and classifier_output is null
+    returning id`;
+  return rows.length > 0;
 }
 
 export async function insertReviewItem(kind: string, payload: unknown): Promise<{ id: string }> {
@@ -1911,13 +2675,18 @@ export async function resolveReviewItem(
 
 export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Promise<any> {
   const t = now();
+  const ownerTimeZone = configuredTimeZone(config.tz);
+  const effectiveTimeZone = configuredTimeZone(timeZone);
   // Anchor "today" on the LOCAL calendar day, computed in app code. Casting the
   // UTC instant inside Postgres (${t}::date) uses the DB session TZ (UTC here),
   // which truncates to YESTERDAY whenever local time is past midnight but UTC
   // hasn't rolled over yet — e.g. the 7am Asia/Singapore morning brief = 23:00
   // UTC prior day. Passing a local YYYY-MM-DD string makes the day boundary
   // correct regardless of DB session TZ or time of day. See DECISIONS.md.
-  const today = localDateStr(t, timeZone);
+  const today = localDateStr(t, effectiveTimeZone);
+  // Persisted metric rollups have one canonical owner-zone identity. Caller-local dates still
+  // govern due work and moved_today, but must never select a different cache day.
+  const ownerToday = localDateStr(t, ownerTimeZone);
   const allowed = await allowedTier(actor);
   const [calendar, tasks, commitments, decisionsDue, openReview, anomalies, movedToday] =
     await Promise.all([
@@ -1940,14 +2709,14 @@ export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Pro
                 or choice is null )
         order by review_at nulls last`,
       db()`select count(*)::int as n from review_queue where status = 'open'`,
-      metricAnomalies(),
-      // What MOVED today: tasks closed (done/dropped) on the owner's LOCAL calendar
-      // day. minime_state otherwise reports only OPEN work, so same-day completions
+      metricAnomalies(ownerToday, ownerTimeZone),
+      // What MOVED today: tasks closed (done/dropped) on the caller's LOCAL calendar day
+      // (the owner zone by default). minime_state otherwise reports only OPEN work, so completions
       // were structurally invisible to the evening review's "what moved today".
-      // Compare the local-date of updated_at (cast in the owner's TZ) to local today.
+      // Compare updated_at and today in the same effective caller zone (owner zone by default).
       db()`select id, title, status, updated_at from tasks
         where status in ('done','dropped')
-          and (updated_at at time zone ${timeZone ?? "UTC"})::date = ${today}::date
+          and (updated_at at time zone ${effectiveTimeZone})::date = ${today}::date
           and tier >= 1 and tier <= ${allowed}
         order by updated_at`,
     ]);
@@ -1980,7 +2749,7 @@ export async function tasksInRange(from: string, to: string, actor?: AccessActor
 // normalized title closely matches a candidate, so a re-mention of the same item is
 // routed to the review queue instead of silently inserting a second row. Normalization
 // strips punctuation/case/whitespace; we compare a trigram-ish containment both ways so
-// "Attend Mia's KiddieWinkie event" matches "Attend Mia KiddieWinkie Father's Day event".
+// "Attend Mina's Marble Lantern event" matches "Attend Mina Marble Lantern family event".
 export async function openTasksForDedup(): Promise<
   { id: string; title: string; due: string | null }[]
 > {
@@ -1991,77 +2760,74 @@ export async function openTasksForDedup(): Promise<
 }
 
 // Latest daily value vs trailing-28-day mean ± 2σ, from metric_values only (never raw tier-0).
-export async function metricAnomalies(): Promise<any[]> {
-  const t = now();
-  return db()`
-    with latest as (
+export async function metricAnomalies(asOfDate: string, timeZone: string): Promise<any[]> {
+  const rows = await db()`
+    with eligible as (
+      select mv.metric, mv.period_start, mv.value
+      from metric_values mv
+      join metric_defs def on def.name = mv.metric
+      where mv.granularity = 'day' and (
+        def.agg_sql is null
+        or mv.source not in ('dream', 'query')
+        or (mv.source = 'dream' and exists (
+          select 1 from metric_cache_state state
+          where state.singleton and state.time_zone = ${timeZone}
+        ))
+      )
+    ), latest as (
       select distinct on (metric) metric, period_start, value
-      from metric_values
-      where granularity = 'day' and period_start <= ${t}::date
+      from eligible
+      where period_start <= ${asOfDate}::date
       order by metric, period_start desc
     ), stats as (
-      select l.metric, avg(mv.value) as mean, stddev_samp(mv.value) as sd
+      select l.metric, avg(eligible.value) as mean, stddev_samp(eligible.value) as sd
       from latest l
-      join metric_values mv on mv.metric = l.metric and mv.granularity = 'day'
-        and mv.period_start between l.period_start - 28 and l.period_start - 1
+      join eligible on eligible.metric = l.metric
+        and eligible.period_start between l.period_start - 28 and l.period_start - 1
       group by l.metric
     )
     select l.metric, l.period_start, l.value::float, s.mean::float, s.sd::float
     from latest l join stats s on s.metric = l.metric
     where s.sd is not null and s.sd > 0 and abs(l.value - s.mean) > 2 * s.sd`;
+  return rows.map((row) => ({ ...row, period_start: metricDateString(row.period_start) }));
 }
 
 // ---------------------------------------------------------------- metrics (I6)
 
-export async function metricDef(
-  name: string,
-): Promise<{ name: string; unit: string | null; description: string | null } | null> {
-  const rows = await db()`select name, unit, description from metric_defs where name = ${name}`;
+export async function metricDef(name: string): Promise<{
+  name: string;
+  unit: string | null;
+  description: string | null;
+  rollup: MetricRollup;
+} | null> {
+  const rows =
+    await db()`select name, unit, description, rollup from metric_defs where name = ${name}`;
   return (rows[0] as any) ?? null;
 }
 
 export async function listMetricDefs(): Promise<
-  { name: string; unit: string | null; agg_sql: string | null }[]
+  { name: string; unit: string | null; agg_sql: string | null; rollup: MetricRollup }[]
 > {
-  return db()`select name, unit, agg_sql from metric_defs order by name` as any;
+  return db()`select name, unit, agg_sql, rollup from metric_defs order by name` as any;
 }
 
-// The single door to whitelisted aggregate SQL (incl. tier-0 sources): the security definer
-// function created in 007_rls.sql. Parameterized; metric name is checked against metric_defs.
+// The single door to whitelisted aggregate SQL (incl. tier-0 sources): the timezone-explicit
+// security-definer function in 026. Metric name and timezone are checked before execution.
 export async function runMetricAgg(
   name: string,
   from: string,
   to: string,
+  timeZone: string,
 ): Promise<{ period_start: string; value: number; label: string | null }[]> {
   const def = await metricDef(name);
   if (!def) throw Object.assign(new Error(`unknown metric: ${name}`), { code: "UNKNOWN_METRIC" });
-  const rows =
-    await db()`select period_start, value::float, label from metric_agg(${name}, ${from}, ${to})`;
+  const rows = await db()`select period_start, value::float, label
+    from metric_agg(${name}, ${from}, ${to}, ${timeZone})`;
   return rows.map((r: any) => ({
-    period_start: toDateStr(r.period_start),
+    period_start: metricDateString(r.period_start),
     value: Number(r.value),
     label: r.label ?? null,
   }));
-}
-
-function toDateStr(d: Date | string): string {
-  if (typeof d === "string") return d.slice(0, 10);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-export async function storedMetricValues(
-  name: string,
-  from: string,
-  to: string,
-  granularity: string,
-): Promise<any[]> {
-  return db()`select period_start, value::float, source from metric_values
-             where metric = ${name} and granularity = ${granularity}
-               and period_start between ${from} and ${to}
-             order by period_start`;
 }
 
 export async function upsertMetricValue(
@@ -2075,7 +2841,56 @@ export async function upsertMetricValue(
     insert into metric_values (metric, period_start, granularity, value, source, computed_at)
     values (${name}, ${periodStart}, ${granularity}, ${value}, ${source}, ${now()})
     on conflict (metric, granularity, period_start)
-      do update set value = excluded.value, source = excluded.source, computed_at = excluded.computed_at`;
+      do update set value = excluded.value, source = excluded.source, computed_at = excluded.computed_at
+      where metric_values.source = 'dream'`;
+}
+
+/**
+ * Remove only Dream-owned values that an ordinary source-backed refresh is about to replace.
+ * Mutable inputs can move or disappear, so upserts alone cannot reconcile an empty bucket.
+ * The surrounding owner transaction keeps readers on either the old or new complete windows.
+ */
+export async function clearDreamMetricRefreshWindow(input: {
+  name: string;
+  dayFrom: string;
+  dayTo: string;
+  weekFrom: string;
+  weekTo: string;
+  monthFrom: string;
+  monthTo: string;
+}): Promise<void> {
+  if (!hasDbTransaction()) throw new Error("metric_cache_transaction_required");
+  await db()`delete from metric_values
+    where metric = ${input.name} and source = 'dream' and (
+      (granularity = 'day'
+        and period_start between ${input.dayFrom}::date and ${input.dayTo}::date)
+      or (granularity = 'week'
+        and period_start between ${input.weekFrom}::date and ${input.weekTo}::date)
+      or (granularity = 'month'
+        and period_start between ${input.monthFrom}::date and ${input.monthTo}::date)
+    )`;
+}
+
+/**
+ * Lock the canonical Dream cache and switch its timezone identity when needed. The caller wraps
+ * this and the subsequent full rebuild in one owner transaction, so readers see either the old
+ * complete cache or the new complete cache. Stored-only definitions and non-Dream rows survive.
+ */
+export async function prepareMetricCache(timeZone: string): Promise<boolean> {
+  if (!hasDbTransaction()) throw new Error("metric_cache_transaction_required");
+  const effectiveTimeZone = configuredTimeZone(timeZone);
+  await db()`lock table metric_cache_state in exclusive mode`;
+  const [current] = await db()`select time_zone from metric_cache_state where singleton`;
+  if (current?.time_zone === effectiveTimeZone) return false;
+  await db()`delete from metric_values mv
+    using metric_defs def
+    where mv.metric = def.name and def.agg_sql is not null
+      and mv.source in ('dream', 'query')`;
+  await db()`insert into metric_cache_state (singleton, time_zone, updated_at)
+    values (true, ${effectiveTimeZone}, ${now()})
+    on conflict (singleton) do update
+      set time_zone = excluded.time_zone, updated_at = excluded.updated_at`;
+  return true;
 }
 
 // ---------------------------------------------------------------- context
@@ -2164,9 +2979,12 @@ export async function pagesByPaths(paths: string[]): Promise<{ id: string; path:
 // text yields zero entities are re-scanned each night — bounded by `limit`, regex-cheap.
 export async function parentsNeedingExtraction(
   limit: number,
-): Promise<{ parent_type: string; parent_id: string; text: string }[]> {
+): Promise<
+  { parent_type: string; parent_id: string; text: string; tier: 1 | 2; derived_from: string }[]
+> {
   return db()`
-    select c.parent_type, c.parent_id, string_agg(c.text, e'\n\n' order by c.ord) as text
+    select c.parent_type, c.parent_id, string_agg(c.text, e'\n\n' order by c.ord) as text,
+           max(c.tier)::int as tier, c.parent_id as derived_from
     from chunks c
     where c.tier >= 1 and not exists (
       select 1 from edges e
@@ -2183,9 +3001,10 @@ export async function allPeopleWithAliases(): Promise<{ id: string; names: strin
     from people p
     cross join lateral (
       select p.canonical_name as name
-      union select a.alias from person_aliases a where a.person_id = p.id
+      union select a.alias from person_aliases a
+        where a.person_id = p.id and a.tier in (1,2)
     ) x
-    where p.tier >= 1
+    where p.tier in (1,2)
     group by p.id`;
   return rows.map((r: any) => ({ id: r.id, names: r.names }));
 }
@@ -2228,15 +3047,19 @@ export async function phantomPersonCandidates(): Promise<
       from people pe
       cross join lateral (
         select pe.canonical_name as name
-        union select pa.alias from person_aliases pa where pa.person_id = pe.id
+        union select pa.alias from person_aliases pa
+          where pa.person_id = pe.id and pa.tier in (1,2)
       ) x
+      where pe.tier in (1,2)
       group by pe.id, pe.canonical_name, pe.relation
     ),
     org_names as (
-      select lower(o.canonical_name) as name from orgs o where o.retired_at is null
+      select lower(o.canonical_name) as name from orgs o
+      where o.tier in (1,2) and o.retired_at is null
       union
       select lower(oa.alias) from org_aliases oa
-      join orgs o on o.id = oa.org_id where o.retired_at is null
+      join orgs o on o.id = oa.org_id
+      where o.tier in (1,2) and oa.tier in (1,2) and o.retired_at is null
     )
     select p.id, p.canonical_name,
            exists (select 1 from org_names n where n.name = any(p.names)) as name_match,
@@ -2261,6 +3084,8 @@ export interface EdgeToValidate {
   source_id: string | null;
   src_name: string | null;
   dst_name: string | null;
+  src_tier: number | null;
+  dst_tier: number | null;
 }
 
 /** system:extract edges needing a verdict: the recent window first (born-yesterday edges get
@@ -2275,13 +3100,17 @@ export async function edgesForValidation(
     select e.id, e.src_type, e.src_id, e.rel, e.dst_type, e.dst_id, e.confidence, e.tier,
            e.source_table, e.source_id,
            coalesce(sp.canonical_name, so.canonical_name) as src_name,
-           coalesce(dp.canonical_name, do_.canonical_name) as dst_name
+           coalesce(dp.canonical_name, do_.canonical_name) as dst_name,
+           coalesce(sp.tier, so.tier)::int as src_tier,
+           coalesce(dp.tier, do_.tier)::int as dst_tier
     from edges e
     left join people sp on e.src_type = 'person' and sp.id = e.src_id
     left join orgs   so on e.src_type = 'org'    and so.id = e.src_id
     left join people dp on e.dst_type = 'person' and dp.id = e.dst_id
     left join orgs   do_ on e.dst_type = 'org'   and do_.id = e.dst_id
     where e.extracted_by = 'system:extract' and e.tier >= 1
+      and (e.src_type not in ('person', 'org') or coalesce(sp.tier, so.tier) >= 1)
+      and (e.dst_type not in ('person', 'org') or coalesce(dp.tier, do_.tier) >= 1)
       and not exists (select 1 from edge_validations v
                       where v.edge_id = e.id and v.verdict <> 'unsure')
       and (select count(*) from edge_validations v2
@@ -2346,11 +3175,10 @@ export async function edgeVisibleAtTier(edgeId: string, actor?: AccessActor): Pr
   return rows.length > 0;
 }
 
-export async function decisionsNeedingReview(): Promise<any[]> {
-  const t = now();
+export async function decisionsNeedingReview(asOfDate: string): Promise<any[]> {
   return db()`select id, question, review_at from decisions
              where tier >= 1 and review_at is not null
-               and review_at <= ${t}::date and reviewed_at is null`;
+               and review_at <= ${asOfDate}::date and reviewed_at is null`;
 }
 
 const COMPILED_NOTE_SOURCES_DELIMITER = "\n## Sources\n";
@@ -2424,12 +3252,24 @@ export async function chunkPairsSharingPerson(limit: number): Promise<Contradict
     ),
     mention_chunks as (
       select distinct e.dst_id as person_id, e.src_type, e.src_id,
-             c.id as chunk_id, c.text, c.tier, c.updated_at
+             c.id as chunk_id, c.text,
+             greatest(
+               e.tier, p.tier, c.tier, cp.parent_tier,
+               coalesce(alias_match.matched_tier, 1)
+             )::int as tier,
+             c.updated_at
       from edges e
       join people p on p.id = e.dst_id
       join chunks c on c.parent_type = e.src_type and c.parent_id = e.src_id
       join canonical_parent_tiers cp
         on cp.parent_type = e.src_type and cp.parent_id = e.src_id
+      left join lateral (
+        select max(a.tier)::int as matched_tier
+        from person_aliases a
+        where a.person_id = p.id and a.tier in (1,2)
+          and btrim(a.alias) <> ''
+          and strpos(lower(c.text), lower(a.alias)) > 0
+      ) alias_match on true
       where e.rel = 'mentions' and e.dst_type = 'person'
         and e.tier >= 1
         and p.tier >= 1
@@ -2447,12 +3287,7 @@ export async function chunkPairsSharingPerson(limit: number): Promise<Contradict
             btrim(p.canonical_name) <> ''
             and strpos(lower(c.text), lower(p.canonical_name)) > 0
           )
-          or exists (
-            select 1 from person_aliases a
-            where a.person_id = p.id
-              and btrim(a.alias) <> ''
-              and strpos(lower(c.text), lower(a.alias)) > 0
-          )
+          or alias_match.matched_tier is not null
         )
         and not (
           e.src_type = 'page' and exists (
@@ -2535,6 +3370,8 @@ export async function noteCandidates(minChunks: number): Promise<NoteCandidate[]
     join chunks c on c.parent_type = e.src_type and c.parent_id = e.src_id
     join people p on p.id = e.dst_id
     where e.rel = 'mentions' and e.dst_type = 'person'
+      and e.tier in (1,2) and c.tier in (1,2) and p.tier in (1,2)
+      and ${COMPILED_PARENT_TIER(db())} in (1,2)
       and not (e.src_type = 'page' and e.src_id = any(${excluded}::uuid[]))
       and (c.parent_type <> 'page' or exists (
         select 1 from pages pg where pg.id = c.parent_id and pg.status = 'active'))
@@ -2565,16 +3402,23 @@ export async function noteSourceChunks(
   }[]
 > {
   const excluded = await excludedDerivedPageIdsForCompiledNoteSources();
-  const names = await db()`
-    select p.canonical_name, array_remove(array_agg(distinct a.alias), null) as aliases
-    from people p left join person_aliases a on a.person_id = p.id
-    where p.id = ${id}
-    group by p.id, p.canonical_name`;
-  const aliases = names[0]
-    ? [names[0].canonical_name, ...(names[0].aliases ?? [])].filter(
-        (value): value is string => typeof value === "string" && value.length > 0,
-      )
-    : [];
+  const names = (
+    await db()`
+    select p.canonical_name as name, p.tier::int as tier
+    from people p where p.id = ${id} and p.tier in (1,2)
+    union all
+    select a.alias as name, a.tier::int as tier
+    from person_aliases a
+    join people p on p.id = a.person_id
+    where a.person_id = ${id} and p.tier in (1,2) and a.tier in (1,2)`
+  )
+    .filter(
+      (row): row is { name: string; tier: number } =>
+        typeof row.name === "string" &&
+        row.name.length > 0 &&
+        (Number(row.tier) === 1 || Number(row.tier) === 2),
+    )
+    .map((row) => ({ name: row.name, tier: Number(row.tier) }));
   const rows = (await db()`
     select distinct c.id, c.parent_type, c.parent_id, c.text, c.tier, e.tier as edge_tier,
       least(c.tier, e.tier, p.tier, ${COMPILED_PARENT_TIER(db())})::int as min_tier,
@@ -2585,11 +3429,25 @@ export async function noteSourceChunks(
     join chunks c on c.parent_type = e.src_type and c.parent_id = e.src_id
     join people p on p.id = e.dst_id
     where e.rel = 'mentions' and e.dst_type = 'person' and e.dst_id = ${id}
+      and e.tier in (1,2) and c.tier in (1,2) and p.tier in (1,2)
+      and ${COMPILED_PARENT_TIER(db())} in (1,2)
       and not (e.src_type = 'page' and e.src_id = any(${excluded}::uuid[]))
       and (c.parent_type <> 'page' or exists (
         select 1 from pages pg where pg.id = c.parent_id and pg.status = 'active'))
     order by c.updated_at, c.ord, c.id`) as any[];
-  return rows.filter((row) => aliases.some((name) => ownershipNameMatches(row.text, name))) as any;
+  return rows.flatMap((row) => {
+    const matchedNameTiers = names
+      .filter(({ name }) => ownershipNameMatches(row.text, name))
+      .map(({ tier }) => tier);
+    if (matchedNameTiers.length === 0) return [];
+    return [
+      {
+        ...row,
+        min_tier: Math.min(Number(row.min_tier), ...matchedNameTiers),
+        max_tier: Math.max(Number(row.max_tier), ...matchedNameTiers),
+      },
+    ];
+  }) as any;
 }
 
 // The note page's last-compiled marker. updated_at advances only when the body changed

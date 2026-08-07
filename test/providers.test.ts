@@ -3,7 +3,7 @@
 // audit (I8 extension), and the CLOUD_MAX_TIER gate.
 
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { replaceChunks } from "../src/db/repo";
+import { replaceChunks, withActorDbSession } from "../src/db/repo";
 import { anthropicProvider } from "../src/llm/anthropic";
 import { bedrockProvider } from "../src/llm/bedrock";
 import { mockEmbed } from "../src/llm/mock";
@@ -217,6 +217,140 @@ describe("egress audit + tier gate", () => {
     expect(JSON.stringify(rows[0]!.payload)).not.toContain("SECRET CONTENT");
     (config as any).openaiApiKey = prevKey;
     (config as any).embedProvider = prevProv;
+  });
+
+  test("cloud intent and outcome survive a later handler transaction rollback", async () => {
+    const prevKey = config.openaiApiKey;
+    const prevProv = config.embedProvider;
+    (config as any).openaiApiKey = "sk-test";
+    (config as any).embedProvider = "openai";
+    const sentinel = "PRIVATE-EGRESS-ROLLBACK-SENTINEL";
+    const { fn } = fakeFetch((capture) => ({
+      data: capture.body.input.map((_: string, index: number) => ({
+        index,
+        embedding: new Array(EMBED_DIMS).fill(0.2),
+      })),
+    }));
+    const { embedProvider } = await import("../src/llm");
+    const [marker] = await sql`select coalesce(max(id), 0)::bigint as id from events`;
+    try {
+      await expect(
+        withActorDbSession("agent:egress-rollback", async () => {
+          await embedProvider(fn).embed!([sentinel]);
+          throw new Error("later_handler_failure");
+        }),
+      ).rejects.toThrow("later_handler_failure");
+      const rows = await sql`
+        select verb, payload from events
+        where id > ${marker!.id}::bigint and verb like 'egress:embed%'
+        order by id`;
+      expect(rows.map((row) => ({ verb: row.verb, payload: row.payload }))).toEqual([
+        {
+          verb: "egress:embed",
+          payload: {
+            provider: "openai",
+            model: config.openaiEmbedModel,
+            items: 1,
+          },
+        },
+        {
+          verb: "egress:embed:outcome",
+          payload: {
+            intent_event_id: expect.stringMatching(/^\d+$/),
+            status: "succeeded",
+          },
+        },
+      ]);
+      expect(JSON.stringify(rows)).not.toContain(sentinel);
+    } finally {
+      (config as any).openaiApiKey = prevKey;
+      (config as any).embedProvider = prevProv;
+    }
+  });
+
+  test("a failed outcome audit is surfaced with a fixed error after the durable intent", async () => {
+    const prevKey = config.openaiApiKey;
+    const prevProv = config.embedProvider;
+    (config as any).openaiApiKey = "sk-test";
+    (config as any).embedProvider = "openai";
+    const { fn } = fakeFetch((capture) => ({
+      data: capture.body.input.map((_: string, index: number) => ({
+        index,
+        embedding: new Array(EMBED_DIMS).fill(0.2),
+      })),
+    }));
+    const { embedProvider } = await import("../src/llm");
+    const [marker] = await sql`select coalesce(max(id), 0)::bigint as id from events`;
+    try {
+      await sql.unsafe(`
+        create function test_reject_egress_outcome() returns trigger
+        language plpgsql as $$
+        begin
+          if new.verb like 'egress:%:outcome' then
+            raise exception 'test outcome audit refusal';
+          end if;
+          return new;
+        end $$;
+        create trigger test_reject_egress_outcome
+        before insert on events for each row execute function test_reject_egress_outcome();
+      `);
+      await expect(embedProvider(fn).embed!(["fixed audit failure probe"])).rejects.toThrow(
+        "egress_outcome_audit_failed",
+      );
+      const rows = await sql`
+        select verb, payload from events
+        where id > ${marker!.id}::bigint and verb like 'egress:embed%'
+        order by id`;
+      expect(rows.map((row) => row.verb)).toEqual(["egress:embed"]);
+      expect(rows[0]!.payload).toEqual({
+        provider: "openai",
+        model: config.openaiEmbedModel,
+        items: 1,
+      });
+    } finally {
+      await sql.unsafe("drop trigger if exists test_reject_egress_outcome on events");
+      await sql.unsafe("drop function if exists test_reject_egress_outcome()");
+      (config as any).openaiApiKey = prevKey;
+      (config as any).embedProvider = prevProv;
+    }
+  });
+
+  test("five concurrent actor transactions cannot starve the dedicated egress audit pool", async () => {
+    const prevKey = config.openaiApiKey;
+    const prevProv = config.embedProvider;
+    (config as any).openaiApiKey = "sk-test";
+    (config as any).embedProvider = "openai";
+    const { fn } = fakeFetch((capture) => ({
+      data: capture.body.input.map((_: string, index: number) => ({
+        index,
+        embedding: new Array(EMBED_DIMS).fill(0.4),
+      })),
+    }));
+    const { embedProvider } = await import("../src/llm");
+    let entered = 0;
+    let releaseBarrier!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      releaseBarrier = resolve;
+    });
+    try {
+      const calls = Array.from({ length: 5 }, (_, index) =>
+        withActorDbSession(`agent:egress-concurrent-${index}`, async () => {
+          entered++;
+          if (entered === 5) releaseBarrier();
+          await barrier;
+          await embedProvider(fn).embed!([`concurrency-${index}`]);
+        }),
+      );
+      await Promise.race([
+        Promise.all(calls),
+        Bun.sleep(2_000).then(() => {
+          throw new Error("egress_audit_pool_starved");
+        }),
+      ]);
+    } finally {
+      (config as any).openaiApiKey = prevKey;
+      (config as any).embedProvider = prevProv;
+    }
   });
 
   test("local ollama calls do not write egress events", async () => {

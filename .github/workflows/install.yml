@@ -18,31 +18,44 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
       # Runners ship Docker; test BOTH paths: native (apt/PGDG) and docker.
       # Unprivileged on purpose: exercises the lazy `sudo -n` resolution path.
       - name: install (native PG16 via PGDG, no ollama)
         run: |
-          bash scripts/install.sh --native --no-ollama --with-demo | tee out.log
+          sudo pg_dropcluster --stop 16 main 2>/dev/null || true
+          MINIME_PG_PORT=55432 bash scripts/install.sh --native --no-ollama --with-demo | tee out.log
           grep -q '^status: degraded$' out.log
       - name: re-run is idempotent
         run: |
-          bash scripts/install.sh --native --no-ollama | tee rerun.log
+          bash scripts/install.sh --no-ollama | tee rerun.log
           grep -q '^status: degraded$' rerun.log
+          grep -q '^postgres: native pg16 (PGDG) @ 127.0.0.1:55432$' rerun.log
 
   linux-docker:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
       - name: install (docker pg16) + real embed-model pull
         # Pull only the small model (~270MB) — same code path as the 4.7GB one.
         run: |
-          MINIME_PULL_MODELS=nomic-embed-text bash scripts/install.sh --with-demo | tee out.log
+          MINIME_PG_PORT=55433 MINIME_PULL_MODELS=nomic-embed-text bash scripts/install.sh --with-demo | tee out.log
           grep -Eq '^status: (ok|degraded)$' out.log
+          bash scripts/install.sh --no-ollama | tee rerun.log
+          grep -q '^postgres: docker pg16 @ 127.0.0.1:55433$' rerun.log
 
   macos:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
       # macOS runners have brew but no Docker daemon -> exercises the brew-native branch.
       - name: install (brew-native PG17, no ollama)
         run: |

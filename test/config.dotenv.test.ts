@@ -1,9 +1,135 @@
 // Guards the repo-root .env fallback that keeps `serve` working when launched from a cwd
 // other than the repo root (Bun only auto-loads .env from cwd — see src/util/config.ts).
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { fillMissingEnv, parseDotenv } from "../src/util/config";
+import {
+  EMBED_PROVIDER_NAMES,
+  PROVIDER_NAMES,
+  assertTier2UnlockMaxMinutes,
+  fillMissingEnv,
+  parseDotenv,
+  parseEmbedProviderName,
+  parseProviderEnvironment,
+  parseProviderName,
+  parseTier2UnlockMaxMinutes,
+} from "../src/util/config";
+import {
+  derivePostgresCredentials,
+  parseLocalPostgresUrl,
+  validateMinimeDatabasePair,
+} from "../src/util/postgres-url";
+
+function loadConfigWith(owner: string, app: string, extraEnv: Record<string, string> = {}) {
+  const proc = Bun.spawnSync(
+    [process.execPath, "--no-env-file", "-e", 'await import("./src/util/config")'],
+    {
+      cwd: join(import.meta.dir, ".."),
+      env: {
+        NODE_ENV: "test",
+        MINIME_SKIP_REPO_DOTENV: "1",
+        ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}),
+        DATABASE_URL: owner,
+        MINIME_APP_DATABASE_URL: app,
+        ...extraEnv,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  return { code: proc.exitCode, output: proc.stdout.toString() + proc.stderr.toString() };
+}
+
+describe("provider configuration", () => {
+  test("accepts only exact canonical provider names", () => {
+    for (const provider of PROVIDER_NAMES) expect(parseProviderName(provider)).toBe(provider);
+    for (const malformed of ["", "none", "OpenAI", "OPENAI", " openai", "openai ", "gpt5"]) {
+      expect(() => parseProviderName(malformed)).toThrow("provider_invalid");
+    }
+  });
+
+  test("embedding providers are the exact supported subset", () => {
+    for (const provider of EMBED_PROVIDER_NAMES) {
+      expect(parseEmbedProviderName(provider)).toBe(provider);
+    }
+    for (const unsupported of ["anthropic", "bedrock", "OpenAI", " openai", "openai "]) {
+      expect(() => parseEmbedProviderName(unsupported)).toThrow("EMBED_PROVIDER_invalid");
+    }
+  });
+
+  test("uses the same exact parser for base providers and optional tier routes", () => {
+    expect(
+      parseProviderEnvironment({
+        EMBED_PROVIDER: "openrouter",
+        CLASSIFY_PROVIDER: "anthropic",
+        PROVIDER_ROUTE_TIER1: "bedrock",
+        PROVIDER_ROUTE_TIER2: "ollama",
+      }),
+    ).toEqual({
+      embedProvider: "openrouter",
+      classifyProvider: "anthropic",
+      providerRouteTier1: "bedrock",
+      providerRouteTier2: "ollama",
+    });
+    expect(parseProviderEnvironment({})).toEqual({
+      embedProvider: "ollama",
+      classifyProvider: "ollama",
+      providerRouteTier1: undefined,
+      providerRouteTier2: undefined,
+    });
+  });
+
+  test("config load rejects malformed base and route values without exposing credentials", () => {
+    const database = "postgres://owner:secret@localhost:5432/minime";
+    for (const [setting, value] of [
+      ["EMBED_PROVIDER", "OpenAI"],
+      ["EMBED_PROVIDER", "anthropic"],
+      ["EMBED_PROVIDER", "bedrock"],
+      ["CLASSIFY_PROVIDER", "openai "],
+      ["PROVIDER_ROUTE_TIER1", " openrouter"],
+      ["PROVIDER_ROUTE_TIER2", ""],
+    ] as const) {
+      const result = loadConfigWith(database, database, {
+        [setting]: value,
+        OPENAI_API_KEY: "credential-that-must-not-appear",
+      });
+      expect(result.code).not.toBe(0);
+      expect(result.output).toContain(`${setting}_invalid`);
+      expect(result.output).not.toContain("credential-that-must-not-appear");
+    }
+  });
+});
+
+describe("data-root configuration boundary", () => {
+  test("rejects broad backup/mutation roots at config load without changing their modes", () => {
+    const database = "postgres://owner:secret@localhost:5432/minime";
+    const repo = join(import.meta.dir, "..");
+    const broadSpellings = [
+      "/",
+      "/tmp",
+      "/var",
+      "/private/tmp",
+      "/private/var",
+      tmpdir(),
+      homedir(),
+      homedir().toUpperCase(),
+      `/System/Volumes/Data${homedir()}`,
+      repo,
+    ].filter(existsSync);
+    const broadRoots = new Set([
+      ...broadSpellings,
+      ...broadSpellings.map((path) => realpathSync(path)),
+    ]);
+    for (const root of broadRoots) {
+      const before = statSync(root).mode & 0o777;
+      const result = loadConfigWith(database, database, { MINIME_DATA_DIR: root });
+      expect(result.code).not.toBe(0);
+      expect(result.output).toContain("UNSAFE_PRIVATE_ROOT");
+      expect(statSync(root).mode & 0o777).toBe(before);
+    }
+  });
+});
 
 describe("parseDotenv", () => {
   test("parses KEY=VALUE, ignoring blanks and comments", () => {
@@ -57,5 +183,74 @@ describe("fillMissingEnv", () => {
     fillMissingEnv({ RESTIC_REPOSITORY: "from-file", BACKUP_CRON: "*/15 * * * *" }, target);
     expect(target.RESTIC_REPOSITORY).toBe("caller-wins");
     expect(target.BACKUP_CRON).toBe("*/15 * * * *");
+  });
+});
+
+describe("tier-2 unlock limit", () => {
+  test("accepts only bounded positive decimal integers", () => {
+    expect(parseTier2UnlockMaxMinutes("1")).toBe(1);
+    expect(parseTier2UnlockMaxMinutes("60")).toBe(60);
+    expect(parseTier2UnlockMaxMinutes("1440")).toBe(1440);
+    for (const raw of ["", "0", "-1", "1.5", "1e2", "NaN", "Infinity", "1441"]) {
+      expect(() => parseTier2UnlockMaxMinutes(raw)).toThrow(/TIER2_UNLOCK_MAX_MINUTES/);
+    }
+  });
+
+  test("runtime guard fails closed if a test or caller mutates parsed config", () => {
+    for (const value of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 1441]) {
+      expect(() => assertTier2UnlockMaxMinutes(value)).toThrow(/TIER2_UNLOCK_MAX_MINUTES/);
+    }
+  });
+});
+
+describe("Postgres configuration boundary", () => {
+  test("accepts exact loopback pairs for live and guarded scratch databases", () => {
+    for (const url of [
+      "postgres://owner:secret@LOCALHOST/minime",
+      "postgres://owner:secret@127.0.0.1:6543/minime_test_runtime_123",
+      "postgres://owner:secret@[::1]:5432/minime_eval_lme1",
+    ]) {
+      expect(() => validateMinimeDatabasePair(url, url)).not.toThrow();
+      expect(loadConfigWith(url, url).code).toBe(0);
+    }
+  });
+
+  test("keeps localhost, IPv4, and IPv6 as distinct server identities", () => {
+    const owner = "postgres://owner:secret@localhost:5432/minime";
+    for (const app of [
+      "postgres://minime_app:secret@127.0.0.1:5432/minime",
+      "postgres://minime_app:secret@[::1]:5432/minime",
+      "postgres://minime_app:secret@localhost:5433/minime",
+    ]) {
+      expect(() => validateMinimeDatabasePair(owner, app)).toThrow("database_endpoint_invalid");
+    }
+  });
+
+  test("config load rejects malformed, remote, and split endpoints with a fixed secret-free error", () => {
+    const secret = "database-boundary-secret";
+    const owner = `postgres://owner:${secret}@localhost:5432/minime`;
+    for (const app of [
+      `postgres://minime_app:${secret}@database.example.test:5432/minime`,
+      `mysql://minime_app:${secret}@localhost:5432/minime`,
+      `postgres://minime_app:${secret}@localhost:5432/postgres`,
+      `postgres://minime_app:${secret}@localhost:5432/minime?host=database.example.test`,
+      `postgres://minime_app:${secret}@127.0.0.1:5432/minime`,
+    ]) {
+      const result = loadConfigWith(owner, app);
+      expect(result.code).not.toBe(0);
+      expect(result.output).toContain("database_endpoint_invalid");
+      expect(result.output).not.toContain(secret);
+      expect(result.output).not.toContain(app);
+    }
+  });
+
+  test("runtime credential derivation preserves the validated host, port, and database", () => {
+    const owner = "postgres://owner:owner-secret@127.0.0.1:6543/minime";
+    const app = derivePostgresCredentials(owner, "minime_app", "runtime-secret");
+    const parsed = parseLocalPostgresUrl(app, "minime");
+    expect(parsed.hostname).toBe("127.0.0.1");
+    expect(parsed.port).toBe("6543");
+    expect(decodeURIComponent(parsed.url.username)).toBe("minime_app");
+    expect(decodeURIComponent(parsed.url.password)).toBe("runtime-secret");
   });
 });

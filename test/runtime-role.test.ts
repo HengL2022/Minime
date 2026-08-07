@@ -138,15 +138,40 @@ describe("unique scratch app runtime boundary", () => {
     const [functions] = await app`
       select
         has_function_privilege(current_user, 'public.app_allowed_tier()', 'EXECUTE') as app_allowed,
-        has_function_privilege(current_user, 'public.metric_agg(text,date,date)', 'EXECUTE') as metric_agg,
+        has_function_privilege(current_user, 'public.app_request_tier2_unlock(smallint)', 'EXECUTE') as unlock_request,
+        has_function_privilege(current_user, 'public.metric_agg(text,date,date,text)', 'EXECUTE') as metric_agg,
         has_function_privilege(current_user, 'public.cjk_fold(text)', 'EXECUTE') as cjk_fold,
-        has_function_privilege(current_user, 'public.edge_source_tier(text,uuid)', 'EXECUTE') as edge_source,
+        has_function_privilege(current_user, 'public.edge_source_tier(text,uuid)', 'EXECUTE') as raw_edge_source,
+        has_function_privilege(current_user, 'public.readable_source_tier(text,uuid)', 'EXECUTE') as readable_source,
         has_schema_privilege(current_user, 'public', 'CREATE') as schema_create`;
     expect(functions?.app_allowed).toBe(true);
+    expect(functions?.unlock_request).toBe(true);
     expect(functions?.metric_agg).toBe(true);
     expect(functions?.cjk_fold).toBe(true);
-    expect(functions?.edge_source).toBe(true);
+    expect(functions?.raw_edge_source).toBe(false);
+    expect(functions?.readable_source).toBe(true);
     expect(functions?.schema_create).toBe(false);
+    const [publicFunctions] = await testSql`
+      select
+        has_function_privilege('public', 'public.app_allowed_tier()', 'EXECUTE') as app_allowed,
+        has_function_privilege('public', 'public.app_request_tier2_unlock(smallint)', 'EXECUTE') as unlock_request,
+        has_function_privilege('public', 'public.metric_agg(text,date,date,text)', 'EXECUTE') as metric_agg`;
+    expect(publicFunctions).toEqual({
+      app_allowed: false,
+      unlock_request: false,
+      metric_agg: false,
+    });
+    const [metricFunction] = await testSql`
+      select to_regprocedure('public.metric_agg(text,date,date)') is null as old_removed,
+             routine.prosecdef as security_definer,
+             routine.proconfig as settings
+      from pg_proc routine
+      where routine.oid = 'public.metric_agg(text,date,date,text)'::regprocedure`;
+    expect(metricFunction).toEqual({
+      old_removed: true,
+      security_definer: true,
+      settings: ["search_path=pg_catalog, public, pg_temp"],
+    });
     const [membership] = await testSql`
       select count(*)::int as n
       from pg_auth_members m
@@ -160,6 +185,20 @@ describe("unique scratch app runtime boundary", () => {
     expect(catalogAcl?.explicit_grant).toBe(false);
     await expectSqlReject(app`select * from transactions`, /permission denied/);
     await expectSqlReject(app`select * from health_samples`, /permission denied/);
+    const [metricCache] = await app`
+      select
+        has_table_privilege(current_user, 'public.metric_values', 'SELECT') as can_select,
+        has_table_privilege(current_user, 'public.metric_values', 'INSERT') as can_insert,
+        has_table_privilege(current_user, 'public.metric_values', 'UPDATE') as can_update`;
+    expect(metricCache).toEqual({ can_select: true, can_insert: false, can_update: false });
+    const aggregateOnly =
+      await app`select * from metric_agg('steps', '2026-01-01', '2026-01-02', 'UTC')`;
+    expect(aggregateOnly).toHaveLength(0);
+    await expectSqlReject(
+      app`insert into metric_values (metric, period_start, granularity, value, source)
+          values ('steps', '2026-01-01', 'day', 1, 'runtime-caller')`,
+      /permission denied/,
+    );
   });
 
   test("scratch role has no memberships or unsafe attributes", async () => {
@@ -184,26 +223,49 @@ describe("unique scratch app runtime boundary", () => {
     expect(Number(membership?.n)).toBe(0);
   });
 
-  test("session unlocks are insert-only and app_allowed_tier remains executable", async () => {
+  test("session unlock rows are private and the app can only create pending requests", async () => {
     const [privileges] = await app`
       select has_table_privilege(current_user, 'public.session_unlocks', 'SELECT') as can_select,
-             has_table_privilege(current_user, 'public.session_unlocks', 'INSERT') as can_insert`;
+             has_table_privilege(current_user, 'public.session_unlocks', 'INSERT') as can_insert,
+             has_table_privilege(current_user, 'public.session_unlocks', 'UPDATE') as can_update`;
     expect(privileges?.can_select).toBe(false);
-    expect(privileges?.can_insert).toBe(true);
+    expect(privileges?.can_insert).toBe(false);
+    expect(privileges?.can_update).toBe(false);
     await expectSqlReject(app`select id from session_unlocks`, /permission denied/);
+    await expectSqlReject(
+      app`insert into session_unlocks
+          (scope, requested_by, session_id, requested_minutes)
+          values ('tier2', 'agent:self-grant', ${crypto.randomUUID()}::uuid, 5)`,
+      /permission denied/,
+    );
+    await expectSqlReject(
+      app`update session_unlocks set approved_by = 'agent:self-grant'`,
+      /permission denied/,
+    );
+    await expectSqlReject(
+      app`select app_request_tier2_unlock(5::smallint)`,
+      /unlock_actor_required/,
+    );
 
-    const unlockId = crypto.randomUUID();
-    await app`
-      insert into session_unlocks (id, scope, granted_at, expires_at, granted_via)
-      values (${unlockId}, 'tier2', now(), now() + interval '5 minutes', 'agent:insert-only')`;
+    const sessionId = crypto.randomUUID();
+    const [request] = await app.begin(async (tx) => {
+      await tx`select set_config('minime.actor', 'agent:request-only', true)`;
+      await tx`select set_config('minime.session_id', ${sessionId}, true)`;
+      return tx`select app_request_tier2_unlock(5::smallint)::text as id`;
+    });
     try {
       const [tier] = await app.begin(async (tx) => {
-        await tx`select set_config('minime.actor', 'agent:insert-only', true)`;
+        await tx`select set_config('minime.actor', 'agent:request-only', true)`;
+        await tx`select set_config('minime.session_id', ${sessionId}, true)`;
         return tx`select app_allowed_tier()::int as tier`;
       });
-      expect(Number(tier?.tier)).toBe(2);
+      expect(Number(tier?.tier)).toBe(1);
+      const [stored] = await testSql`
+        select approved_at, approved_by, expires_at
+        from session_unlocks where id = ${request!.id}::uuid`;
+      expect(stored).toEqual({ approved_at: null, approved_by: null, expires_at: null });
     } finally {
-      await testSql`delete from session_unlocks where id = ${unlockId}`;
+      await testSql`delete from session_unlocks where id = ${request!.id}::uuid`;
     }
   });
 
@@ -222,23 +284,39 @@ describe("unique scratch app runtime boundary", () => {
     expect(locked.map((row) => row.body_md)).toEqual(["ROLE-TIER1"]);
   });
 
-  test("actor-local unlock reveals only that actor's tier-2 rows", async () => {
+  test("an approved unlock requires the exact actor and connection session", async () => {
+    const sessionId = crypto.randomUUID();
+    const [request] = await app.begin(async (tx) => {
+      await tx`select set_config('minime.actor', 'agent:phase-a', true)`;
+      await tx`select set_config('minime.session_id', ${sessionId}, true)`;
+      return tx`select app_request_tier2_unlock(5::smallint)::text as id`;
+    });
     await testSql`
-      insert into session_unlocks (scope, granted_at, expires_at, granted_via)
-      values ('tier2', now(), now() + interval '5 minutes', 'agent:phase-a')`;
+      update session_unlocks
+      set approved_at = clock_timestamp(), approved_by = 'owner:test',
+          expires_at = clock_timestamp() + interval '5 minutes'
+      where id = ${request!.id}::uuid`;
     try {
       const locked = await app.begin(async (tx) => {
-        await tx`select set_config('minime.actor', 'agent:other', true)`;
+        await tx`select set_config('minime.actor', 'agent:phase-a', true)`;
+        await tx`select set_config('minime.session_id', ${crypto.randomUUID()}, true)`;
         return tx`select app_allowed_tier()::int as tier`;
       });
       expect(Number(locked[0]?.tier)).toBe(1);
       const unlocked = await app.begin(async (tx) => {
         await tx`select set_config('minime.actor', 'agent:phase-a', true)`;
+        await tx`select set_config('minime.session_id', ${sessionId}, true)`;
         return tx`select app_allowed_tier()::int as tier`;
       });
       expect(Number(unlocked[0]?.tier)).toBe(2);
+      const malformed = await app.begin(async (tx) => {
+        await tx`select set_config('minime.actor', 'agent:phase-a', true)`;
+        await tx`select set_config('minime.session_id', 'not-a-uuid', true)`;
+        return tx`select app_allowed_tier()::int as tier`;
+      });
+      expect(Number(malformed[0]?.tier)).toBe(1);
     } finally {
-      await testSql`delete from session_unlocks where granted_via = 'agent:phase-a'`;
+      await testSql`delete from session_unlocks where id = ${request!.id}::uuid`;
     }
   });
 
@@ -268,6 +346,31 @@ describe("unique scratch app runtime boundary", () => {
       await testSql`delete from edges where id = ${edgeId}`;
       await testSql`delete from pages where id = ${source!.id}`;
     }
+  });
+
+  test("decision-branch trigger uses only the readable source-tier boundary", async () => {
+    const [decision] = await testSql`
+      insert into decisions (question, options, tier, source, created_by)
+      values ('Runtime branch fixture?', '["ship"]'::jsonb, 1, 'test', 'owner:test')
+      returning id`;
+    const [branch] = await testSql`
+      insert into decision_branches
+        (decision_id, label, status, tier, source, created_by)
+      values (${decision!.id}, 'ship', 'considered', 1, 'test', 'owner:test')
+      returning id`;
+    await testSql`
+      insert into edges
+        (src_type, src_id, rel, dst_type, dst_id, source_table, source_id,
+         extracted_by, tier, source, created_by, derived_from)
+      values
+        ('decision', ${decision!.id}, 'considered', 'decision_branch', ${branch!.id},
+         'decision_branches', ${branch!.id}, 'owner:test', 1, 'test', 'owner:test', ${branch!.id})`;
+
+    await app`update decision_branches set status = 'chosen' where id = ${branch!.id}`;
+    const [edge] = await testSql`
+      select rel, tier from edges
+      where src_id = ${decision!.id} and dst_id = ${branch!.id}`;
+    expect(edge).toEqual({ rel: "chose", tier: 1 });
   });
 
   test("app writes return client identifiers while locked, but reads stay omitted", async () => {

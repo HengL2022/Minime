@@ -5,7 +5,9 @@
 
 ## Symptom
 
-21 `inbox_items` rows stuck `status='pending'` with `classifier_output IS NULL`,
+The example below is fictionalized; counts, usernames, and paths are illustrative.
+
+Five `inbox_items` rows stuck `status='pending'` with `classifier_output IS NULL`,
 surviving every service restart. They inflated the pending count and were
 re-scanned on every `serve` start.
 
@@ -13,9 +15,9 @@ re-scanned on every `serve` start.
 
 The rows' `raw_path` pointed at files that do not exist on this host:
 
-- 20 rows: `/fictional-owner/.hermes/data/inbox/...` (macOS paths — captured on a
-  different machine, user `hlbot`, then the Postgres DB was synced to this Linux box)
-- 1 row: `/home/ubuntu/.hermes/data/inbox/...` (the old MINIME_DATA_DIR mismatch,
+- 4 rows: `/fixture-host-a/minime/inbox/...` (captured on a different machine by
+  `demo-user`, then the Postgres DB was synced to this host)
+- 1 row: `/fixture-host-b/minime/inbox/...` (an old `MINIME_DATA_DIR` mismatch,
   file already gone)
 
 `drainStartup()` (src/pipeline/watcher.ts) re-processes pending rows whose
@@ -29,29 +31,36 @@ residue from importing/syncing a DB that carries another host's file paths.
 
 ## Fix (self-healing)
 
-`drainStartup` now distinguishes "file present" from "file missing" for
-NULL-classifier pending rows:
+`drainStartup` now distinguishes "recoverable immutable snapshot" from "source missing" for
+unclassified pending rows and stale processing claims:
 
-- **present** → process as before
-- **missing** → `setInboxRejected(id, reason)` (status `rejected`,
+- **stored relative archive present** → verify its SHA-256 and retry from those immutable bytes
+- **matching source present** → adopt/create its `(raw_path, content_hash)` identity and process
+- **both missing** → `rejectRetryableInboxItem(id, reason)` (status `rejected`,
   `classifier_output = {rejected:true, reason}`) + `logEvent('inbox:orphaned')`,
   then a one-line stderr notice.
 
-So orphans are recorded, auditable, and never retried. New repo helper
-`setInboxRejected()`. Regression test in `test/m4.importers.test.ts`
+So orphans are recorded, auditable, and never retried, while a copied `data/archive/` can recover
+a stale claim even when its host-absolute `raw_path` is no longer valid. Regression tests in
+`test/m4.importers.test.ts` and `test/inbox-identity.test.ts`
 ("orphaned pending rows ... are rejected, not retried forever").
 
 ## Cleanup performed
 
-Backed up `inbox_items` to `~/minime-backups/inbox-orphans-20260616-095914.sql`,
-then restarted the service; the new logic auto-rejected all 21 orphans on boot
-(21 `inbox:orphaned` events written). Post-state: 32 filed / 6 pending (all
-legitimately classified low-confidence, awaiting review) / 21 rejected.
+Backed up `inbox_items` to `<private-backup-dir>/inbox-orphans-<timestamp>.sql`,
+then restarted the service; the new logic auto-rejected all five orphans on boot
+(five `inbox:orphaned` events written). The remaining pending rows were legitimate
+low-confidence captures awaiting review.
 
 ## Note for future cross-machine moves
 
-When syncing the Minime DB between hosts, `raw_path` values are host-absolute.
-Already-`filed` rows are unaffected (text lives in the typed tables + brain
-archive), but any still-`pending` NULL-classifier rows will be auto-rejected on
-the new host because their source files don't travel with the DB. If you need
-those captures, copy `data/inbox/` (or `data/archive/`) alongside the DB.
+When syncing the Minime DB between hosts, `raw_path` values remain host-absolute while new
+`archive_path` values are relative to `data/`. A pending or stale-processing hashed row can resume
+from a copied `data/archive/`; a legacy unhashed pending row still needs its original `data/inbox/`
+source and is rejected if neither usable source exists.
+
+Filed database rows themselves remain intact, but retained files copied into `data/inbox/` under a
+different absolute repository/data root are observed as new `(raw_path, content_hash)` captures.
+They can therefore re-enter normal filing/deduplication. This is the deliberate consequence of the
+current path-plus-byte identity; review those captures after a cross-root move rather than assuming
+that retained inbox sources are globally deduplicated.

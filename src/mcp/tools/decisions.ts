@@ -6,7 +6,7 @@ import {
   reviewDecision,
 } from "../../db/repo";
 import { indexParent } from "../../search/index-parent";
-import { localDateStr, localDateTimeToUtc, now } from "../../util/clock";
+import { addLocalCalendarDays, localDateTimeToUtc, now } from "../../util/clock";
 import { config } from "../../util/config";
 import { ToolError, envelope } from "../envelope";
 import type { ToolDef } from "./registry";
@@ -163,12 +163,9 @@ export const logDecisionTool: ToolDef = {
   },
   handler: async (params, ctx) => {
     const days = params.review_in_days ?? 90;
-    // Local calendar date N days out. Slicing a UTC instant (toISOString) would
-    // land on the previous day when queried in the pre-dawn local window (local
-    // past midnight, UTC not yet rolled over) — review dates must be the owner's
-    // calendar day, not UTC's. See DECISIONS.md (state/journal/decision TZ fixes).
-    const reviewAt =
-      params.review_at ?? localDateStr(new Date(now().getTime() + days * 86_400_000), ctx.timeZone);
+    // Review dates are local calendar dates, not fixed 24-hour durations. A
+    // duration can repeat or skip the target date across DST transitions.
+    const reviewAt = params.review_at ?? addLocalCalendarDays(now(), days, ctx.timeZone);
     const { id } = await insertDecision({
       question: params.question,
       options: params.options,
@@ -227,7 +224,7 @@ export const reviewDecisionTool: ToolDef = {
   handler: async (params, ctx) => {
     const existing = await getDecision(params.decision_id, ctx.actor);
     if (!existing) throw new ToolError("NOT_FOUND", `decision ${params.decision_id} not found`);
-    const { principleId } = await reviewDecision(
+    const { principleId, principleTier } = await reviewDecision(
       params.decision_id,
       params.actual_outcome,
       params.lesson ?? null,
@@ -246,7 +243,14 @@ export const reviewDecisionTool: ToolDef = {
       existing.tier,
     );
     if (principleId && params.lesson) {
-      await indexParent("principle", principleId, `# Principle\n\n${params.lesson}`, undefined, 1);
+      if (!principleTier) throw new Error("reviewed principle tier missing");
+      await indexParent(
+        "principle",
+        principleId,
+        `# Principle\n\n${params.lesson}`,
+        undefined,
+        principleTier,
+      );
     }
     await import("../../pipeline/decision-digest")
       .then((m) => m.draftDecisionDigest(params.decision_id))

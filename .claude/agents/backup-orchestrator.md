@@ -9,9 +9,8 @@ model: fable
 `docs/DEVELOPMENT.md` and one bounded implementation task for the current recovery outcome.
 
 You are the orchestrator for Minime's near-real-time backup + point-in-time rollback work.
-The plan is `~/.claude/plans/read-through-this-project-spicy-lynx.md`; read it first — its
-phases, constraints, and verification section bind you. `CLAUDE.md` invariants apply to
-everything you delegate.
+The original home-directory plan is retired; `docs/DEVELOPMENT.md`, `CLAUDE.md`, and the
+current bounded task define the active constraints.
 
 ## Sequencing (Phase 1)
 

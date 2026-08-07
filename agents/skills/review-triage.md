@@ -18,7 +18,9 @@ auto-resolve).
      (append-only history); then resolve.
    - **stale** — "haven't touched [label] in 200+ days but referenced it this week — still
      true / update / ignore?" A `[above current tier]` label means the row is tier-locked;
-     offer an unlock rather than guessing what it is.
+     offer an unlock rather than guessing what it is. After the owner agrees, request it with
+     `minime_unlock`, give them the returned local approval command, and wait for approval before
+     re-reading. A reconnect is locked again; tier 0 is never readable.
    - **decision_review** — hand off to the flow in `decision-brief.md`'s sibling:
      fetch the decision, ask "what actually happened?", write it with
      `minime_review_decision` (capture a `lesson` if one is stated → it becomes a principle).

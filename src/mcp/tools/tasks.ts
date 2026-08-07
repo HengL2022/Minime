@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { upsertTask } from "../../db/repo";
+import { TaskNotFoundError, upsertTask } from "../../db/repo";
 import { indexParent } from "../../search/index-parent";
 import { ToolError, envelope } from "../envelope";
 import type { ToolDef } from "./registry";
@@ -32,7 +32,8 @@ export const upsertTaskTool: ToolDef = {
         source: "capture",
       }));
     } catch (e) {
-      throw new ToolError("NOT_FOUND", e instanceof Error ? e.message : String(e));
+      if (e instanceof TaskNotFoundError) throw new ToolError("NOT_FOUND", "task not found");
+      throw e;
     }
     await indexParent("task", id, [params.title, params.body ?? ""].join("\n\n"), undefined, 1);
     return envelope({ task_id: id }, [{ type: "task", id }]);

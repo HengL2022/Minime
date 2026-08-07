@@ -5,7 +5,8 @@
 -- revoked outright, mirroring minime_app (I3: tier-0 never enters agent context).
 do $$ begin
   if not exists (select 1 from pg_roles where rolname = 'minime_engineer_ro') then
-    create role minime_engineer_ro login password 'minime';   -- localhost box; same posture as scripts/lib.sh
+    create role minime_engineer_ro login password 'minime'
+      nosuperuser nocreatedb nocreaterole nobypassrls noinherit noreplication;
   end if;
 end $$;
 

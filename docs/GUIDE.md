@@ -48,10 +48,11 @@ Phrasing nudges the classifier (all optional):
 
 ### 2. Brain pages — for notes and ideas you curate
 
-`data/brain/` is a folder of plain markdown, tracked in its own git repo. Write anything
-there in any structure you like — project notes, reading notes, idea pages, reference
-docs. Run `bun run src/cli.ts sync` (or let the resident server pick it up) and every
-page is chunked, embedded, and searchable.
+`data/brain/` is a gitignored folder of plain Markdown in Minime's local data archive. Minime
+does not initialize or maintain a separate Git repository there. Write anything in any
+structure you like — project notes, reading notes, idea pages, reference docs — then run
+`bun run src/cli.ts sync` after direct edits so each page is chunked, embedded, and searchable.
+The resident watcher monitors `data/inbox/`; it does not watch `data/brain/`.
 
 This is the right home for *living documents* you'll edit over time. The inbox is for
 *moments*; the brain is for *pages*.
@@ -60,8 +61,11 @@ This is the right home for *living documents* you'll edit over time. The inbox i
 
 Tell your agent "journal: …" (→ `minime_journal`, with optional mood/energy 1–5), or
 just write journal-ish text into the inbox. Journal entries are **tier 2**: agents can
-write them anytime but can only *read* them during a time-boxed unlock you grant
-explicitly (`minime_unlock`, max 60 min, loudly audited).
+write them anytime but can only *read* them during an unlock you approve explicitly. After
+you agree, `minime_unlock` creates a pending request and gives the agent a request ID and local
+command. Run `bun run src/cli.ts unlock:approve <request-id>` in your own terminal. Approval
+must happen within 10 minutes, is time-boxed, loudly audited, bound to that MCP connection,
+and is lost when it reconnects.
 
 ### 4. People and interactions
 
@@ -91,6 +95,11 @@ All idempotent — re-importing the same file changes nothing. Transactions and 
 **tier 0**: no agent ever sees a row; they exist only as aggregates ("spend by category,
 last 3 months") through `minime_query_metric`.
 
+Calendar imports preserve UTC and `TZID` timestamps. Floating times use Minime's configured
+owner timezone, and all-day `VALUE=DATE` events span local midnights even across daylight-saving
+changes. Invalid dates, zones, or end times are skipped and logged without copying event text into
+the audit trail.
+
 ### 7. Agent work sessions — automatic, opt-in
 
 `make install-hooks` adds a Claude Code hook that summarizes every coding session (what
@@ -106,7 +115,11 @@ work becomes part of your searchable history with zero effort.
   commitments, decision reviews due, and the review queue (`minime_state`).
 - **Numbers**: always via metrics ("how did I sleep this month?" →
   `minime_query_metric sleep_minutes`). Agents are forbidden from doing arithmetic over
-  your prose — numbers come from SQL or not at all.
+  your prose — numbers come from SQL or not at all. Include `time_zone` when the answer should
+  follow a travel/local calendar; live results use that zone without overwriting the nightly
+  configured-timezone cache. The nightly cache is rebuilt atomically if the configured timezone
+  changes, and a normal refresh removes derived buckets whose source data moved or disappeared
+  while preserving manual values.
 - **The evening review habit**: once a day, ask for the review queue — unfiled captures,
   flagged contradictions ("you wrote X in March but Y today"), stale pages, decisions
   due. Five minutes; it keeps the database honest.
@@ -115,9 +128,9 @@ work becomes part of your searchable history with zero effort.
 
 - **Tiers**: 0 = money/health (never readable, aggregates only) · 1 = notes, tasks,
   people (agent-readable default) · 2 = journal, interactions, email metadata
-  (unlock-gated reads). Tier 0 is absorbing: prose carrying explicit tier-0 evidence is
-  never promoted into an agent-readable tier. Set `CLOUD_MAX_TIER=1` in `.env` to keep
-  tier 2 off cloud models too.
+  (owner-approved, session-bound unlock-gated reads). Tier 0 is absorbing and never
+  readable: prose carrying explicit tier-0 evidence is never promoted into an agent-readable
+  tier. Set `CLOUD_MAX_TIER=1` in `.env` to keep tier 2 off cloud models too.
 - **Audit**: `bun run src/cli.ts audit --since 7d` shows every read, write, and byte of
   egress — which agent, when, which rows. The log is append-only; nothing can be
   quietly erased.
@@ -166,11 +179,24 @@ or a distributed rollback across Postgres, files, model providers, or indexes.
   The archive file itself is preserved byte-for-byte for owner recovery. Human-owned collisions
   are left unchanged and reported only with an opaque target hash for owner review.
 - **Backups**: configured in `make setup` (restic, client-side encrypted, local disk or
-  B2/S3). Each logical dump is paired with a private manifest binding its hash, applied
-  migrations, and representative row counts. `make restore-pitr TIME="…"` is a compatibility
-  name: it restores the latest logical snapshot at or before that time into a scratch DB; it is
-  not WAL/PITR. Promotion remains the separate `make promote-restore` step, so the live database
-  is never touched during validation.
+  B2/S3). Fresh installs leave backups disabled until you choose a destination. Selecting
+  “skip” later clears the active destination, cadence, and backup credentials from `.env`
+  without deleting an existing restic password file. Each logical dump is paired with a private
+  manifest binding its hash, applied migrations, and representative row counts.
+  `make restore-drill` requires a real configured restic snapshot, reports that source, checks
+  the historical manifest/counts, migrates the
+  temporary database to the checked-out ledger, validates its safety posture, and removes it.
+  `make verify-restore-e2e` runs the same proof with fictional data in an isolated temporary
+  PostgreSQL cluster and local restic repository; it never connects to the configured cluster.
+  `make restore-pitr TIME="…"` is a compatibility name: it restores the latest logical snapshot at
+  or before that time into `minime_restore`, validates and migrates that scratch database, and
+  leaves it for inspection. It is not WAL/PITR.
+- **Restore promotion**: `make promote-restore` is a separate, deliberate owner action. It refuses
+  active sessions, prepared transactions, a stale schema, or an existing `minime_replaced`; writes
+  a private pre-promotion dump; blocks new connections; then performs the two database renames.
+  A failed second rename is compensated back to the original `minime`. After success the prior
+  database remains blocked as `minime_replaced` for recovery. If the command reports
+  `compensation_failed`, stop and inspect the three database names/postures before retrying.
 - Archive paths are repository-stable and physical: the default is the repository's data/
   directory even when an MCP host starts Minime elsewhere or through a symlink. Relative
   MINIME_DATA_DIR overrides are also

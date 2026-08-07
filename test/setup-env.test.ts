@@ -2,11 +2,25 @@
 // HOME so it can never touch the owner's real .env or restic password file.
 
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const REPO = join(import.meta.dir, "..");
+const BACKUP_KEYS = [
+  "RESTIC_REPOSITORY",
+  "RESTIC_PASSWORD_FILE",
+  "BACKUP_CRON",
+  "B2_ACCOUNT_ID",
+  "B2_ACCOUNT_KEY",
+  "B2_APPLICATION_KEY_ID",
+  "B2_APPLICATION_KEY",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "AWS_REGION",
+  "AWS_DEFAULT_REGION",
+] as const;
 
 function freshDir(): string {
   const d = join(tmpdir(), `minime-setup-${Math.random().toString(36).slice(2, 10)}`);
@@ -29,17 +43,46 @@ async function runWizard(dir: string, answers: string[]) {
   return { code: proc.exitCode, out: proc.stdout.toString() };
 }
 
+function envValue(env: string, key: string): string | undefined {
+  const line = env.split("\n").find((candidate) => candidate.startsWith(`${key}=`));
+  if (!line) return undefined;
+  const raw = line.slice(key.length + 1);
+  if (
+    raw.length >= 2 &&
+    ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'")))
+  ) {
+    return raw.slice(1, -1);
+  }
+  return raw;
+}
+
+async function setTestEnvValues(dir: string, values: Readonly<Record<string, string>>) {
+  let lines = (await Bun.file(join(dir, ".env")).text()).split("\n");
+  for (const [key, value] of Object.entries(values)) {
+    let replaced = false;
+    lines = lines.flatMap((line) => {
+      if (!line.startsWith(`${key}=`) && !line.startsWith(`#${key}=`)) return [line];
+      if (replaced) return [];
+      replaced = true;
+      return [`${key}=${value}`];
+    });
+    if (!replaced) lines.push(`${key}=${value}`);
+  }
+  await Bun.write(join(dir, ".env"), lines.join("\n"));
+}
+
 describe("setup-env wizard", () => {
   test("local defaults + local backup dir: writes private .env and password file", async () => {
     const dir = freshDir();
-    // TZ default, stack=local ollama, backup=local path, dir default, ack the password prompt
-    const { code, out } = await runWizard(dir, ["", "1", "1", "", ""]);
+    // TZ default, stack=local ollama, backup=local path, dir/cadence defaults, password ack
+    const { code, out } = await runWizard(dir, ["", "1", "1", "", "", ""]);
     expect(code).toBe(0);
 
     const env = await Bun.file(join(dir, ".env")).text();
     expect(statSync(join(dir, ".env")).mode & 0o777).toBe(0o600);
     expect(env).toContain("TZ=Asia/Singapore");
     expect(env).toContain(`RESTIC_REPOSITORY=${join(dir, "home")}/minime-restic`);
+    expect(envValue(env, "BACKUP_CRON")).toBe("*/15 * * * *");
 
     const pass = join(dir, "home", ".config", "minime", "restic.pass");
     expect(statSync(pass).mode & 0o777).toBe(0o600);
@@ -71,7 +114,7 @@ describe("setup-env wizard", () => {
     expect(env).toContain("EMBED_PROVIDER=openrouter");
     expect(env).toContain("OPENROUTER_API_KEY=sk-or-fictional");
     expect(env).toContain("CLOUD_MAX_TIER=1");
-    expect(env).toContain('BACKUP_CRON=""'); // backups skipped → frequent snapshots off
+    expect(envValue(env, "BACKUP_CRON")).toBe(""); // backups skipped → frequent snapshots off
     expect(out).not.toContain("sk-or-fictional"); // secrets never echoed
     expect(out).toContain("--no-ollama"); // next-step hint matches the cloud choice
   });
@@ -100,7 +143,7 @@ describe("setup-env wizard", () => {
 
   test("B2 backup: shows the restic password but not the entered B2 key", async () => {
     const dir = freshDir();
-    // TZ default, stack=local ollama, backup=B2(2), bucket, B2_ACCOUNT_ID, B2_ACCOUNT_KEY, ack
+    // TZ default, stack=local, backup=B2, bucket/id/key, cadence default, password ack
     const { code, out } = await runWizard(dir, [
       "",
       "1",
@@ -108,6 +151,7 @@ describe("setup-env wizard", () => {
       "minime-backup",
       "fictional-id",
       "fictional-b2-key",
+      "",
       "",
     ]);
     expect(code).toBe(0);
@@ -122,6 +166,86 @@ describe("setup-env wizard", () => {
     const passVal = (await Bun.file(pass).text()).trim();
     expect(out).toContain("shown ONCE");
     expect(out).toContain(passVal);
+  });
+
+  test("fresh skip clears every backup setting without creating a password", async () => {
+    const dir = freshDir();
+    const { code } = await runWizard(dir, ["", "1", "4"]);
+    expect(code).toBe(0);
+
+    const env = await Bun.file(join(dir, ".env")).text();
+    for (const key of BACKUP_KEYS) expect(envValue(env, key)).toBe("");
+    expect(existsSync(join(dir, "home", ".config", "minime", "restic.pass"))).toBe(false);
+  });
+
+  test("configured backup can be skipped and all destination credentials are cleared", async () => {
+    const dir = freshDir();
+    const configured = await runWizard(dir, [
+      "",
+      "1",
+      "3",
+      "s3:s3.amazonaws.com/fictional-minime",
+      "fictional-access",
+      "fictional-secret",
+      "",
+      "",
+    ]);
+    expect(configured.code).toBe(0);
+
+    const pass = join(dir, "home", ".config", "minime", "restic.pass");
+    await setTestEnvValues(dir, {
+      RESTIC_REPOSITORY: "s3:s3.amazonaws.com/fictional-minime",
+      RESTIC_PASSWORD_FILE: pass,
+      BACKUP_CRON: "*/15 * * * *",
+      B2_ACCOUNT_ID: "fictional-b2-account",
+      B2_ACCOUNT_KEY: "fictional-b2-key",
+      B2_APPLICATION_KEY_ID: "fictional-b2-application-id",
+      B2_APPLICATION_KEY: "fictional-b2-application-key",
+      AWS_ACCESS_KEY_ID: "fictional-aws-access",
+      AWS_SECRET_ACCESS_KEY: "fictional-aws-secret",
+      AWS_SESSION_TOKEN: "fictional-aws-session",
+      AWS_REGION: "us-east-1",
+      AWS_DEFAULT_REGION: "us-west-2",
+    });
+
+    const skipped = await runWizard(dir, ["", "1", "4"]);
+    expect(skipped.code).toBe(0);
+    const env = await Bun.file(join(dir, ".env")).text();
+    for (const key of BACKUP_KEYS) expect(envValue(env, key)).toBe("");
+  });
+
+  test("skipping disconnects but does not delete an existing restic password file", async () => {
+    const dir = freshDir();
+    const configured = await runWizard(dir, ["", "1", "1", "", "", ""]);
+    expect(configured.code).toBe(0);
+
+    const pass = join(dir, "home", ".config", "minime", "restic.pass");
+    const before = await Bun.file(pass).text();
+    const skipped = await runWizard(dir, ["", "1", "4"]);
+    expect(skipped.code).toBe(0);
+
+    const env = await Bun.file(join(dir, ".env")).text();
+    expect(envValue(env, "RESTIC_PASSWORD_FILE")).toBe("");
+    expect(await Bun.file(pass).text()).toBe(before);
+    expect(statSync(pass).mode & 0o777).toBe(0o600);
+  });
+
+  test("backup can be reconfigured after skip with a restored cadence", async () => {
+    const dir = freshDir();
+    const skipped = await runWizard(dir, ["", "1", "4"]);
+    expect(skipped.code).toBe(0);
+    // Older wizard versions represented the disabled cadence as a quoted empty value.
+    await setTestEnvValues(dir, { BACKUP_CRON: '""' });
+
+    const configured = await runWizard(dir, ["", "1", "1", "", "", ""]);
+    expect(configured.code).toBe(0);
+
+    const env = await Bun.file(join(dir, ".env")).text();
+    expect(envValue(env, "RESTIC_REPOSITORY")).toBe(join(dir, "home", "minime-restic"));
+    expect(envValue(env, "RESTIC_PASSWORD_FILE")).toBe(
+      join(dir, "home", ".config", "minime", "restic.pass"),
+    );
+    expect(envValue(env, "BACKUP_CRON")).toBe("*/15 * * * *");
   });
 
   test("re-run backs up the previous .env and keeps values as defaults", async () => {

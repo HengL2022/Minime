@@ -152,7 +152,11 @@ export async function validateEdges(
     // Route by the text actually SENT: the prompt carries the anchor chunks, whose tier can
     // exceed the edge's own (fetching them is a local read, so ordering this after the fetch
     // leaks nothing). Ceiling-skip semantics below are unchanged.
-    const tier = (Math.max(e.tier, ...anchors.map((a) => a.tier), 1) >= 2 ? 2 : 1) as 1 | 2;
+    const tier = (
+      Math.max(e.tier, e.src_tier ?? 1, e.dst_tier ?? 1, ...anchors.map((a) => a.tier), 1) >= 2
+        ? 2
+        : 1
+    ) as 1 | 2;
     // legacy ceiling semantics (only reachable with no route set): skip rather than send
     if (!config.mockOllama && classifyIsCloudForTier(tier) && tier > config.cloudMaxTier) continue;
     const v = config.mockOllama

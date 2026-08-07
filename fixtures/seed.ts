@@ -521,14 +521,13 @@ export async function seed(): Promise<Record<string, number>> {
 
   // pages: files are the archive (I4) — write the markdown into data/brain/ AND index rows,
   // so `minime sync` sees the same world the rows describe.
-  const { mkdir } = await import("node:fs/promises");
-  const { join, dirname } = await import("node:path");
+  const { join } = await import("node:path");
+  const { atomicWritePrivate } = await import("../src/util/atomic-file");
   const { config } = await import("../src/util/config");
   for (const p of PAGES) {
     const file = join(config.dataDir, "brain", p.path);
-    await mkdir(dirname(file), { recursive: true });
     const raw = `---\ntitle: ${p.title}\n---\n${p.body}`;
-    await Bun.write(file, raw);
+    await atomicWritePrivate(file, raw);
     // hash the raw file exactly as brain-sync does, so the first `minime sync` is a no-op
     const hash = new Bun.CryptoHasher("sha256").update(raw).digest("hex");
     const { id } = await upsertPage({

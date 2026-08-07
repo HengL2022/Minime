@@ -43,12 +43,20 @@ describe.skipIf(INSIDE_INSTALLER)("install.sh contract", () => {
     expect(installer.indexOf("scripts/provision-runtime-role.ts")).toBeLessThan(
       installer.indexOf('ENVIRON["MINIME_APP_DATABASE_URL"]'),
     );
+    expect(installer).toContain("derivePostgresCredentials");
+    expect(installer).not.toContain(
+      'APP_DATABASE_URL="postgres://minime_app:$MINIME_APP_PASSWORD@localhost',
+    );
+    expect(installer).toContain('MINIME_APP_DATABASE_URL="$owner_url" bun run src/cli.ts migrate');
     expect(makefile).toContain("provision-runtime-role:");
     const provisionTarget = makefile.split("provision-runtime-role:")[1]?.split("\nseed:")[0] ?? "";
     expect(provisionTarget.indexOf("migrate --context direct")).toBeLessThan(
       provisionTarget.indexOf("scripts/provision-runtime-role.ts"),
     );
     expect(provisionTarget).toContain('"$$DATABASE_URL" != "$$owner_url"');
+    expect(provisionTarget).toContain('MINIME_APP_DATABASE_URL="$$owner_url"');
+    expect(provisionTarget).toContain("derivePostgresCredentials");
+    expect(provisionTarget).toContain('parseLocalPostgresUrl(process.env.DATABASE_URL, "minime")');
     expect(makefile).toContain("openssl rand -hex 32");
     expect(makefile).toContain("runtime_role_configuration_invalid");
     expect(makefile).toContain('ENVIRON["MINIME_APP_DATABASE_URL"]');
@@ -57,6 +65,11 @@ describe.skipIf(INSIDE_INSTALLER)("install.sh contract", () => {
       makefile.indexOf('ENVIRON["MINIME_APP_DATABASE_URL"]'),
     );
     const provisioner = readFileSync(join(REPO, "scripts/provision-runtime-role.ts"), "utf8");
+    expect(provisioner).toContain("validateMinimeDatabasePair");
+    expect(provisioner).toContain('parseLocalPostgresUrl(databaseUrl, "minime")');
+    expect(provisioner.indexOf("validateMinimeDatabasePair")).toBeLessThan(
+      provisioner.indexOf("postgres(databaseUrl"),
+    );
     expect(provisioner).toContain("runtime_role_schema_not_current");
     expect(provisioner.indexOf("021_runtime_app_role.sql")).toBeLessThan(
       provisioner.indexOf("create role minime_app"),
@@ -70,19 +83,50 @@ describe.skipIf(INSIDE_INSTALLER)("install.sh contract", () => {
     expect(seed).toContain("setDecisionOutcome");
   });
 
-  test("installer fails closed before migration when .env owner endpoint is not the local target", () => {
+  test("installer resolves and validates .env before every Postgres probe or action", () => {
     const installer = readFileSync(join(REPO, "scripts/install.sh"), "utf8");
-    const endpointGuard = installer.indexOf("installer_endpoint_matches");
-    const endpointCheck = installer.indexOf('installer_endpoint_matches "$owner_url"');
-    expect(endpointGuard).toBeGreaterThan(-1);
-    expect(endpointCheck).toBeGreaterThan(endpointGuard);
-    expect(endpointCheck).toBeLessThan(installer.indexOf("migrate --context install"));
-    expect(installer).toContain("DATABASE_URL must target the installer loopback endpoint");
-    expect(installer).toContain("DATABASE_URL is required in existing .env");
+    const lib = readFileSync(join(REPO, "scripts/lib.sh"), "utf8");
+    const resolve = installer.indexOf("resolve_pg_lifecycle .env");
+    expect(resolve).toBeGreaterThan(-1);
+    expect(resolve).toBeLessThan(installer.indexOf("pg_bootstrap_complete; then"));
+    expect(resolve).toBeLessThan(installer.indexOf("if ! pg_install_port_is_safe"));
+    expect(resolve).toBeLessThan(installer.indexOf("migrate --context install"));
+    expect(lib).toContain("validated_owner_port");
+    expect(lib).toContain("parseLocalPostgresUrl(process.env.MINIME_LIFECYCLE_OWNER_URL");
+    expect(lib).toContain('PROBE_URL="$OWNER_DATABASE_URL"');
     expect(installer).toContain('DATABASE_URL="$owner_url"');
     expect(installer).not.toContain(
       'export DATABASE_URL="postgres://minime:minime@localhost:$PG_PORT/minime"',
     );
+  });
+
+  test("Bun, backend, port, and verification contracts have one persisted source", () => {
+    const installer = readFileSync(join(REPO, "scripts/install.sh"), "utf8");
+    const lib = readFileSync(join(REPO, "scripts/lib.sh"), "utf8");
+    const updater = readFileSync(join(REPO, "scripts/update.sh"), "utf8");
+    const pin = readFileSync(join(REPO, ".bun-version"), "utf8").trim();
+    expect(pin).toBe("1.3.13");
+    expect(installer).toContain("pinned_bun_version");
+    expect(installer).toContain("install_pinned_bun");
+    expect(lib).not.toContain("MINIME_BUN_VERSION_FILE");
+    expect(updater.indexOf("ensure_checked_out_bun 2")).toBeLessThan(
+      updater.indexOf("backup:pre-update"),
+    );
+    expect(updater.indexOf("ensure_checked_out_bun 4")).toBeGreaterThan(
+      updater.indexOf("git pull --ff-only"),
+    );
+    expect(updater.indexOf("ensure_checked_out_bun 4")).toBeLessThan(
+      updater.indexOf("bun install --frozen-lockfile"),
+    );
+    expect(lib).toContain("persist_pg_lifecycle");
+    expect(lib).toContain("MINIME_PG_INSTALL_PENDING");
+    expect(lib).toContain("pg_bootstrap_complete");
+    expect(lib).toContain('testUrl.pathname = "/minime_test"');
+    expect(lib).toContain("rolcanlogin and rolcreatedb and rolcreaterole");
+    expect(lib).toContain('r.rolname = ${"minime"}');
+    expect(lib).toContain("selected_pg_backend_matches_service");
+    expect(installer).toContain("bash scripts/verify-offline.sh");
+    expect(installer).not.toMatch(/MINIME_INSTALLER_RUNNING=1 bun test/);
   });
 
   test("native Linux verification uses the installed PostgreSQL 16 client tools", () => {

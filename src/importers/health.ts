@@ -2,12 +2,15 @@
 // never load whole). Whitelisted kinds only; dedupe on (kind, at, source).
 
 import { insertHealthSample, logEvent } from "../db/repo";
+import { auditPayload } from "../util/audit-payload";
 import type { ImportStats } from "./calendar";
+
+type HealthKind = "steps" | "hr_resting" | "hr" | "body_mass" | "sleep_minutes";
 
 // HK identifier -> our kind + how to interpret the record
 const KIND_WHITELIST: Record<
   string,
-  { kind: string; unit: string; mode: "value" | "duration_minutes" }
+  { kind: HealthKind; unit: string; mode: "value" | "duration_minutes" }
 > = {
   HKQuantityTypeIdentifierStepCount: { kind: "steps", unit: "steps", mode: "value" },
   HKQuantityTypeIdentifierRestingHeartRate: { kind: "hr_resting", unit: "bpm", mode: "value" },
@@ -50,7 +53,11 @@ export async function importHealthRecord(tag: string, stats: ImportStats): Promi
     await logEvent({
       actor: "importer:health",
       verb: "import:malformed",
-      payload: { reason: "bad startDate", type },
+      payload: auditPayload.importMalformed({
+        importer: "health",
+        reason: "invalid_start_date",
+        recordNumber: stats.total,
+      }),
     });
     return;
   }
@@ -73,7 +80,11 @@ export async function importHealthRecord(tag: string, stats: ImportStats): Promi
       await logEvent({
         actor: "importer:health",
         verb: "import:malformed",
-        payload: { reason: "bad value", type },
+        payload: auditPayload.importMalformed({
+          importer: "health",
+          reason: "invalid_value",
+          recordNumber: stats.total,
+        }),
       });
       return;
     }
@@ -107,6 +118,10 @@ export async function importHealth(filePath: string): Promise<ImportStats> {
     // avoid unbounded growth if the file has no Record tags in this stretch
     if (buf.length > 1_000_000) buf = buf.slice(-100_000);
   }
-  await logEvent({ actor: "importer:health", verb: "import:health", payload: stats as any });
+  await logEvent({
+    actor: "importer:health",
+    verb: "import:health",
+    payload: auditPayload.importSummary({ importer: "health", ...stats }),
+  });
   return stats;
 }

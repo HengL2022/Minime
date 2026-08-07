@@ -8,17 +8,17 @@
 #
 # This list is ONLY needed for the irreducible cases the automatic signal can't catch:
 # the screen already excludes any org that >= 2 distinct people work_at (a real multi-
-# person workplace). A single-employee institution like "Johns Hopkins", though, is
-# structurally identical to a genuinely mistyped person ("Bert Vogelstein") — only a
+# person workplace). A single-employee fictional institution like "Marble Lantern", though, is
+# structurally identical to a genuinely mistyped person ("Sigrid Halvorsen") — only a
 # human knows which is which. List the orgs here so they stop surfacing on the screen.
 #
 # Rules:
 #   - one name per line; blank lines and lines starting with '#' are ignored
 #   - matched case-insensitively and EXACT against the org's canonical name
-#       "johns hopkins" silences a flag on "Johns Hopkins" but not "Johns Hopkins Lab"
+#       "marble lantern" silences a flag on "Marble Lantern" but not "Marble Lantern Lab"
 #   - this does NOT create or modify any entity — it only suppresses the review flag
 #
 # Examples (replace with your own):
-# johns hopkins
-# morgan stanley
-# goldman sachs
+# marble lantern
+# cobalt meadow
+# saffron harbor

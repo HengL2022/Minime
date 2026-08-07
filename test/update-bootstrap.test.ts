@@ -115,6 +115,15 @@ bun run src/cli.ts migrate
   writeFileSync(join(seed, "scripts", "update.sh"), readFileSync(join(REPO, "scripts/update.sh")), {
     mode: 0o700,
   });
+  writeFileSync(join(seed, "scripts", "lib.sh"), readFileSync(join(REPO, "scripts/lib.sh")), {
+    mode: 0o600,
+  });
+  writeFileSync(
+    join(seed, "scripts", "verify-offline.sh"),
+    readFileSync(join(REPO, "scripts/verify-offline.sh")),
+    { mode: 0o700 },
+  );
+  writeFileSync(join(seed, ".bun-version"), readFileSync(join(REPO, ".bun-version")));
   mkdirSync(join(seed, "src", "db"), { recursive: true });
   writeFileSync(
     join(seed, "src", "db", "migration-context.ts"),
@@ -193,7 +202,16 @@ exec "$REAL_GIT" "$@"
   const bunWrapper = `#!/bin/bash
 set -eu
 if [ "\${1:-}" = install ]; then echo install >> "$TRACE_FILE"; exit 0; fi
-if [ "\${1:-}" = test ]; then echo verify >> "$TRACE_FILE"; exit 0; fi
+if [ "\${1:-}" = test ]; then exit 0; fi
+if [ "\${1:-}" = run ] && [ "\${2:-}" = scripts/with-test-database.ts ]; then
+  echo verify >> "$TRACE_FILE"
+  exit 0
+fi
+if [ "\${1:-}" = run ]; then
+  case "\${2:-}" in
+    lint|typecheck|typecheck:ops|scripts/check-subsystems.ts) exit 0 ;;
+  esac
+fi
 if [ "\${1:-}" = run ] && [ "\${2:-}" = src/cli.ts ]; then
   case "\${3:-}" in
     backup:pre-update)

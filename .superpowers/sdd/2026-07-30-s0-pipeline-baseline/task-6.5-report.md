@@ -7,7 +7,7 @@ Status: implementation complete; Task 6 and Task 6.5 remain pending the mandated
 - `TASK65_PLAN_SHA`: `4520380f9f41a8507982d7783668f3155013a020`
 - Task 6 checkpoint: `3c3f196e71d3eec977a3d7c451da85f6282e78be`
 - Pre-amendment H3 SHA-256: `5df9177b9572b0c2838500c80499fd0fdeca8ccf54eab24bfd748fc584626efe`
-- Preserved authoritative RED (`/tmp/minime_authoritative_bun_test_r2.txt`):
+- Preserved authoritative RED (`<TEMP_DIR>/minime_authoritative_bun_test_r2.txt`):
 
   ```text
   bun test

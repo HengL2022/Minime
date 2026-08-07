@@ -61,6 +61,12 @@ if [ -n "${BUN_INSTALL:-}" ]; then case "$BUN_INSTALL" in /*) if physicalize_bin
 if [ -z "$BUN_CANDIDATE" ] && physicalize_bin_dir /opt/homebrew/opt/bun/bin; then BUN_CANDIDATE="$PHYSICAL_BIN_DIR/bun"; fi
 if [ -z "$BUN_CANDIDATE" ] && physicalize_bin_dir /usr/local/opt/bun/bin; then BUN_CANDIDATE="$PHYSICAL_BIN_DIR/bun"; fi
 resolve_trusted_binary bun "$BUN_CANDIDATE" /usr/local/bin/bun /opt/homebrew/bin/bun /usr/bin/bun || exit 1; TRUSTED_BUN="$RESOLVED_BINARY"
+if ! printf '%s\0' "$SOURCE_URL" "$ADMIN_URL_VALUE" "$DRILL_URL_VALUE" "$LIVE_URL_VALUE" "$RESTORE_URL_VALUE" |
+  "$TRUSTED_BUN" --no-env-file run "$SCRIPT_DIR/validate-recovery-endpoints.ts" promote > /dev/null 2>&1; then
+  echo "promotion failed (endpoint_boundary)" >&2
+  exit 1
+fi
+readonly SOURCE_URL ADMIN_URL_VALUE DRILL_URL_VALUE LIVE_URL_VALUE RESTORE_URL_VALUE
 PGBIN_CANDIDATE="${PGBIN:-}"; case "$PGBIN_CANDIDATE" in /*) ;; *) PGBIN_CANDIDATE="" ;; esac
 if [ -z "$PGBIN_CANDIDATE" ]; then for candidate in /opt/homebrew/opt/postgresql@17/bin /usr/local/opt/postgresql@17/bin /usr/lib/postgresql/17/bin /usr/lib/postgresql/16/bin; do if [ -d "$candidate" ]; then PGBIN_CANDIDATE="$candidate"; break; fi; done; fi
 [ -n "$PGBIN_CANDIDATE" ] || { printf '%s failed (cleanup_dependency)\n' "$SCRIPT_FAILURE_PREFIX" >&2; exit 1; }; physicalize_bin_dir "$PGBIN_CANDIDATE" || { printf '%s failed (cleanup_dependency)\n' "$SCRIPT_FAILURE_PREFIX" >&2; exit 1; }; PGBIN="$PHYSICAL_BIN_DIR"
@@ -78,6 +84,7 @@ fi
 
 DUMP_ROOT="$REPO_ROOT/db-dump"
 CONNECTION_DIR=""; DUMP=""; DUMP_IDENTITY=""; DUMP_COMPLETE=0; DUMP_IN_PROGRESS=0; DUMP_RESERVATION_OPEN=0
+RECOVERY_REQUIRED=0; PROMOTION_DIAGNOSTIC=""
 UTILITY_STDERR=""; RESTIC_STDOUT=""; RESTIC_STDERR=""; PG_DUMP_STDERR=""; PSQL_STDOUT=""; PSQL_STDERR=""; BRIDGE_STDERR=""
 mode_of() { "$TRUSTED_STAT" -c "%a" "$1" 2>/dev/null || "$TRUSTED_STAT" -f "%Lp" "$1" 2>/dev/null; }
 identity_of() { "$TRUSTED_STAT" -c "%d:%i" "$1" 2>/dev/null || "$TRUSTED_STAT" -f "%d:%i" "$1" 2>/dev/null; }
@@ -88,6 +95,14 @@ remove_owned_file() { local target="$1" root="$2" prefix="$3" expected="${4:-}" 
 best_effort_cleanup() { local target="${1:-${CONNECTION_DIR:-}}" root="${2:-${TEMP_ROOT:-}}" prefix="${3:-}" expected="${4:-}"; [ -n "$target" ] || return 0; if [ -n "$prefix" ]; then remove_owned_file "$target" "$root" "$prefix" "$expected"; else remove_owned "$target" "$root" "${target##*/}"; fi; }
 cleanup_promote() {
   local status=$? cleanup_state=0 cleanup_label="cleanup_"'failed'
+  if [ "$RECOVERY_REQUIRED" = 1 ]; then
+    if recover_promotion_posture; then
+      RECOVERY_REQUIRED=0
+    else
+      PROMOTION_DIAGNOSTIC="compensation_failed"
+      status=1
+    fi
+  fi
   ! close_dump_descriptor && cleanup_state=1
   if [ -n "${DUMP:-}" ] && [ "$DUMP_COMPLETE" != 1 ] &&
     ! best_effort_cleanup "$DUMP" "$DUMP_ROOT" 'minime-pre-promote-' "$DUMP_IDENTITY"; then
@@ -99,6 +114,8 @@ cleanup_promote() {
   if [ "$cleanup_state" = 1 ] && [ "$status" = 0 ]; then
     echo "promotion failed ($cleanup_label)" >&2
     status=1
+  elif [ -n "$PROMOTION_DIAGNOSTIC" ]; then
+    printf 'promotion failed (%s)\n' "$PROMOTION_DIAGNOSTIC" >&2
   fi
   return "$status"
 }
@@ -130,7 +147,7 @@ RESTIC_STDOUT="$CONNECTION_DIR/restic.stdout"; RESTIC_STDERR="$CONNECTION_DIR/re
 for capture in "$RESTIC_STDOUT" "$RESTIC_STDERR" "$PG_DUMP_STDERR" "$PSQL_STDOUT" "$PSQL_STDERR" "$BRIDGE_STDERR"; do if ! : > "$capture" 2>/dev/null || ! "$TRUSTED_CHMOD" 600 "$capture" >/dev/null 2>&1; then echo "promotion failed (workspace)" >&2; exit 1; fi; done
 
 SERVICE_FILE="$CONNECTION_DIR/pg_service.conf"; ADMIN_SERVICE_FILE="$CONNECTION_DIR/admin.pg_service.conf"
-bridge_service() { local raw="$1" output="$2"; export -n raw output; : > "$BRIDGE_STDERR"; if ! printf '%s' "$raw" | "$TRUSTED_BUN" run "$SCRIPT_DIR/libpq-service.ts" "$output" > /dev/null 2>"$BRIDGE_STDERR"; then echo "promotion failed (service_handoff)" >&2; return 1; fi; }
+bridge_service() { local raw="$1" output="$2"; export -n raw output; : > "$BRIDGE_STDERR"; if ! printf '%s' "$raw" | "$TRUSTED_BUN" --no-env-file run "$SCRIPT_DIR/libpq-service.ts" "$output" > /dev/null 2>"$BRIDGE_STDERR"; then echo "promotion failed (service_handoff)" >&2; return 1; fi; }
 bridge_service "$SOURCE_URL" "$SERVICE_FILE" || exit 1
 bridge_service "$ADMIN_URL_VALUE" "$ADMIN_SERVICE_FILE" || exit 1
 admin_psql() { PGSERVICE=minime_ephemeral PGSERVICEFILE="$ADMIN_SERVICE_FILE" "$TRUSTED_PSQL" "$@" > /dev/null 2>"$PSQL_STDERR"; }
@@ -144,6 +161,65 @@ admin_query() {
   while IFS= read -r line; do value="$line"; done < "$PSQL_STDOUT"
   value="$(printf '%s' "$value" | "$TRUSTED_TR" -d '\r\n' 2>"$UTILITY_STDERR")" || return 1
   case "$value" in ''|*[!0-9]*) return 1 ;; *) printf '%s' "$value" ;; esac
+}
+database_count() {
+  admin_query -qAt -c "select count(*) from pg_database where datname = '$1'"
+}
+connection_count() {
+  admin_query -qAt -c "select count(*) from pg_stat_activity where datname = '$1' and pid <> pg_backend_pid()"
+}
+prepared_count() {
+  admin_query -qAt -c "select count(*) from pg_prepared_xacts where database = '$1'"
+}
+connection_posture_count() {
+  local database="$1" allowed="$2"
+  if [ "$allowed" = true ]; then
+    admin_query -qAt -c "select count(*) from pg_database where datname = '$database' and datallowconn"
+  else
+    admin_query -qAt -c "select count(*) from pg_database where datname = '$database' and not datallowconn"
+  fi
+}
+topology_shape() {
+  admin_query -qAt -c "select (select count(*) from pg_database where datname = 'minime')::text || (select count(*) from pg_database where datname = 'minime_restore')::text || (select count(*) from pg_database where datname = 'minime_replaced')::text"
+}
+verify_unpromoted_posture() {
+  local shape live_allowed restore_allowed
+  shape="$(topology_shape)" || return 1
+  [ "$shape" = 110 ] || return 1
+  live_allowed="$(connection_posture_count minime true)" || return 1
+  restore_allowed="$(connection_posture_count minime_restore true)" || return 1
+  [ "$live_allowed" = 1 ] && [ "$restore_allowed" = 1 ]
+}
+verify_promoted_posture() {
+  local shape live_allowed replaced_blocked
+  shape="$(topology_shape)" || return 1
+  [ "$shape" = 101 ] || return 1
+  live_allowed="$(connection_posture_count minime true)" || return 1
+  replaced_blocked="$(connection_posture_count minime_replaced false)" || return 1
+  [ "$live_allowed" = 1 ] && [ "$replaced_blocked" = 1 ]
+}
+recover_promotion_posture() {
+  local attempt shape
+  for attempt in 1 2 3; do
+    shape="$(topology_shape)" || return 1
+    case "$shape" in
+      110)
+        admin_psql -v ON_ERROR_STOP=1 -qAt -c "alter database minime with allow_connections true; alter database minime_restore with allow_connections true" || return 1
+        verify_unpromoted_posture
+        return $?
+        ;;
+      011)
+        admin_psql -v ON_ERROR_STOP=1 -qAt -c "alter database minime_replaced rename to minime" || return 1
+        ;;
+      101)
+        admin_psql -v ON_ERROR_STOP=1 -qAt -c "alter database minime with allow_connections true; alter database minime_replaced with allow_connections false" || return 1
+        verify_promoted_posture
+        return $?
+        ;;
+      *) return 1 ;;
+    esac
+  done
+  return 1
 }
 ensure_dump_root() {
   local expected="$REPO_ROOT/db-dump" parent component next parent_real physical mode
@@ -191,6 +267,10 @@ enumerate_retention() {
     printf '%s\n' "$entry" >> "$output" || return 1
   done
 }
+if ! admin_psql -qAt -c "do \$\$ begin if current_database() <> 'postgres' then raise exception 'recovery_endpoint_invalid'; end if; end \$\$;"; then
+  echo "promotion failed (endpoint_boundary)" >&2
+  exit 1
+fi
 if ! ensure_dump_root; then echo "promotion failed (private_dump_root)" >&2; exit 1; fi
 TS="$($TRUSTED_DATE +%Y%m%d-%H%M%S)" || { echo "promotion failed (dump_staging)" >&2; exit 1; }
 if ! DUMP="$($TRUSTED_MKTEMP "$DUMP_ROOT/minime-pre-promote-$TS-XXXXXXXX" 2>/dev/null)"; then echo "promotion failed (dump_staging)" >&2; exit 1; fi
@@ -200,10 +280,31 @@ if ! DUMP_IDENTITY="$(identity_of "$DUMP")"; then echo "promotion failed (dump_s
 if ! reserve_dump_descriptor; then echo "promotion failed (dump_staging)" >&2; exit 1; fi
 ensure_dump_root || { echo "promotion failed (private_dump_root)" >&2; exit 1; }
 
-EXISTS="$(admin_query -qAt -c "select 1 from pg_database where datname = 'minime_restore'")" || { echo "promotion failed (psql)" >&2; exit 7; }
-[ "$EXISTS" = 1 ] || { echo "promotion failed (scratch_missing)" >&2; exit 1; }
-ACTIVE="$(admin_query -qAt -c "select count(*) from pg_stat_activity where datname = 'minime' and pid <> pg_backend_pid()")" || { echo "promotion failed (psql)" >&2; exit 7; }
-if [ "$ACTIVE" != 0 ]; then echo "promotion refused: live connections are active" >&2; exit 1; fi
+LIVE_COUNT="$(database_count minime)" || { echo "promotion failed (psql)" >&2; exit 7; }
+RESTORE_COUNT="$(database_count minime_restore)" || { echo "promotion failed (psql)" >&2; exit 7; }
+REPLACED_COUNT="$(database_count minime_replaced)" || { echo "promotion failed (psql)" >&2; exit 7; }
+if [ "$LIVE_COUNT" != 1 ] || [ "$RESTORE_COUNT" != 1 ] || [ "$REPLACED_COUNT" != 0 ]; then
+  echo "promotion failed (database_state)" >&2
+  exit 1
+fi
+LIVE_ALLOWED="$(connection_posture_count minime true)" || { echo "promotion failed (psql)" >&2; exit 7; }
+RESTORE_ALLOWED="$(connection_posture_count minime_restore true)" || { echo "promotion failed (psql)" >&2; exit 7; }
+if [ "$LIVE_ALLOWED" != 1 ] || [ "$RESTORE_ALLOWED" != 1 ]; then
+  echo "promotion failed (database_posture)" >&2
+  exit 1
+fi
+LIVE_ACTIVE="$(connection_count minime)" || { echo "promotion failed (psql)" >&2; exit 7; }
+if [ "$LIVE_ACTIVE" != 0 ]; then echo "promotion refused: live connections are active" >&2; exit 1; fi
+RESTORE_ACTIVE="$(connection_count minime_restore)" || { echo "promotion failed (psql)" >&2; exit 7; }
+if [ "$RESTORE_ACTIVE" != 0 ]; then echo "promotion refused: restore connections are active" >&2; exit 1; fi
+LIVE_PREPARED="$(prepared_count minime)" || { echo "promotion failed (psql)" >&2; exit 7; }
+if [ "$LIVE_PREPARED" != 0 ]; then echo "promotion refused: live prepared transactions exist" >&2; exit 1; fi
+RESTORE_PREPARED="$(prepared_count minime_restore)" || { echo "promotion failed (psql)" >&2; exit 7; }
+if [ "$RESTORE_PREPARED" != 0 ]; then echo "promotion refused: restore prepared transactions exist" >&2; exit 1; fi
+if ! printf '%s' "$RESTORE_URL_VALUE" | "$TRUSTED_BUN" --no-env-file run "$SCRIPT_DIR/restore-schema-gate.ts" > /dev/null 2>"$BRIDGE_STDERR"; then
+  echo "promotion failed (schema_gate)" >&2
+  exit 1
+fi
 DUMP_IN_PROGRESS=1
 PENDING_SIGNAL=0
 trap 'on_dump_signal 129' HUP
@@ -239,12 +340,42 @@ else
 fi
 ensure_dump_root || { echo "promotion failed (private_dump_root)" >&2; exit 1; }
 
-if ! admin_psql -v ON_ERROR_STOP=1 -qAt -c "alter database minime rename to minime_replaced" -c "alter database minime_restore rename to minime"; then
-  echo "==> checking for live connections"
-  echo "==> promoting restored database"
-  echo "promotion failed (psql)" >&2
+RECOVERY_REQUIRED=1
+if ! admin_psql -v ON_ERROR_STOP=1 -qAt -c "alter database minime with allow_connections false; alter database minime_restore with allow_connections false"; then
+  PROMOTION_DIAGNOSTIC="connection_block"
   exit 7
 fi
+LIVE_BLOCKED="$(connection_posture_count minime false)" || { PROMOTION_DIAGNOSTIC="posture"; exit 7; }
+RESTORE_BLOCKED="$(connection_posture_count minime_restore false)" || { PROMOTION_DIAGNOSTIC="posture"; exit 7; }
+if [ "$LIVE_BLOCKED" != 1 ] || [ "$RESTORE_BLOCKED" != 1 ]; then
+  PROMOTION_DIAGNOSTIC="posture"
+  exit 1
+fi
+LIVE_ACTIVE="$(connection_count minime)" || { PROMOTION_DIAGNOSTIC="posture"; exit 7; }
+RESTORE_ACTIVE="$(connection_count minime_restore)" || { PROMOTION_DIAGNOSTIC="posture"; exit 7; }
+LIVE_PREPARED="$(prepared_count minime)" || { PROMOTION_DIAGNOSTIC="posture"; exit 7; }
+RESTORE_PREPARED="$(prepared_count minime_restore)" || { PROMOTION_DIAGNOSTIC="posture"; exit 7; }
+if [ "$LIVE_ACTIVE" != 0 ] || [ "$RESTORE_ACTIVE" != 0 ] || [ "$LIVE_PREPARED" != 0 ] || [ "$RESTORE_PREPARED" != 0 ]; then
+  PROMOTION_DIAGNOSTIC="activity_race"
+  exit 1
+fi
+if ! admin_psql -v ON_ERROR_STOP=1 -qAt -c "alter database minime rename to minime_replaced"; then
+  PROMOTION_DIAGNOSTIC="cutover"
+  exit 7
+fi
+if ! admin_psql -v ON_ERROR_STOP=1 -qAt -c "alter database minime_restore rename to minime"; then
+  PROMOTION_DIAGNOSTIC="cutover"
+  exit 7
+fi
+if ! admin_psql -v ON_ERROR_STOP=1 -qAt -c "alter database minime with allow_connections true; alter database minime_replaced with allow_connections false"; then
+  PROMOTION_DIAGNOSTIC="posture"
+  exit 7
+fi
+if ! verify_promoted_posture; then
+  PROMOTION_DIAGNOSTIC="posture"
+  exit 1
+fi
+RECOVERY_REQUIRED=0
 echo "==> checking for live connections"
 echo "==> dumping live database to canonical pre-promote safety net"
 if [ -n "${RESTIC_REPOSITORY:-}" ] && [ -n "${TRUSTED_RESTIC:-}" ] && ! "$TRUSTED_RESTIC" backup --tag pre-promote "$DUMP" >"$RESTIC_STDOUT" 2>"$RESTIC_STDERR"; then echo "promotion warning: remote safety backup unavailable" >&2; fi

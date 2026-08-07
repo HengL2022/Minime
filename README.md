@@ -7,6 +7,54 @@ agents through one audited MCP door so they can help you decide.
 Development: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) · Guardrails: [CLAUDE.md](CLAUDE.md) ·
 Original v1 plan: [minime-build-plan.md](minime-build-plan.md)
 
+## What's new in this release (August 2026)
+
+This is primarily a trust, durability, and time-correctness release. The public MCP surface remains
+small—13 functions—but the paths behind it are substantially stronger:
+
+- **Owner-approved private reads.** `minime_unlock` now creates a pending request that must be
+  approved locally, expires quickly, is bound to one MCP connection, and never opens tier 0.
+- **Durable, replay-safe capture.** Every inbox item has an immutable byte identity. Replaying the
+  same file is idempotent; changed bytes at the same path create a new version; concurrent watcher
+  and agent captures converge without duplicate derivatives.
+- **Privacy-preserving derived knowledge.** People, organizations, aliases, and graph relations
+  inherit the strictest source tier and provenance instead of becoming less-private facts.
+- **Timezone-correct life data.** Calendar `TZID`, floating, UTC, and all-day events are interpreted
+  explicitly. Metrics, decision reviews, “today,” resident jobs, and anomaly caches use declared
+  calendar zones and DST-safe day arithmetic.
+- **Auditable least privilege.** The MCP process receives a restricted database login and a small
+  environment allowlist. Tool attempts, results, delivery disposition, and cloud egress are recorded
+  without storing prompts, secrets, or returned content in the audit payload.
+- **Truthful recovery.** Restores prove the selected restic snapshot's dump hash, migration ledger,
+  and representative counts in a scratch database. Promotion is a separate owner action with a
+  safety dump, guarded two-step cutover, and compensation if the second rename fails.
+- **Reproducible lifecycle.** Install and update share one offline verification path, pin the exact
+  Bun version, remember the selected PostgreSQL backend and port, and safely resume an interrupted
+  first install without adopting another local database.
+
+The detailed implementation and remaining owner-only actions are tracked in
+[docs/REMEDIATION.md](docs/REMEDIATION.md).
+
+## What data can Minime save?
+
+| Area | Saved data | Ways in | Default access |
+|---|---|---|---|
+| Self-model | Profile notes, values, life/year/quarter goals, principles | `make onboard`, inbox extraction | Tier 1 |
+| Plans and obligations | Tasks, due dates, status, commitments, project/reference pages | Inbox, `minime_upsert_task`, Markdown sync | Tier 1 |
+| Knowledge archive | Text/Markdown notes, ideas, reading notes, agent-session summaries, searchable chunks | `data/brain/`, `data/inbox/`, `minime_capture`, optional session hook | Tier 1, or inherited source tier; session summaries are tier 2 |
+| People and organizations | Canonical names, aliases, relationship context, last contact, typed graph relations | Inbox extraction, notes, `minime_log_interaction` | Tier 1, or stricter inherited source tier |
+| Interactions | Meetings, calls, messages, email interactions, private notes and dates | `minime_log_interaction`, inbox | Tier 2 |
+| Decisions | Question, options, criteria, choice, reasoning, confidence, expected outcome, review date, transcript, branches, actual outcome, lessons | Decision interview, `minime_log_decision`, `minime_review_decision` | Tier 1 unless raised by private evidence |
+| Journal | Markdown entry, timestamp, optional mood and energy (1–5) | `minime_journal`, inbox | Tier 2 |
+| Calendar | Event UID, title, start/end, location, attendees, timezone semantics | Idempotent `.ics` import | Tier 1 |
+| Money | Date, amount, currency, merchant, category, account label, external reference | Profile-driven CSV import | Tier 0: aggregate answers only |
+| Health | Timestamped numeric samples such as sleep, steps, and resting heart rate | Apple Health XML import | Tier 0: aggregate answers only |
+| Email | Message ID, date, sender, subject, and thread ID—**never message bodies** | Maildir metadata import | Tier 2 |
+| Operational history | Append-only tool/egress audit, review queue, source provenance, derived metric buckets | Recorded automatically | Content-minimized; maintenance-controlled |
+
+Privacy tiers are monotonic: derived rows inherit stricter evidence, tier 2 needs a local owner
+approval to read, and tier 0 rows are never returned to an agent under any configuration.
+
 ## Install (one command)
 
 ```
@@ -46,21 +94,22 @@ make setup     # interactive; the local-Ollama defaults need no credentials at a
 <details>
 <summary>Manual install (what the script does, step by step)</summary>
 
-1. Install [Bun](https://bun.sh) (`curl -fsSL https://bun.sh/install | bash`).
+1. Install the exact [Bun](https://bun.sh) version recorded in `.bun-version`.
 2. Install Docker (preferred) — or natively: `brew install postgresql@17 pgvector` (macOS)
    / `apt-get install postgresql-16 postgresql-16-pgvector` from PGDG (Debian/Ubuntu).
 3. Install [Ollama](https://ollama.com) and start it.
 4. `ollama pull nomic-embed-text && ollama pull llama3.1:8b`
 5. Clone this repo; `cd minime`.
-6. `bun install`
-7. `cp .env.example .env` and adjust (defaults work for local Docker/brew setups).
-8. `make up` — starts Postgres, creates databases + extensions, checks Ollama models.
-9. `make migrate` — applies `db/migrations/*.sql`.
-10. `make provision-runtime-role` — creates the restricted resident-app login and writes its
-    private endpoint to `.env` (the one-command installer does this automatically).
-11. (optional) `bun run src/cli.ts seed` — loads a fictional demo dataset to explore with.
-12. `make verify-offline` — run the fast offline development gate end to end.
-13. Register the MCP server with your agent:
+6. `bun install --frozen-lockfile`
+7. Optionally run `make setup` to prepare `.env` provider/backup choices.
+8. Run `bash scripts/install.sh --skip-verify` (add `--native` or `--no-ollama` if wanted) for
+   the first database bootstrap. It persists the selected backend/port, creates the databases and
+   extensions, applies migrations, and provisions the restricted resident role. `make up` is only
+   for an already-installed backend and deliberately refuses a setup-only or interrupted-bootstrap
+   `.env`; after any interruption, rerun `scripts/install.sh` to resume the exact persisted target.
+9. (optional) `bun run src/cli.ts seed` — loads a fictional demo dataset to explore with.
+10. `make verify-offline` — run the fast offline development gate end to end.
+11. Register the MCP server with your agent:
     `claude mcp add minime -- bun run /absolute/path/to/minime/src/cli.ts serve`
 
 </details>
@@ -102,20 +151,59 @@ summarizes every agent work session — first request, outcome, files touched �
 door as any other capture; sessions file as tier-2 pages (verbatim prompt text stays behind
 the unlock gate). Confirmation-gated install, backs up `~/.claude/settings.json` first.
 
+## Agent functions and release changes
+
+No new top-level MCP function name was added in this release; the public set remains the 13
+functions below. Several contracts changed in ways clients should notice:
+
+- `minime_unlock` now returns a pending request and a local approval command instead of unlocking
+  immediately.
+- `minime_capture` returns an `inbox_item_id`, not a host filesystem path.
+- `minime_log_interaction` returns only the interaction ID; it no longer reveals person/org IDs or
+  whether those rows were created or reused.
+- `minime_get_context` now includes complete edge provenance, and `minime_query_metric` now applies
+  the caller's timezone plus the metric's declared rollup rule.
+
+The new owner-side entry points are `bun run src/cli.ts unlock:approve <request-id>` and
+`make verify-restore-e2e`.
+
+| MCP function | What it does |
+|---|---|
+| `minime_search` | Hybrid-searches readable notes and structured memory with source citations. |
+| `minime_get_context` | Returns one entity plus readable relations, tasks, commitments, and exact provenance. |
+| `minime_state` | Builds a today-oriented snapshot: calendar, tasks, commitments, reviews, anomalies, and queue counts. |
+| `minime_query_metric` | Computes allowlisted numeric series in the caller's timezone; the only aggregate path to tier-0 data. |
+| `minime_capture` | Durably allocates and publishes an immutable text/Markdown inbox capture. |
+| `minime_journal` | Writes a private journal entry with optional mood and energy. |
+| `minime_log_decision` | Saves a decision, its options/reasoning, review date, branches, and optional interview transcript. |
+| `minime_review_decision` | Records the actual outcome and can turn a learned lesson into a linked principle. |
+| `minime_upsert_task` | Creates or updates a task with status, due date, body, and provenance. |
+| `minime_agenda` | Lists forward-looking tasks over a caller-zone date window. |
+| `minime_log_interaction` | Records a person/org interaction and updates relationship recency. |
+| `minime_review_queue` | Lists review flags and marks them resolved or dismissed; it never edits the flagged source rows. |
+| `minime_unlock` | Requests a time-boxed tier-2 read; the owner must approve it in a local terminal. |
+
 ## Architecture (short version)
 
-- **Files are the archive, rows are the state, Postgres is the index.** Prose lives as
-  markdown in `data/brain/` (its own git repo); structured state lives as rows; everything is
-  chunked, embedded (local Ollama) and hybrid-searchable.
+- **Files are the archive, rows are the state, Postgres is the index.** Curated prose lives in
+  the gitignored Markdown archive at `data/brain/`; run `bun run src/cli.ts sync` after direct
+  edits. Structured state lives as rows; everything is chunked, embedded (local Ollama) and
+  hybrid-searchable.
 - **One door.** Agents only reach data through the `minime` MCP server. `serve` supervises an
   app-only stdio child, so the MCP-reachable process never receives the owner database or backup
   credential. Every call is audited to an append-only `events` table; outputs are redacted and
   wrapped in an envelope carrying sources, staleness and gaps.
 - **Tiers.** 0 = never leaves the DB (transactions, health) — aggregates only via whitelisted
   SQL in `metric_defs.agg_sql`. 1 = agent-readable default. 2 = journal/interactions/email
-  metadata — reads require a time-boxed `minime_unlock`, writes are always allowed.
+  metadata — reads require an owner-approved, time-boxed unlock bound to the current MCP
+  connection; `minime_unlock` creates the pending request and the owner activates it locally with
+  `bun run src/cli.ts unlock:approve <request-id>` within 10 minutes. Writes are always allowed.
 - **Numbers via SQL only.** Quantitative answers route through `minime_query_metric`; the
-  model never does arithmetic over prose.
+  model never does arithmetic over prose. A call's `time_zone` controls live day buckets;
+  weekly/monthly rollups follow each metric's declared `sum` or `last` rule. Only the trusted
+  nightly job persists the configured-owner-timezone cache used by state anomalies. The cache
+  records that timezone identity, rebuilds atomically when it changes, and reconciles mutable
+  source windows without overwriting manual values.
 
 ## Verification
 
@@ -132,7 +220,8 @@ make verify-m7   # typed-edge knowledge graph (orgs, works_at, relations)
 make verify-m8   # CJK-aware FTS + chunker (bigram fold)
 make verify-m9   # fusion / eval-harness / notes / reranker suites
 make verify      # release/search gate: offline gate + retrieval regression (eval-search)
-make restore-drill  # restore a dump+manifest pair into a scratch DB and validate it
+make verify-restore-e2e  # isolated fictional-data Postgres + real restic round trip
+make restore-drill  # restore the latest configured restic snapshot into scratch and validate it
 ```
 
 Tests run fully offline: Ollama is mocked (`MINIME_MOCK_OLLAMA=1`), the DB is local.

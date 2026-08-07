@@ -245,6 +245,7 @@ function shellFixture(
     "restore-pitr.sh",
     "promote-restore.sh",
     "pick-snapshot.ts",
+    "restore-schema-gate.ts",
     "snapshot-manifest.ts",
     "validate-recovery-endpoints.ts",
     "libpq-service.ts",
@@ -311,6 +312,16 @@ function shellFixture(
   writeFileSync(
     join(fixtureUtil, "config.ts"),
     readFileSync(join(REPO, "src", "util", "config.ts")),
+    { mode: 0o600 },
+  );
+  writeFileSync(
+    join(fixtureUtil, "data-root.ts"),
+    readFileSync(join(REPO, "src", "util", "data-root.ts")),
+    { mode: 0o600 },
+  );
+  writeFileSync(
+    join(fixtureUtil, "postgres-url.ts"),
+    readFileSync(join(REPO, "src", "util", "postgres-url.ts")),
     { mode: 0o600 },
   );
   const fixtureOps = join(fixtureRepo, "src", "ops");
@@ -387,7 +398,8 @@ service_mode="$(mode_of "$PGSERVICEFILE")"
 ${FIXTURE_GREP} -q '^\\[minime_ephemeral\\]$' "$PGSERVICEFILE" || exit 68
 ${FIXTURE_GREP} -q '^host=localhost$' "$PGSERVICEFILE" || exit 69
 ${FIXTURE_GREP} -q '^port=5432$' "$PGSERVICEFILE" || exit 70
-${FIXTURE_GREP} -q '^dbname=minime_test$' "$PGSERVICEFILE" || exit 71
+case "\${H3_EXPECT_SOURCE_DB:-}" in minime|minime_test) ;; *) exit 71 ;; esac
+${FIXTURE_GREP} -q "^dbname=\${H3_EXPECT_SOURCE_DB}$" "$PGSERVICEFILE" || exit 71
 ${FIXTURE_GREP} -q 'postgres://' "$PGSERVICEFILE" && exit 72
 case "$argv" in *postgres://*) echo "database URL leaked on argv" >&2; exit 66 ;; esac
 [ -f "$out" ] || { echo "dump target was not reserved" >&2; exit 67; }
@@ -441,12 +453,103 @@ if [ -n "\${PGSERVICEFILE:-}" ]; then
   ${FIXTURE_GREP} -q '^\\[minime_ephemeral\\]$' "$PGSERVICEFILE" || exit 77
   printf 'psql_service_mode=%s\n' "$psql_service_mode" >> "$H3_TRACE"
 fi
-case "$*" in
-  *"select 1 from pg_database where datname = 'minime_restore'"*) printf '1\n'; exit 0 ;;
+promotion_state_file="\${H3_PROMOTION_STATE_FILE:-}"
+if [ -n "$promotion_state_file" ] && [ ! -e "$promotion_state_file" ]; then
+  printf '%s' "\${H3_PROMOTE_INITIAL_STATE:-110110}" > "$promotion_state_file"
+fi
+promotion_state=""
+if [ -n "$promotion_state_file" ]; then promotion_state="$(<"$promotion_state_file")"; fi
+live_exists="\${promotion_state:0:1}"
+restore_exists="\${promotion_state:1:1}"
+replaced_exists="\${promotion_state:2:1}"
+live_allowed="\${promotion_state:3:1}"
+restore_allowed="\${promotion_state:4:1}"
+replaced_allowed="\${promotion_state:5:1}"
+sql="$*"
+promotion_fail() {
+  local phase="$1" marker="\${H3_PROMOTION_FAILURE_MARKER:-$promotion_state_file.fail}"
+  if [ "\${H3_PROMOTE_FAIL_ALWAYS:-}" = "$phase" ]; then return 0; fi
+  if [ "\${H3_PROMOTE_FAIL_ONCE:-}" = "$phase" ] && [ ! -e "$marker" ]; then
+    printf '%s' "$phase" > "$marker"
+    return 0
+  fi
+  return 1
+}
+promotion_store() {
+  promotion_state="$live_exists$restore_exists$replaced_exists$live_allowed$restore_allowed$replaced_allowed"
+  printf '%s' "$promotion_state" > "$promotion_state_file"
+  printf 'promotion_state=%s\n' "$promotion_state" >> "$H3_TRACE"
+}
+promotion_signal() {
+  if [ "\${H3_PROMOTE_SIGNAL_AFTER:-}" = "$1" ]; then kill -TERM "$PPID"; fi
+}
+case "$sql" in
+  *"select (select count(*) from pg_database where datname = 'minime')"*) printf '%s%s%s\n' "$live_exists" "$restore_exists" "$replaced_exists"; exit 0 ;;
+  *"select count(*) from pg_database where datname = 'minime' and not datallowconn"*) printf '%s\n' "$((live_exists && !live_allowed))"; exit 0 ;;
+  *"select count(*) from pg_database where datname = 'minime_restore' and not datallowconn"*) printf '%s\n' "$((restore_exists && !restore_allowed))"; exit 0 ;;
+  *"select count(*) from pg_database where datname = 'minime_replaced' and not datallowconn"*) printf '%s\n' "$((replaced_exists && !replaced_allowed))"; exit 0 ;;
+  *"select count(*) from pg_database where datname = 'minime' and datallowconn"*) printf '%s\n' "$((live_exists && live_allowed))"; exit 0 ;;
+  *"select count(*) from pg_database where datname = 'minime_restore' and datallowconn"*) printf '%s\n' "$((restore_exists && restore_allowed))"; exit 0 ;;
+  *"select count(*) from pg_database where datname = 'minime_replaced' and datallowconn"*) printf '%s\n' "$((replaced_exists && replaced_allowed))"; exit 0 ;;
+  *"select count(*) from pg_database where datname = 'minime'"*) printf 'promotion_query=live_exists value=%s\n' "$live_exists" >> "$H3_TRACE"; printf '%s\n' "$live_exists"; exit 0 ;;
+  *"select count(*) from pg_database where datname = 'minime_restore'"*) printf 'promotion_query=restore_exists value=%s\n' "$restore_exists" >> "$H3_TRACE"; printf '%s\n' "$restore_exists"; exit 0 ;;
+  *"select count(*) from pg_database where datname = 'minime_replaced'"*) printf 'promotion_query=replaced_exists value=%s\n' "$replaced_exists" >> "$H3_TRACE"; printf '%s\n' "$replaced_exists"; exit 0 ;;
+  *"select count(*) from pg_stat_activity where datname = 'minime'"*)
+    if [ "$live_allowed$restore_allowed" = 00 ]; then printf '%s\n' "\${H3_PROMOTE_LIVE_ACTIVE_AFTER_BLOCK:-0}"; else printf '%s\n' "\${H3_PROMOTE_LIVE_ACTIVE_INITIAL:-0}"; fi
+    exit 0
+    ;;
+  *"select count(*) from pg_stat_activity where datname = 'minime_restore'"*)
+    if [ "$live_allowed$restore_allowed" = 00 ]; then printf '%s\n' "\${H3_PROMOTE_RESTORE_ACTIVE_AFTER_BLOCK:-0}"; else printf '%s\n' "\${H3_PROMOTE_RESTORE_ACTIVE_INITIAL:-0}"; fi
+    exit 0
+    ;;
+  *"select count(*) from pg_prepared_xacts where database = 'minime'"*)
+    if [ "$live_allowed$restore_allowed" = 00 ]; then printf '%s\n' "\${H3_PROMOTE_LIVE_PREPARED_AFTER_BLOCK:-0}"; else printf '%s\n' "\${H3_PROMOTE_LIVE_PREPARED_INITIAL:-0}"; fi
+    exit 0
+    ;;
+  *"select count(*) from pg_prepared_xacts where database = 'minime_restore'"*)
+    if [ "$live_allowed$restore_allowed" = 00 ]; then printf '%s\n' "\${H3_PROMOTE_RESTORE_PREPARED_AFTER_BLOCK:-0}"; else printf '%s\n' "\${H3_PROMOTE_RESTORE_PREPARED_INITIAL:-0}"; fi
+    exit 0
+    ;;
+  *"select 1 from pg_database where datname = 'minime_restore'"*) printf '%s\n' "$restore_exists"; exit 0 ;;
   *"select count(*) from pg_stat_activity"*) printf '0\n'; exit 0 ;;
   *"select 'm', name"*) printf 'm\t020.sql\t-\nc\tchunks\t1\nc\tevents\t1\nc\tjournal_entries\t1\nc\tpeople\t1\nc\ttasks\t1\n'; exit 0 ;;
 esac
 if [ "\${H3_PSQL_FAILURE:-0}" = 1 ]; then exit 7; fi
+case "$sql" in
+  *"alter database minime with allow_connections false; alter database minime_restore with allow_connections false"*)
+    printf 'promotion_phase=connection_block\n' >> "$H3_TRACE"
+    promotion_fail connection_block && exit 7
+    live_allowed=0; restore_allowed=0; promotion_store; promotion_signal connection_block; exit 0
+    ;;
+  *"alter database minime rename to minime_replaced"*)
+    printf 'promotion_phase=first_rename\n' >> "$H3_TRACE"
+    promotion_fail first_rename && exit 7
+    [ "$live_exists$replaced_exists" = 10 ] || exit 7
+    live_exists=0; replaced_exists=1; replaced_allowed="$live_allowed"; live_allowed=0; promotion_store; promotion_signal first_rename; exit 0
+    ;;
+  *"alter database minime_restore rename to minime"*)
+    printf 'promotion_phase=second_rename\n' >> "$H3_TRACE"
+    promotion_fail second_rename && exit 7
+    [ "$live_exists$restore_exists" = 01 ] || exit 7
+    live_exists=1; restore_exists=0; live_allowed="$restore_allowed"; restore_allowed=0; promotion_store; promotion_signal second_rename; exit 0
+    ;;
+  *"alter database minime_replaced rename to minime"*)
+    printf 'promotion_phase=compensation_rename\n' >> "$H3_TRACE"
+    promotion_fail compensation && exit 7
+    [ "$live_exists$replaced_exists" = 01 ] || exit 7
+    live_exists=1; replaced_exists=0; live_allowed="$replaced_allowed"; replaced_allowed=0; promotion_store; exit 0
+    ;;
+  *"alter database minime with allow_connections true; alter database minime_restore with allow_connections true"*)
+    printf 'promotion_phase=restore_unpromoted_posture\n' >> "$H3_TRACE"
+    promotion_fail compensation && exit 7
+    live_allowed=1; restore_allowed=1; promotion_store; exit 0
+    ;;
+  *"alter database minime with allow_connections true; alter database minime_replaced with allow_connections false"*)
+    printf 'promotion_phase=publish_posture\n' >> "$H3_TRACE"
+    promotion_fail publish_posture && exit 7
+    live_allowed=1; replaced_allowed=0; promotion_store; exit 0
+    ;;
+esac
 if [ "\${H3_VALIDATE_FAILURE:-0}" = 1 ] && [[ " $* " = *" ON_ERROR_STOP=1 "* ]] && [[ " $* " = *"select 1"* ]]; then
   exit 9
 fi
@@ -531,7 +634,16 @@ for arg in "$@"; do
       ;;
   esac
   case "$arg" in
-    *pick-snapshot.ts) printf "snapshot-id\\t2026-07-23T00:00:00Z\\n"; exit 0 ;;
+    *pick-snapshot.ts)
+      if [ -n "\${H3_PICK_SNAPSHOT_EXIT:-}" ]; then exit "$H3_PICK_SNAPSHOT_EXIT"; fi
+      printf "snapshot-id\\t2026-07-23T00:00:00Z\\n"
+      exit 0
+      ;;
+    *restore-schema-gate.ts)
+      printf 'command=schema_gate\\n' >> "$H3_TRACE"
+      if [ "\${H3_SCHEMA_GATE_FAILURE:-0}" = 1 ]; then exit 9; fi
+      exit 0
+      ;;
   esac
 done
   exec "$H3_REAL_BUN" "$@"`,
@@ -623,6 +735,7 @@ exec ${JSON.stringify(realFind)} "\$@"`,
     script: "restore-drill.sh" | "restore-pitr.sh" | "promote-restore.sh",
     extra: Record<string, string | undefined> = {},
   ) {
+    const sourceDatabase = script === "promote-restore.sh" ? "minime" : "minime_test";
     const tempRoot =
       tempAlias === "tmp-symlink"
         ? tmpAlias
@@ -646,7 +759,9 @@ exec ${JSON.stringify(realFind)} "\$@"`,
       PGBIN: pgBin,
       H3_REAL_BUN: REAL_BUN,
       H3_FIXTURE_SNAPSHOT_SCRIPT: join(fixtureScripts, "snapshot-manifest.ts"),
-      DATABASE_URL: "postgres://h3-source-user:credential-sentinel@localhost:5432/minime_test",
+      H3_PROMOTION_STATE_FILE: join(root, "promotion-state"),
+      DATABASE_URL: `postgres://h3-source-user:credential-sentinel@localhost:5432/${sourceDatabase}`,
+      H3_EXPECT_SOURCE_DB: sourceDatabase,
       ADMIN_URL: "postgres://h3-admin-user:admin-credential-sentinel@localhost:5432/postgres",
       DRILL_URL: "postgres://h3-drill-user:drill-credential-sentinel@localhost:5432/minime_drill",
       LIVE_URL: "postgres://h3-live-user:live-credential-sentinel@localhost:5432/minime",
@@ -742,6 +857,7 @@ function expectNoConnectionSecrets(result: {
   const visible = `${result.out}\n${result.err}\n${result.trace}`;
   for (const secret of [
     "postgres://h3-source-user:credential-sentinel@localhost:5432/minime_test",
+    "postgres://h3-source-user:credential-sentinel@localhost:5432/minime",
     "postgres://h3-admin-user:admin-credential-sentinel@localhost:5432/postgres",
     "postgres://h3-drill-user:drill-credential-sentinel@localhost:5432/minime_drill",
     "postgres://h3-live-user:live-credential-sentinel@localhost:5432/minime",
@@ -853,7 +969,10 @@ const hostileRows = [
     fake: "writes stdout/stderr marker, then exits 13",
     marker: "H3_MATRIX_DRILL_PGDUMP",
     expectedExit: 1,
-    expectedStdout: fixedOutput("==> creating fresh source database dump"),
+    expectedStdout: fixedOutput(
+      "restore source: fresh-live-dump",
+      "==> creating fresh source database dump",
+    ),
     expectedStderr: fixedOutput("restore drill failed (pg_dump)"),
   },
   {
@@ -865,7 +984,7 @@ const hostileRows = [
     fake: "writes stdout/stderr marker, then exits 8",
     marker: "H3_MATRIX_DRILL_RESTIC",
     expectedExit: 1,
-    expectedStdout: fixedOutput("==> restoring latest private snapshot"),
+    expectedStdout: fixedOutput("restore source: restic", "==> restoring latest private snapshot"),
     expectedStderr: fixedOutput("restore drill failed (restic_snapshots)"),
   },
   {
@@ -878,6 +997,7 @@ const hostileRows = [
     marker: "H3_MATRIX_DRILL_PSQL",
     expectedExit: 9,
     expectedStdout: fixedOutput(
+      "restore source: fresh-live-dump",
       "==> creating fresh source database dump",
       "==> restoring into private scratch database",
       "==> validating restored database",
@@ -894,6 +1014,7 @@ const hostileRows = [
     marker: "H3_MATRIX_DRILL_REPLAY",
     expectedExit: 1,
     expectedStdout: fixedOutput(
+      "restore source: fresh-live-dump",
       "==> creating fresh source database dump",
       "==> restoring into private scratch database",
     ),
@@ -908,7 +1029,7 @@ const hostileRows = [
     fake: "writes stdout/stderr marker, then exits 8",
     marker: "H3_MATRIX_PITR_RESTIC",
     expectedExit: 1,
-    expectedStdout: fixedOutput("==> selecting private snapshot"),
+    expectedStdout: fixedOutput("==> selecting private snapshot", "restore source: restic"),
     expectedStderr: fixedOutput("restore pitr failed (restic_snapshots)"),
   },
   {
@@ -922,6 +1043,7 @@ const hostileRows = [
     expectedExit: 1,
     expectedStdout: fixedOutput(
       "==> selecting private snapshot",
+      "restore source: restic",
       "==> restoring selected private snapshot",
     ),
     expectedStderr: fixedOutput("restore pitr failed (restic_restore)"),
@@ -937,6 +1059,7 @@ const hostileRows = [
     expectedExit: 4,
     expectedStdout: fixedOutput(
       "==> selecting private snapshot",
+      "restore source: restic",
       "==> restoring selected private snapshot",
       "==> restoring into private scratch database",
     ),
@@ -953,6 +1076,7 @@ const hostileRows = [
     expectedExit: 4,
     expectedStdout: fixedOutput(
       "==> selecting private snapshot",
+      "restore source: restic",
       "==> restoring selected private snapshot",
       "==> restoring into private scratch database",
     ),
@@ -986,16 +1110,13 @@ const hostileRows = [
     name: "promote psql failure",
     script: "promote-restore.sh",
     child: "psql",
-    phase: "admin rename",
-    env: { H3_PSQL_FAILURE: "1" },
-    fake: "writes stdout/stderr marker, then exits 7",
+    phase: "second admin rename",
+    env: { H3_PROMOTE_FAIL_ONCE: "second_rename" },
+    fake: "writes stdout/stderr marker, fails the second rename, then allows compensation",
     marker: "H3_MATRIX_PROMOTE_PSQL",
     expectedExit: 7,
-    expectedStdout: fixedOutput(
-      "==> checking for live connections",
-      "==> promoting restored database",
-    ),
-    expectedStderr: fixedOutput("promotion failed (psql)"),
+    expectedStdout: fixedOutput(),
+    expectedStderr: fixedOutput("promotion failed (cutover)"),
   },
   {
     name: "bridge failure",
@@ -1060,6 +1181,7 @@ const hostileSuccessRows = [
     extra: {},
     marker: "H3_MATRIX_SUCCESS_DRILL",
     expectedStdout: fixedOutput(
+      "restore source: fresh-live-dump",
       "==> creating fresh source database dump",
       "==> restoring into private scratch database",
       "==> validating restored database",
@@ -1074,6 +1196,7 @@ const hostileSuccessRows = [
     marker: "H3_MATRIX_SUCCESS_PITR",
     expectedStdout: fixedOutput(
       "==> selecting private snapshot",
+      "restore source: restic",
       "==> restoring selected private snapshot",
       "==> restoring into private scratch database",
       "==> dump replay validation complete",
@@ -1107,15 +1230,226 @@ for (const row of hostileSuccessRows) {
       H3_RESTIC_SENTINEL: row.marker,
       H3_BRIDGE_SENTINEL: row.marker,
     });
-    expect(r.code).toBe(0);
+    expect(r.code, `stdout:\n${r.out}\nstderr:\n${r.err}\ntrace:\n${r.trace}`).toBe(0);
     expect(r.out.replace(/\r\n/g, "\n")).toBe(row.expectedStdout);
     expect(r.err.replace(/\r\n/g, "\n")).toBe(row.expectedStderr);
     expectNoMarker(r, row.marker);
     expectNoPathInterception(r);
+    expect(r.trace).toContain("command=schema_gate");
     expect(readdirSync(r.scratch)).toEqual([]);
     expectNoConnectionSecrets(r);
   });
 }
+
+test.each([
+  ["restore-drill.sh", {}, "restore drill failed (schema_gate)"],
+  ["restore-pitr.sh", { RESTIC_REPOSITORY: "test:repo" }, "restore pitr failed (schema_gate)"],
+  ["promote-restore.sh", {}, "promotion failed (schema_gate)"],
+] as const)("%s refuses success when the checked-out schema gate fails", (script, extra, error) => {
+  const f = shellFixture();
+  const r = f.run(script, { ...extra, H3_SCHEMA_GATE_FAILURE: "1" });
+  expect(r.code).toBe(1);
+  expect(r.err).toBe(`${error}\n`);
+  expect(r.trace).toContain("command=schema_gate");
+  if (script === "promote-restore.sh") {
+    expect(r.trace).not.toContain("command=pg_dump");
+    expect(r.trace).not.toContain("promotion_phase=");
+    expect(promotionDumps(r)).toEqual([]);
+  }
+  expectNoConnectionSecrets(r);
+});
+
+function promotionState(result: { root: string }): string {
+  return readFileSync(join(result.root, "promotion-state"), "utf8");
+}
+
+function promotionDumps(result: { dumpRoot: string }): string[] {
+  return readdirSync(result.dumpRoot).filter((name) => name.startsWith("minime-pre-promote-"));
+}
+
+test("restore-pitr reports an unconfigured backup source with its documented exit", () => {
+  const f = shellFixture();
+  const r = f.run("restore-pitr.sh");
+  expect(r.code).toBe(2);
+  expect(r.out).toBe("");
+  expect(r.err).toBe("restore pitr failed (unconfigured)\n");
+  expect(r.trace).not.toContain("command=restic");
+  expect(r.trace).not.toContain("command=psql");
+  expect(readdirSync(r.scratch)).toEqual([]);
+  expectNoConnectionSecrets(r);
+});
+
+test("restore-pitr preserves the picker no-snapshot exit contract", () => {
+  const f = shellFixture();
+  const r = f.run("restore-pitr.sh", {
+    RESTIC_REPOSITORY: "test:repo",
+    H3_PICK_SNAPSHOT_EXIT: "3",
+  });
+  expect(r.code).toBe(3);
+  expect(r.out).toBe(fixedOutput("==> selecting private snapshot", "restore source: restic"));
+  expect(r.err).toBe("restore pitr failed (snapshot_missing)\n");
+  expect(readdirSync(r.scratch)).toEqual([]);
+  expectNoConnectionSecrets(r);
+});
+
+test("restore-pitr maps other picker failures to snapshot selection", () => {
+  const f = shellFixture();
+  const r = f.run("restore-pitr.sh", {
+    RESTIC_REPOSITORY: "test:repo",
+    H3_PICK_SNAPSHOT_EXIT: "2",
+  });
+  expect(r.code).toBe(1);
+  expect(r.out).toBe(fixedOutput("==> selecting private snapshot", "restore source: restic"));
+  expect(r.err).toBe("restore pitr failed (snapshot_selection)\n");
+  expect(readdirSync(r.scratch)).toEqual([]);
+  expectNoConnectionSecrets(r);
+});
+
+test.each([
+  ["missing live database", "010010"],
+  ["missing restore database", "100100"],
+  ["pre-existing replacement database", "111110"],
+] as const)("promotion rejects %s at exact catalog preflight", (_name, initialState) => {
+  const f = shellFixture();
+  const r = f.run("promote-restore.sh", { H3_PROMOTE_INITIAL_STATE: initialState });
+  expect(r.code).toBe(1);
+  expect(r.out).toBe("");
+  expect(r.err).toBe("promotion failed (database_state)\n");
+  expect(r.trace).not.toContain("command=pg_dump");
+  expect(r.trace).not.toContain("promotion_phase=");
+  expect(promotionDumps(r)).toEqual([]);
+  expect(promotionState(r)).toBe(initialState);
+  expectNoConnectionSecrets(r);
+});
+
+test.each([
+  [
+    "live sessions",
+    { H3_PROMOTE_LIVE_ACTIVE_INITIAL: "1" },
+    "promotion refused: live connections are active\n",
+  ],
+  [
+    "restore sessions",
+    { H3_PROMOTE_RESTORE_ACTIVE_INITIAL: "1" },
+    "promotion refused: restore connections are active\n",
+  ],
+  [
+    "live prepared transactions",
+    { H3_PROMOTE_LIVE_PREPARED_INITIAL: "1" },
+    "promotion refused: live prepared transactions exist\n",
+  ],
+  [
+    "restore prepared transactions",
+    { H3_PROMOTE_RESTORE_PREPARED_INITIAL: "1" },
+    "promotion refused: restore prepared transactions exist\n",
+  ],
+] as const)(
+  "promotion refuses initial %s without terminating anything",
+  (_name, env, diagnostic) => {
+    const f = shellFixture();
+    const r = f.run("promote-restore.sh", env);
+    expect(r.code).toBe(1);
+    expect(r.out).toBe("");
+    expect(r.err).toBe(diagnostic);
+    expect(r.trace).not.toContain("command=pg_dump");
+    expect(r.trace.toLowerCase()).not.toContain("terminate");
+    expect(promotionDumps(r)).toEqual([]);
+    expect(promotionState(r)).toBe("110110");
+    expectNoConnectionSecrets(r);
+  },
+);
+
+test("promotion blocks both databases atomically and compensates a post-block activity race", () => {
+  const f = shellFixture();
+  const r = f.run("promote-restore.sh", { H3_PROMOTE_LIVE_ACTIVE_AFTER_BLOCK: "1" });
+  expect(r.code).toBe(1);
+  expect(r.out).toBe("");
+  expect(r.err).toBe("promotion failed (activity_race)\n");
+  expect(r.trace).toContain("promotion_phase=connection_block");
+  expect(r.trace).toContain("promotion_phase=restore_unpromoted_posture");
+  expect(r.trace).not.toContain("promotion_phase=first_rename");
+  expect(r.trace).not.toContain("command=restic");
+  expect(promotionDumps(r)).toHaveLength(1);
+  expect(promotionState(r)).toBe("110110");
+  expectNoConnectionSecrets(r);
+});
+
+test("promotion success orders dump, connection block, separate renames, and published posture", () => {
+  const f = shellFixture();
+  const r = f.run("promote-restore.sh");
+  expect(r.code, `stdout:\n${r.out}\nstderr:\n${r.err}\ntrace:\n${r.trace}`).toBe(0);
+  const dump = r.trace.indexOf("command=pg_dump");
+  const block = r.trace.indexOf("promotion_phase=connection_block");
+  const first = r.trace.indexOf("promotion_phase=first_rename");
+  const second = r.trace.indexOf("promotion_phase=second_rename");
+  const posture = r.trace.indexOf("promotion_phase=publish_posture");
+  expect(dump).toBeGreaterThanOrEqual(0);
+  expect(dump).toBeLessThan(block);
+  expect(block).toBeLessThan(first);
+  expect(first).toBeLessThan(second);
+  expect(second).toBeLessThan(posture);
+  expect(promotionState(r)).toBe("101100");
+  expect(promotionDumps(r)).toHaveLength(1);
+  expectNoConnectionSecrets(r);
+});
+
+test("promotion compensates the first rename when the second rename fails", () => {
+  const f = shellFixture();
+  const r = f.run("promote-restore.sh", { H3_PROMOTE_FAIL_ONCE: "second_rename" });
+  expect(r.code).toBe(7);
+  expect(r.out).toBe("");
+  expect(r.err).toBe("promotion failed (cutover)\n");
+  expect(r.trace.indexOf("promotion_phase=first_rename")).toBeLessThan(
+    r.trace.indexOf("promotion_phase=compensation_rename"),
+  );
+  expect(r.trace).toContain("promotion_phase=restore_unpromoted_posture");
+  expect(r.trace).not.toContain("command=restic");
+  expect(promotionDumps(r)).toHaveLength(1);
+  expect(promotionState(r)).toBe("110110");
+  expectNoConnectionSecrets(r);
+});
+
+test("promotion reports fixed compensation failure and retains the safety dump", () => {
+  const f = shellFixture();
+  const r = f.run("promote-restore.sh", {
+    H3_PROMOTE_FAIL_ONCE: "second_rename",
+    H3_PROMOTE_FAIL_ALWAYS: "compensation",
+  });
+  expect(r.code).toBe(1);
+  expect(r.out).toBe("");
+  expect(r.err).toBe("promotion failed (compensation_failed)\n");
+  expect(r.trace).toContain("promotion_phase=compensation_rename");
+  expect(r.trace).not.toContain("command=restic");
+  expect(promotionDumps(r)).toHaveLength(1);
+  expect(promotionState(r)).toBe("011000");
+  expectNoConnectionSecrets(r);
+});
+
+test("promotion repairs promoted posture after a one-shot publication failure", () => {
+  const f = shellFixture();
+  const r = f.run("promote-restore.sh", { H3_PROMOTE_FAIL_ONCE: "publish_posture" });
+  expect(r.code).toBe(7);
+  expect(r.out).toBe("");
+  expect(r.err).toBe("promotion failed (posture)\n");
+  expect(r.trace.match(/promotion_phase=publish_posture/g)).toHaveLength(2);
+  expect(r.trace).not.toContain("command=restic");
+  expect(promotionDumps(r)).toHaveLength(1);
+  expect(promotionState(r)).toBe("101100");
+  expectNoConnectionSecrets(r);
+});
+
+test("TERM after the first rename restores the catalog posture before exit", () => {
+  const f = shellFixture();
+  const r = f.run("promote-restore.sh", { H3_PROMOTE_SIGNAL_AFTER: "first_rename" });
+  expect(r.code).toBe(143);
+  expect(r.err).toBe("");
+  expect(r.trace).toContain("promotion_phase=compensation_rename");
+  expect(r.trace).toContain("promotion_phase=restore_unpromoted_posture");
+  expect(r.trace).not.toContain("command=restic");
+  expect(promotionDumps(r)).toHaveLength(1);
+  expect(promotionState(r)).toBe("110110");
+  expectNoConnectionSecrets(r);
+});
 
 test.each(["leaf-symlink", "parent-symlink", "multiple", "malformed"] as const)(
   "restic archive %s is rejected before repository inode chmod/read",
@@ -2290,7 +2624,7 @@ const hostileUtilityRows = [
     env: { RESTIC_REPOSITORY: "test:repo", H3_TRUSTED_UTILITY_FAILURE: "mkdir" },
     marker: "H3_UTILITY_MKDIR_path_credential_SENTINEL",
     expectedExit: 1,
-    expectedStdout: fixedOutput("==> restoring latest private snapshot"),
+    expectedStdout: fixedOutput("restore source: restic", "==> restoring latest private snapshot"),
     expectedStderr: fixedOutput("restore drill failed (workspace)"),
   },
   {
@@ -2303,6 +2637,7 @@ const hostileUtilityRows = [
     expectedExit: 1,
     expectedStdout: fixedOutput(
       "==> selecting private snapshot",
+      "restore source: restic",
       "==> restoring selected private snapshot",
     ),
     expectedStderr: fixedOutput("restore pitr failed (snapshot_dump_missing)"),
@@ -2315,7 +2650,7 @@ const hostileUtilityRows = [
     env: { RESTIC_REPOSITORY: "test:repo", H3_TRUSTED_UTILITY_FAILURE: "cp" },
     marker: "H3_UTILITY_CP_path_credential_SENTINEL",
     expectedExit: 1,
-    expectedStdout: fixedOutput("==> restoring latest private snapshot"),
+    expectedStdout: fixedOutput("restore source: restic", "==> restoring latest private snapshot"),
     expectedStderr: fixedOutput("restore drill failed (snapshot_dump_missing)"),
   },
   {
@@ -2328,6 +2663,7 @@ const hostileUtilityRows = [
     expectedExit: 1,
     expectedStdout: fixedOutput(
       "==> selecting private snapshot",
+      "restore source: restic",
       "==> restoring selected private snapshot",
     ),
     expectedStderr: fixedOutput("restore pitr failed (snapshot_dump_missing)"),
@@ -2340,7 +2676,7 @@ const hostileUtilityRows = [
     env: { RESTIC_REPOSITORY: "test:repo", H3_TRUSTED_UTILITY_FAILURE: "cut" },
     marker: "H3_UTILITY_CUT_path_credential_SENTINEL",
     expectedExit: 1,
-    expectedStdout: fixedOutput("==> selecting private snapshot"),
+    expectedStdout: fixedOutput("==> selecting private snapshot", "restore source: restic"),
     expectedStderr: fixedOutput("restore pitr failed (snapshot_selection)"),
   },
   {
@@ -2402,6 +2738,7 @@ const hostileUtilityRows = [
     marker: "H3_UTILITY_RM_path_credential_SENTINEL",
     expectedExit: 1,
     expectedStdout: fixedOutput(
+      "restore source: fresh-live-dump",
       "==> creating fresh source database dump",
       "==> restoring into private scratch database",
       "==> validating restored database",
@@ -2488,11 +2825,31 @@ test.each([
       RESTORE_URL: "postgres://h3-restore-user:restore-credential-sentinel@localhost:5432/minime",
     },
   ],
+  [
+    "promote-restore.sh",
+    "promotion",
+    {
+      LIVE_URL: "postgres://h3-live-user:live-credential-sentinel@127.0.0.1:5432/minime",
+    },
+  ],
 ] as const)("%s rejects a live replay target before any database command", (script, label, env) => {
   const f = shellFixture();
   const r = f.run(script, env);
   expect(r.code).toBe(1);
   expect(r.err).toBe(`${label} failed (endpoint_boundary)\n`);
+  expect(r.trace).not.toContain("command=psql");
+  expect(r.trace).not.toContain("command=restic");
+  expectNoConnectionSecrets(r);
+});
+
+test("promotion rejects a scratch safety-dump source before any database command", () => {
+  const f = shellFixture();
+  const r = f.run("promote-restore.sh", {
+    DATABASE_URL: "postgres://h3-source-user:credential-sentinel@localhost:5432/minime_test",
+  });
+  expect(r.code).toBe(1);
+  expect(r.err).toBe("promotion failed (endpoint_boundary)\n");
+  expect(r.trace).not.toContain("command=pg_dump");
   expect(r.trace).not.toContain("command=psql");
   expect(r.trace).not.toContain("command=restic");
   expectNoConnectionSecrets(r);

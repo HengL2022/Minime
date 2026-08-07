@@ -33,8 +33,8 @@ say what made it ambiguous (e.g. "could be task or interaction", "two intents in
 fields by type: task -> {"title": string, "due": "YYYY-MM-DD" | null};
 interaction -> {"person_name": string, "kind": "meeting"|"call"|"message"|"email"|"note", "subject_type": "person"|"org"};
 For interaction, set "subject_type" to "org" when the counterparty is a COMPANY / vendor / lab /
-institution / supplier (e.g. "emailed Glasswing, a metabolomics company", "called Corvid Biotech about the order")
-and "person" when it is an individual human ("met Daniel about sorting"). When unsure, use "person".
+institution / supplier (e.g. "emailed Fjordsonics, an acoustic sensing company", "called Fjordsonics AS about the hydrophone order")
+and "person" when it is an individual human ("met Tomasz about the calibration rig"). When unsure, use "person".
 journal -> {"mood": 1-5 | null}; decision_note -> {"question": string, "choice": string | null};
 note -> {"title": string}; unknown -> {}.
 
@@ -43,8 +43,8 @@ Text:
 }
 
 // Completion-signal detection for the "split mixed captures" fix. A single capture often
-// bundles a FINISHED action with a forward-looking decision ("FACS analysis done... but
-// need to decide whether to use knockout lines"). The classifier files it as exactly one
+// bundles a FINISHED action with a forward-looking decision ("array calibration done... but
+// need to decide whether to use spare hydrophone nodes"). The classifier files it as exactly one
 // type (usually decision_note), so the accomplishment never becomes a done-task and is
 // invisible to the evening review's "what moved today" (which sources done tasks +
 // closed commitments, not decision reasoning). When a capture carries a completion signal
@@ -62,8 +62,8 @@ export function completionSignal(text: string): boolean {
 // a vendor/company to a person mints a phantom person (the phantom-org bug this fixes).
 // The real LLM classifier decides via the prompt; this regex is the mock/heuristic fallback
 // AND the signal the phantom-person watchdog reuses to spot a company wrongly filed as a
-// person. Matches an appositive company descriptor ("Glasswing, a metabolomics company") or a
-// trailing corporate suffix ("Corvid Biotech", "Acme Inc", "… Ltd/GmbH/Pte").
+// person. Matches an appositive company descriptor ("Fjordsonics, an acoustic sensing company")
+// or a trailing supported corporate suffix ("… Inc/Ltd/GmbH/Pte").
 const ORG_CUE_RE =
   /\b(company|companies|vendor|supplier|corp(?:oration)?|inc\.?|ltd\.?|llc|gmbh|s\.?a\.?|pte\.?|co\.?|biotech|bioscience|laborator(?:y|ies)|institute|university|clinic|hospital|foundation|agency|firm|startup|manufacturer|distributor|contractor|consultancy|consulting)\b/i;
 
@@ -86,11 +86,12 @@ export function completionTitle(text: string): string {
 }
 
 // Split a compound "do X AND decide on/whether Y" task capture into its two halves: an
-// ACTION (the task to do) and a DECISION (the open question to resolve). The FACS-and-Daniel
-// bug: a single capture like "Do FACS analysis ... and decide on Daniel sorting" files as ONE
-// umbrella task that no later single capture (the FACS-done report, or the Daniel decision)
-// fully matches, so it never closes and double-reports in the morning brief. Peeling the
-// decision clause into its own row at ingestion means each half closes independently.
+// ACTION (the task to do) and a DECISION (the open question to resolve). The
+// calibration-and-deployment bug: a single capture like "Run array calibration ... and decide
+// on Munkholmen deployment" files as ONE umbrella task that no later single capture (the
+// calibration-done report, or the deployment decision) fully matches, so it never closes and
+// double-reports in the morning brief. Peeling the decision clause into its own row at ingestion
+// means each half closes independently.
 //
 // Conservative by design — only fires when ALL hold, so plain action tasks are untouched:
 //   - the text is NOT a completion report (a "...— done" capture is handled by the done-task

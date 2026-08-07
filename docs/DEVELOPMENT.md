@@ -116,7 +116,12 @@ current release; everything else returns to the ordinary product backlog below.
   launches a scrubbed `minime_app` child. Scratch evaluators mint unique app roles, and the
   installer/serve endpoint checks refuse split or remote database targets.
 - **Delivered 2026-08-05:** behavioral tests cover tier-0 insert-only access, locked tier-2
-  omission, actor-local unlocks, and tier-preserving edge writes.
+  omission, and tier-preserving edge writes.
+- **Delivered 2026-08-06:** effective classification routing rejects a cloud provider above
+  `CLOUD_MAX_TIER` before fetch or egress audit; derived people, orgs, aliases, and edges
+  inherit source privacy tier and provenance with monotonic promotion; tier-2 unlocks are
+  strictly bounded pending requests that require local owner approval and bind to a fresh MCP
+  connection session.
 
 **Accept:** privacy/role/reader tests and `make verify-offline` pass. Use one independent privacy
 review. Before the next push, scan the outgoing tree/range; if private text is already public,
@@ -129,12 +134,21 @@ the owner chooses forward redaction or history repair because that remote action
   replacement.
 - **Delivered 2026-08-05:** an actual fictional-data restic snapshot was restored into the fixed
   `minime_drill` scratch database and its ledger/counts matched without reading or changing live.
+- **Delivered 2026-08-06:** Make recovery commands use one inert-data `.env` wrapper and a narrow
+  child environment. The drill labels and requires a real restic source, validates the historical
+  manifest/counts, migrates only the scratch database, and checks the exact current ledger and
+  safety posture. `make verify-restore-e2e` exercises this with fictional data in an isolated
+  PostgreSQL cluster and local restic repository.
 - The compatibility command `restore-pitr` performs a logical snapshot restore at or before
-  `TIME`; it is not WAL/PITR and does not claim point-in-time recovery semantics.
+  `TIME`, validates and upgrades `minime_restore`, and leaves it for inspection. It is not WAL/PITR
+  and does not claim point-in-time recovery semantics.
 - **Delivered 2026-08-05:** `typecheck-ops` covers maintained recovery scripts outside the main
   `tsconfig`; do not broaden it to disposable evidence scripts.
-- Keep promotion manual and guarded by a pre-promotion dump. Do not build an automatic recovery
-  state machine or WAL-PITR claim for this release.
+- **Delivered 2026-08-06:** promotion remains manual. It requires idle databases and exact schema
+  posture, writes a pre-promotion dump, blocks connections, uses a guarded two-step rename, and
+  compensates a failed second rename back to the original live name. The prior live database is
+  retained connection-blocked after success. Do not build an automatic recovery state machine or
+  WAL-PITR claim for this release.
 
 **Accept:** focused backup/restore tests, one fictional-data restic round trip, the scratch restore
 E2E, and `make verify-offline` pass. This must land before a new migration is applied to owner data.
@@ -169,8 +183,7 @@ After the release gate, resume product work as outcome-sized tasks under this wo
 known candidates are:
 
 - coordinate multiple MCP processes so one process owns watcher/dream/backup work with clean
-  takeover, and bind tier-2 unlock identity to a server session rather than a reusable client
-  name;
+  takeover;
 - split genuine multi-entity inbox captures into idempotent typed items, routing uncertainty to
   review; and
 - close related known-issue documents once their behavioral regressions pass.

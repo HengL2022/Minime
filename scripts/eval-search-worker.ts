@@ -3,8 +3,7 @@
 // Application-side MinimeBench worker. It receives one parent-provisioned scratch DB and one
 // fictional corpus, performs no migration/reset/DDL, and returns one structured JSON result.
 
-import { mkdtempSync } from "node:fs";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AreaReport, loadQrels, runQrels } from "../src/search/eval";
@@ -25,6 +24,10 @@ interface WorkerArgs {
   seed: number;
   corpus: string;
   qrels: string[];
+}
+
+interface WorkerResources {
+  decisionScratchDir?: string;
 }
 
 function value(argv: readonly string[], name: string): string {
@@ -151,11 +154,12 @@ async function loadDecisionCorpus(path: string): Promise<void> {
   await compileDecisionDigests();
 }
 
-async function loadCorpus(corpus: string): Promise<void> {
+async function loadCorpus(corpus: string, resources: WorkerResources): Promise<void> {
   const corpusDir = join(CORPORA_DIR, corpus);
   const { config } = await import("../src/util/config");
   if (corpus === "decisions-en") {
     const scratchDir = mkdtempSync(join(tmpdir(), "minime-decisions-eval-"));
+    resources.decisionScratchDir = scratchDir;
     process.env.MINIME_DATA_DIR = scratchDir;
     (config as { dataDir: string }).dataDir = scratchDir;
     await loadDecisionCorpus(join(corpusDir, "decisions.json"));
@@ -170,7 +174,9 @@ async function loadCorpus(corpus: string): Promise<void> {
 }
 
 async function main(): Promise<number> {
+  const resources: WorkerResources = {};
   let closeDb: (() => Promise<void>) | undefined;
+  let exitCode = 0;
   try {
     const args = parseArgs(process.argv.slice(2));
     ensureRuntimeDsn();
@@ -180,7 +186,7 @@ async function main(): Promise<number> {
       const qrels = loadQrels(qrelsPath);
       if (qrels.corpus !== args.corpus) throw new Error("eval_worker_corpus_mismatch");
     }
-    await loadCorpus(args.corpus);
+    await loadCorpus(args.corpus, resources);
     for (const file of args.qrels) {
       reports.push(await runQrels({ qrelsPath: join(QRELS_DIR, file), seed: args.seed }));
     }
@@ -195,10 +201,9 @@ async function main(): Promise<number> {
       reports,
     };
     console.log(JSON.stringify(result));
-    return 0;
   } catch (error) {
     console.error(error instanceof Error ? error.message : "eval_worker_failed");
-    return 1;
+    exitCode = 1;
   } finally {
     try {
       const client = await import("../src/db/client");
@@ -207,7 +212,16 @@ async function main(): Promise<number> {
       // Application modules may not have loaded after an argument/DSN failure.
     }
     if (closeDb) await closeDb().catch(() => {});
+    if (resources.decisionScratchDir) {
+      try {
+        rmSync(resources.decisionScratchDir, { recursive: true, force: true });
+      } catch {
+        console.error("eval_worker_cleanup_failed");
+        exitCode = 1;
+      }
+    }
   }
+  return exitCode;
 }
 
 if (import.meta.main) process.exit(await main());

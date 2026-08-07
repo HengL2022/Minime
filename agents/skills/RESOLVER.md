@@ -33,4 +33,6 @@ than the server process.
 - `minime_review_queue` — list/resolve flagged items (contradiction, stale, inbox_unfiled, …)
 - writes: `minime_capture`, `minime_journal`, `minime_log_decision`, `minime_review_decision`,
   `minime_upsert_task`, `minime_log_interaction`
-- `minime_unlock` — time-boxed tier-2 read access; ask the owner before requesting it
+- `minime_unlock` — after the owner explicitly agrees, create a pending, time-boxed tier-2
+  read request; give the returned request ID and local approval command to the owner and wait
+  for approval

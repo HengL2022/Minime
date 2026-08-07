@@ -25,6 +25,25 @@ beforeAll(async () => {
 afterAll(() => setNow(null));
 
 describe("decision engine", () => {
+  test("review_in_days advances the caller's calendar across a DST fall-back", async () => {
+    setNow(new Date("2026-11-01T04:30:00.000Z")); // 00:30, first New York occurrence
+    try {
+      const logged = await invokeTool(
+        toolByName("minime_log_decision"),
+        {
+          question: "Review after the New York clock change?",
+          options: ["yes", "no"],
+          review_in_days: 1,
+        },
+        { ...ctx, timeZone: "America/New_York" },
+      );
+      if (!logged.ok) throw new Error(`minime_log_decision failed: ${logged.error.message}`);
+      expect((logged.envelope.data as any).review_at).toBe("2026-11-02");
+    } finally {
+      setNow(null);
+    }
+  });
+
   test("full loop: log → clock advance → due in state → dream enqueues → review → principle searchable", async () => {
     const t0 = new Date();
     setNow(t0);

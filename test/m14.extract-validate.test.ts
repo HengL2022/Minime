@@ -274,6 +274,76 @@ describe("validateEdges provider routing", () => {
       config.classifyProvider = saved.classifyProvider;
     }
   });
+
+  test("endpoint tiers raise routing, while a tier-zero endpoint is never fetched or queued", async () => {
+    await resetDb();
+    const tierTwoName = "Private Endpoint Verity";
+    const tierZeroName = "TIER0-ENDPOINT-NAME-SENTINEL";
+    const [tierTwoOrg] = await testSql`
+      insert into orgs (canonical_name, tier) values (${tierTwoName}, 2) returning id`;
+    const [tierZeroOrg] = await testSql`
+      insert into orgs (canonical_name, tier) values (${tierZeroName}, 0) returning id`;
+    const [page] = await testSql`
+      insert into pages (path, title, body_md, content_hash, tier)
+      values ('gh/endpoint-tier.md', 'Endpoint tier', 'fixture', 'endpoint-tier', 1)
+      returning id`;
+    await testSql`
+      insert into chunks (parent_type, parent_id, ord, text, tier) values
+        ('page', ${page!.id}, 0, ${`Met ${tierTwoName} about the school run.`}, 1),
+        ('page', ${page!.id}, 1, ${`Met ${tierZeroName} about a private matter.`}, 1)`;
+    const [tierTwoEdge] = await testSql`
+      insert into edges
+        (src_type, src_id, rel, dst_type, dst_id, source_table, source_id,
+         extracted_by, confidence, tier)
+      values ('page', ${page!.id}, 'mentions', 'org', ${tierTwoOrg!.id}, 'pages', ${page!.id},
+              'system:extract', 0.8, 1) returning id`;
+    const [tierZeroEdge] = await testSql`
+      insert into edges
+        (src_type, src_id, rel, dst_type, dst_id, source_table, source_id,
+         extracted_by, confidence, tier)
+      values ('page', ${page!.id}, 'mentions', 'org', ${tierZeroOrg!.id}, 'pages', ${page!.id},
+              'system:extract', 0.8, 1) returning id`;
+
+    const candidates = await edgesForValidation(24, 10);
+    expect(candidates.map((edge) => edge.id)).toContain(tierTwoEdge!.id);
+    expect(candidates.map((edge) => edge.id)).not.toContain(tierZeroEdge!.id);
+    expect(candidates.find((edge) => edge.id === tierTwoEdge!.id)?.dst_tier).toBe(2);
+
+    config.mockOllama = false;
+    config.classifyProvider = "openrouter";
+    config.openrouterApiKey = "test-key";
+    config.providerRouteTier1 = "openrouter";
+    config.providerRouteTier2 = "ollama";
+    config.cloudMaxTier = 2;
+    config.ollamaUrl = "http://127.0.0.1:9";
+    const cloudCalls: string[] = [];
+    const localFetch = (async (url: any) => {
+      const target = String(url);
+      if (!target.startsWith(config.ollamaUrl)) {
+        cloudCalls.push(target);
+        throw new Error("unexpected_cloud_egress");
+      }
+      return new Response(
+        JSON.stringify({
+          response: '{"verdict":"confirm","entity_type":"org","reason":"supported"}',
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+    try {
+      const result = await validateEdges(10, { fetchFn: localFetch });
+      expect(result.checked).toBe(1);
+      expect(cloudCalls).toEqual([]);
+      expect(
+        (await testSql`select id from edge_validations where edge_id = ${tierZeroEdge!.id}`).length,
+      ).toBe(0);
+      const queued = await testSql`
+        select payload from review_queue where payload::text like ${`%${tierZeroName}%`}`;
+      expect(queued.length).toBe(0);
+    } finally {
+      config.mockOllama = true;
+    }
+  });
 });
 
 describe("dream wiring + review tool", () => {

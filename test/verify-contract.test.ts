@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 const repoRoot = resolve(import.meta.dir, "..");
 const packageJson = JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf8")) as {
+  packageManager?: string;
   scripts?: Record<string, string>;
   devDependencies?: Record<string, string>;
 };
@@ -13,12 +15,14 @@ const tsconfig = JSON.parse(readFileSync(resolve(repoRoot, "tsconfig.json"), "ut
   include?: string[];
 };
 const workflow = readFileSync(resolve(repoRoot, ".github/workflows/eval.yml"), "utf8");
+const installWorkflow = readFileSync(resolve(repoRoot, ".github/workflows/install.yml"), "utf8");
+const offlineCoordinator = readFileSync(resolve(repoRoot, "scripts/verify-offline.sh"), "utf8");
 const claude = readFileSync(resolve(repoRoot, "CLAUDE.md"), "utf8");
 const agents = readFileSync(resolve(repoRoot, "AGENTS.md"), "utf8");
 const readme = readFileSync(resolve(repoRoot, "README.md"), "utf8");
 
-function makeDryRun(target: string): string {
-  const result = Bun.spawnSync(["make", "-n", target], {
+function makeDryRun(target: string, variables: string[] = []): string {
+  const result = Bun.spawnSync(["make", "-n", target, ...variables], {
     cwd: repoRoot,
     stdout: "pipe",
     stderr: "pipe",
@@ -30,13 +34,16 @@ function makeDryRun(target: string): string {
 }
 
 describe("authoritative verification contract", () => {
-  test("package scripts and exact TypeScript pin are authoritative", () => {
+  test("package scripts and exact runtime/type pins are authoritative", () => {
     expect(packageJson.scripts).toMatchObject({
       test: "bun test",
       lint: "biome check .",
       format: "biome check --write .",
       typecheck: "tsc --noEmit",
     });
+    expect(readFileSync(resolve(repoRoot, ".bun-version"), "utf8").trim()).toBe("1.3.13");
+    expect(packageJson.packageManager).toBe("bun@1.3.13");
+    expect(packageJson.devDependencies?.["@types/bun"]).toBe("1.3.13");
     expect(packageJson.devDependencies?.typescript).toBe("5.9.3");
   });
 
@@ -50,29 +57,50 @@ describe("authoritative verification contract", () => {
     expect(makefile).toMatch(/^lint:\n\t@\$\(BUN\) run lint$/m);
     expect(makefile).toMatch(/^format:\n\t@\$\(BUN\) run format$/m);
     expect(makefile).toMatch(/^typecheck:\n\t@\$\(BUN\) run typecheck$/m);
-    expect(makefile).toMatch(
-      /^verify-offline: verify-m0-offline test lint typecheck typecheck-ops check-subsystems$/m,
-    );
+    expect(makefile).toMatch(/^verify-offline:\n\t@bash scripts\/verify-offline\.sh$/m);
     expect(makefile).toMatch(/^verify: verify-offline eval-search$/m);
     expect(makefile).toMatch(/^verify-m0:\n\t@\$\(BUN\) run src\/verify\/m0\.ts$/m);
   });
 
-  test("offline dry-run has one unscoped test and no milestone prerequisites", () => {
-    const dryRun = makeDryRun("verify-offline");
-    expect((dryRun.match(/\bbun test\b/g) ?? []).length).toBe(1);
-    expect(dryRun).not.toMatch(/verify-m[1-9][0-5]?\b/);
-    expect(dryRun).toContain("verify_m0");
-    expect(dryRun).toContain("MINIME_MOCK_OLLAMA=1");
-    expect(dryRun).toMatch(
-      /scripts\/with-test-database\.ts --label verify_m0 -- \\\n\t+bun run src\/verify\/m0\.ts/,
+  test("recovery targets route through the no-dotenv argv wrapper", () => {
+    expect(makeDryRun("restore-drill").trim()).toBe(
+      "bun --no-env-file run scripts/recovery-ops.ts drill",
     );
-    expect(dryRun).toContain("scripts/check-subsystems.ts");
-    expect(dryRun).not.toMatch(/\bcreatedb\b|minime_test\b|minime_eval\b/);
+    expect(makeDryRun("promote-restore").trim()).toBe(
+      "bun --no-env-file run scripts/recovery-ops.ts promote",
+    );
+    const pitr = makeDryRun("restore-pitr", ["TIME=opaque restore time"]);
+    expect(pitr.trim()).toBe('bun --no-env-file run scripts/recovery-ops.ts pitr "${TIME}"');
+    expect(pitr).not.toContain("opaque restore time");
+  });
+
+  test("Make keeps a hostile restore TIME value opaque", () => {
+    const root = mkdtempSync(resolve(tmpdir(), "minime-make-time-"));
+    const sentinel = resolve(root, "make-expanded-time");
+    try {
+      const dryRun = makeDryRun("restore-pitr", [`TIME=$(shell touch ${sentinel})`]);
+      expect(dryRun.trim()).toBe('bun --no-env-file run scripts/recovery-ops.ts pitr "${TIME}"');
+      expect(existsSync(sentinel)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("offline target delegates to one complete canonical coordinator", () => {
+    const dryRun = makeDryRun("verify-offline");
+    expect(dryRun.trim()).toBe("bash scripts/verify-offline.sh");
+    expect((offlineCoordinator.match(/\bbun test\b/g) ?? []).length).toBe(1);
+    expect(offlineCoordinator).toContain("MINIME_MOCK_OLLAMA=1");
+    expect(offlineCoordinator).toContain("scripts/with-test-database.ts --label verify_m0");
+    expect(offlineCoordinator).toContain("bun run lint");
+    expect(offlineCoordinator).toContain("bun run typecheck");
+    expect(offlineCoordinator).toContain("bun run typecheck:ops");
+    expect(offlineCoordinator).toContain("scripts/check-subsystems.ts");
   });
 
   test("final dry-run is the offline gate plus coordinator-owned retrieval evaluation", () => {
     const dryRun = makeDryRun("verify");
-    expect(dryRun).toContain("bun test");
+    expect(dryRun).toContain("bash scripts/verify-offline.sh");
     expect(dryRun).toContain("scripts/eval-search.ts --mode mock --round mock");
     expect(dryRun).not.toMatch(/verify-m[1-9][0-5]?\b/);
     expect(dryRun).not.toMatch(/\bcreatedb\b|minime_test\b|minime_eval\b/);
@@ -86,6 +114,10 @@ describe("authoritative verification contract", () => {
     );
     expect(workflow).toContain('= "f|t|t"');
     expect(workflow).not.toMatch(/run:\s*make verify-m\d/);
+    expect(workflow).toContain("bun-version-file: .bun-version");
+    expect((installWorkflow.match(/bun-version-file: \.bun-version/g) ?? []).length).toBe(3);
+    expect(installWorkflow).toContain("MINIME_PG_PORT=55432");
+    expect(installWorkflow).toContain("MINIME_PG_PORT=55433");
   });
 
   test("docs identify verify-offline as fast development gate and verify as release gate", () => {

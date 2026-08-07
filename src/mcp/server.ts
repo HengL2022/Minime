@@ -1,5 +1,6 @@
 // The one door (I2): agents reach Minime data only through this MCP server.
 
+import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -102,6 +103,7 @@ export function buildServer(options: BuildServerOptions = {}): MinimeServer {
 
   const connect = async (transport: Transport): Promise<void> => {
     if (owner) throw new Error("Minime server is already connected or closing");
+    const sessionId = randomUUID();
     const sdkServer = new McpServer({ name: "minime", version: "1.0.0" });
     const coordinator = new AuditCoordinator(options.auditSink ?? eventAuditSink, options.hooks);
     const knownTools = new Set(tools.map((tool) => tool.name));
@@ -114,7 +116,7 @@ export function buildServer(options: BuildServerOptions = {}): MinimeServer {
           safeCallToolResult(
             await coordinator.handleCallback(extra.requestId, async () => {
               const actor = `agent:${sdkServer.server.getClientVersion()?.name ?? "unknown"}`;
-              const result = await executeTool(tool, params, { actor });
+              const result = await executeTool(tool, params, { actor, sessionId });
               const timeZone = result.ok ? timeZoneFromParams(params) : undefined;
               const auditable = toAuditableToolResult(result, timeZone);
               return {

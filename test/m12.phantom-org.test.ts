@@ -32,24 +32,24 @@ async function writeInbox(name: string, body: string): Promise<string> {
 describe("orgCue (unit)", () => {
   test("fires on company/vendor/institution descriptors", () => {
     expect(orgCue("Glasswing, a metabolomics company")).toBe(true);
-    expect(orgCue("Vazyme Biotech")).toBe(true);
+    expect(orgCue("Corvid Biotech")).toBe(true);
     expect(orgCue("Acme Pte Ltd")).toBe(true);
-    expect(orgCue("Huashan Hospital")).toBe(true);
+    expect(orgCue("Acme Hospital")).toBe(true);
   });
   test("does NOT fire on a plain person name", () => {
-    expect(orgCue("Daniel")).toBe(false);
-    expect(orgCue("Mercia Yoong")).toBe(false);
+    expect(orgCue("Tomasz")).toBe(false);
+    expect(orgCue("Sigrid Halvorsen")).toBe(false);
   });
 });
 
 describe("classifier subject_type (unit, heuristic)", () => {
   test("a company counterparty is typed subject_type=org", () => {
-    const c = heuristicClassify("met Vazyme Biotech, discussed the enzyme order");
+    const c = heuristicClassify("met Corvid Biotech, discussed the sensor order");
     expect(c.type).toBe("interaction");
     expect(c.fields.subject_type).toBe("org");
   });
   test("a human counterparty is typed subject_type=person", () => {
-    const c = heuristicClassify("met Daniel, discussed the sorting run");
+    const c = heuristicClassify("met Tomasz, discussed the calibration run");
     expect(c.type).toBe("interaction");
     expect(c.fields.subject_type).toBe("person");
   });
@@ -57,7 +57,7 @@ describe("classifier subject_type (unit, heuristic)", () => {
 
 describe("watcher interaction routing (e2e, classifier mocked)", () => {
   test("a vendor interaction attaches to an ORG and mints NO person row", async () => {
-    const path = await writeInbox("vendor.md", "met Vazyme Biotech, discussed the enzyme order");
+    const path = await writeInbox("vendor.md", "met Corvid Biotech, discussed the sensor order");
     const result = await processInboxFile(path);
     expect(result.filed).toBe(true);
 
@@ -71,11 +71,11 @@ describe("watcher interaction routing (e2e, classifier mocked)", () => {
     const [people] = await sql`select count(*)::int as n from people`;
     expect(people!.n).toBe(0);
     const [org] = await sql`select canonical_name from orgs where id = ${row!.org_id}`;
-    expect(org!.canonical_name.toLowerCase()).toContain("vazyme");
+    expect(org!.canonical_name.toLowerCase()).toContain("corvid");
   });
 
   test("a human interaction still attaches to a PERSON", async () => {
-    const path = await writeInbox("human.md", "met Daniel about the sorting run");
+    const path = await writeInbox("human.md", "met Tomasz about the calibration run");
     const result = await processInboxFile(path);
     expect(result.filed).toBe(true);
 
@@ -95,7 +95,7 @@ describe("watcher interaction routing (e2e, classifier mocked)", () => {
       returning id`;
     await sql`insert into org_aliases (org_id, alias) values (${org!.id}, 'Glasswing')`;
 
-    const path = await writeInbox("reuse.md", "met Glasswing, discussed metabolomics pricing");
+    const path = await writeInbox("reuse.md", "met Glasswing, discussed sensor pricing");
     const result = await processInboxFile(path);
     expect(result.filed).toBe(true);
 
@@ -112,10 +112,10 @@ describe("watcher interaction routing (e2e, classifier mocked)", () => {
 describe("phantom-person watchdog (dream step 3b)", () => {
   test("flags a person that shares a name with an existing org", async () => {
     const [org] = await sql`
-      insert into orgs (canonical_name, created_by, source) values ('Vazyme','test','manual')
+      insert into orgs (canonical_name, created_by, source) values ('Fjordsonics','test','manual')
       returning id`;
     const [person] = await sql`
-      insert into people (canonical_name, created_by, source) values ('Vazyme','test','manual')
+      insert into people (canonical_name, created_by, source) values ('Fjordsonics','test','manual')
       returning id`;
 
     const flagged = await phantomPersonScan();
@@ -143,7 +143,7 @@ describe("phantom-person watchdog (dream step 3b)", () => {
   test("does NOT flag a real person (no org name, no cue)", async () => {
     await sql`
       insert into people (canonical_name, relation, created_by, source)
-      values ('Mercia Yoong','colleague','test','manual')`;
+      values ('Sigrid Halvorsen','colleague','test','manual')`;
     const flagged = await phantomPersonScan();
     expect(flagged).toBe(0);
   });
@@ -161,9 +161,9 @@ describe("phantom-person watchdog (dream step 3b)", () => {
 
   test("is idempotent — a second scan does not double-flag", async () => {
     await sql`
-      insert into orgs (canonical_name, created_by, source) values ('Vazyme','test','manual')`;
+      insert into orgs (canonical_name, created_by, source) values ('Fjordsonics','test','manual')`;
     await sql`
-      insert into people (canonical_name, created_by, source) values ('Vazyme','test','manual')`;
+      insert into people (canonical_name, created_by, source) values ('Fjordsonics','test','manual')`;
     expect(await phantomPersonScan()).toBe(1);
     expect(await phantomPersonScan()).toBe(0);
     const [n] = await sql`

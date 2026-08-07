@@ -696,6 +696,13 @@ describe("database-reset eval isolation", () => {
     expect(startFrom).toContain("--start-from fixtures/skill-tasks/deficient-query.md");
   });
 
+  test("LongMemEval keeps the runtime alias on its guarded scratch database", () => {
+    const longMem = makeDryRun("eval-longmemeval");
+    expect(longMem).toContain(
+      "DATABASE_URL=postgres://minime:minime@localhost:5432/minime_eval_lme1 MINIME_APP_DATABASE_URL=postgres://minime:minime@localhost:5432/minime_eval_lme1",
+    );
+  });
+
   test("mock snapshot and offline M0 dry-runs use the approved wrapper", () => {
     const snapshot = makeDryRun("eval-snapshot", "ROUND=v0.9");
     expect(snapshot).toContain("MINIME_MOCK_OLLAMA=1");

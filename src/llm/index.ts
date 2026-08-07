@@ -1,7 +1,7 @@
 // Provider factories + the egress audit. Cloud calls write an events row (provider,
 // model, item count — never contents) so `minime audit` shows exactly what left the box.
 
-import { logEvent } from "../db/repo";
+import { logEgressIntent, logEgressOutcome } from "../db/repo";
 import { type ProviderName, config } from "../util/config";
 import { anthropicProvider } from "./anthropic";
 import { bedrockProvider } from "./bedrock";
@@ -73,14 +73,22 @@ export function classifyRouteForTier(tier: ClassifyTier): ProviderName {
 }
 
 export function classifyProviderForTier(tier: ClassifyTier, fetchFn?: FetchFn): LlmProvider {
-  return withEgressAudit(build(classifyRouteForTier(tier), fetchFn), tier);
+  const providerName = classifyRouteForTier(tier);
+  if (providerIsCloud(providerName) && tier > config.cloudMaxTier)
+    throw new Error(
+      `effective classify provider '${providerName}' is a cloud provider but CLOUD_MAX_TIER=` +
+        `${config.cloudMaxTier} forbids tier-${tier} egress`,
+    );
+  return withEgressAudit(build(providerName, fetchFn), tier);
 }
 
 export function classifyIsCloudForTier(tier: ClassifyTier): boolean {
   return providerIsCloud(classifyRouteForTier(tier));
 }
 
-/** Startup validation: resolve both tiers so a bad route fails the daemon/m0 immediately. */
+/** Startup validation resolves explicit routes and their constraints. An implicit cloud
+ * fallback above the ceiling remains a supported degraded configuration: each effective
+ * job is rejected by classifyProviderForTier before provider construction, audit, or fetch. */
 export function validateProviderRoutes(): void {
   classifyRouteForTier(1);
   classifyRouteForTier(2);
@@ -88,31 +96,45 @@ export function validateProviderRoutes(): void {
 
 function withEgressAudit(p: LlmProvider, routeTier?: number): LlmProvider {
   if (!p.isCloud) return p;
+  const auditedCall = async <T>(
+    kind: "embed" | "classify",
+    model: string,
+    items: number,
+    work: () => Promise<T>,
+  ): Promise<T> => {
+    const intentEventId = await logEgressIntent({
+      kind,
+      provider: p.name as ProviderName,
+      model,
+      items,
+      ...(routeTier === 1 || routeTier === 2 ? { routeTier } : {}),
+    });
+    let result: T;
+    try {
+      result = await work();
+    } catch (error) {
+      try {
+        await logEgressOutcome({ kind, intentEventId, status: "failed" });
+      } catch {
+        throw new Error("egress_outcome_audit_failed");
+      }
+      throw error;
+    }
+    try {
+      await logEgressOutcome({ kind, intentEventId, status: "succeeded" });
+    } catch {
+      throw new Error("egress_outcome_audit_failed");
+    }
+    return result;
+  };
   return {
     ...p,
     embed: p.embed
-      ? async (texts) => {
-          await logEvent({
-            actor: "system:llm",
-            verb: "egress:embed",
-            payload: { provider: p.name, model: p.embedModel ?? p.model, items: texts.length },
-          });
-          return p.embed!(texts);
-        }
+      ? async (texts) =>
+          auditedCall("embed", p.embedModel ?? p.model, texts.length, () => p.embed!(texts))
       : undefined,
-    completeJson: async (prompt) => {
-      await logEvent({
-        actor: "system:llm",
-        verb: "egress:classify",
-        payload: {
-          provider: p.name,
-          model: p.model,
-          items: 1,
-          ...(routeTier !== undefined ? { route_tier: routeTier } : {}),
-        },
-      });
-      return p.completeJson(prompt);
-    },
+    completeJson: async (prompt) =>
+      auditedCall("classify", p.model, 1, () => p.completeJson(prompt)),
   };
 }
 

@@ -8,10 +8,9 @@ model: opus
 **Status: retired.** The phased plan below is historical context, not an active workflow.
 For new recovery work, follow `docs/DEVELOPMENT.md` and the current task prompt.
 
-You are a backup engineer for Minime's near-real-time backup + rollback work. Read
-`~/.claude/plans/read-through-this-project-spicy-lynx.md` first; the step numbers in your
-task refer to its Phase 1 sections, and its constraints bind you. Your invocation prompt
-assigns which steps you own — do not touch files owned by other steps.
+You are a backup engineer for Minime's near-real-time backup + rollback work. The original
+home-directory plan is retired; the current invocation prompt and `docs/DEVELOPMENT.md`
+define the bounded outcome and constraints.
 
 ## Rules
 

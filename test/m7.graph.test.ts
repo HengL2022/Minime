@@ -90,25 +90,25 @@ describe("extractFacts (pure rules)", () => {
   // See docs/known-issues/extractor-phantom-orgs.md.
 
   test("a known person's name is never extracted as an org (bare first name)", () => {
-    // canonical-only lexicon (no convenient 'Heng' alias) — the real-world gap
-    const lex = { people: [{ id: "p1", names: ["Heng Liu"] }], orgs: [] };
-    const f = extractFacts("Chen Mengwei now works with Heng on the IDH trial.", lex);
+    // canonical-only lexicon (no convenient 'Priya' alias) — the real-world gap
+    const lex = { people: [{ id: "p1", names: ["Priya Raghunathan"] }], orgs: [] };
+    const f = extractFacts("Nadia Rossi now works with Priya on the array trial.", lex);
     expect(f.orgs).toEqual([]);
   });
 
   test("possessive of a known person is not an org", () => {
-    const lex = { people: [{ id: "p1", names: ["Max Z. Liu"] }], orgs: [] };
-    const f = extractFacts("My collaborator joined Max's group last week.", lex);
+    const lex = { people: [{ id: "p1", names: ["Sigrid Halvorsen"] }], orgs: [] };
+    const f = extractFacts("My collaborator joined Sigrid's group last week.", lex);
     expect(f.orgs).toEqual([]);
   });
 
-  test("cities are not orgs even with a work cue", () => {
-    const f = extractFacts("She works at Wuhan on the trial.", EMPTY);
+  test("generic places are not orgs even with a work cue", () => {
+    const f = extractFacts("She works at Home on the project.", EMPTY);
     expect(f.orgs).toEqual([]);
   });
 
-  test("therapy types / concepts are not orgs", () => {
-    const f = extractFacts("The team works on CAR-T for glioma.", EMPTY);
+  test("local stoplist concepts are not orgs", () => {
+    const f = extractFacts("The team works with Atlas on calibration.", EMPTY, new Set(["atlas"]));
     expect(f.orgs).toEqual([]);
   });
 
@@ -118,9 +118,9 @@ describe("extractFacts (pure rules)", () => {
   });
 
   test("a real multi-word org with a generic head word still extracts", () => {
-    // guard must be precise: 'School' alone is junk, 'Goddard School' is a real org
-    const f = extractFacts("I joined Goddard School AS in 2019 as a teacher.", EMPTY);
-    expect(f.orgs).toContain("Goddard School AS");
+    // guard must be precise: 'School' alone is junk, 'Acme School' is a fictional org
+    const f = extractFacts("I joined Acme School AS in 2019 as a teacher.", EMPTY);
+    expect(f.orgs).toContain("Acme School AS");
   });
 
   test("a pronoun is never minted as a person (source guard for the 'She' bug)", () => {
@@ -152,8 +152,9 @@ describe("extractFacts (pure rules)", () => {
 
 // Ingestion-time prevention of phantom "org" nodes minted from the ORG_PREP rule
 // (at/for/with + Capitalized word). The same-sentence person check let bare first names
-// ("Heng" vs stored "Heng Liu") and people known only elsewhere slip through; cities and
-// lab/assay jargon ("Wuhan", "CAR-T") have no person to anchor them at all.
+// ("Priya" vs stored "Priya Raghunathan") and people known only elsewhere slip through;
+// generic nouns and fictional local-stoplist terms ("Springfield", "Atlas") have no person
+// to anchor them at all.
 describe("extractFacts org-poisoning guard", () => {
   const lex = (...names: string[]) => ({
     people: names.map((n, i) => ({ id: `p${i}`, names: [n] })),
@@ -161,23 +162,36 @@ describe("extractFacts org-poisoning guard", () => {
   });
 
   test("a known person's bare first name is not minted as an org", () => {
-    const f = extractFacts("Spent the afternoon working with Heng on the assay.", lex("Heng Liu"));
+    const f = extractFacts(
+      "Spent the afternoon working with Priya on the calibration run.",
+      lex("Priya Raghunathan"),
+    );
     expect(f.orgs).toEqual([]);
     expect(f.worksAt).toEqual([]);
   });
 
   test("a known person named only elsewhere is still blocked", () => {
-    const f = extractFacts("Worked through the grant budget with Liz again.", lex("Liz Park"));
+    const f = extractFacts(
+      "Worked through the project budget with Nadia again.",
+      lex("Nadia Rossi"),
+    );
     expect(f.orgs).toEqual([]);
   });
 
-  test("possessive of a known person ('Max's') is stripped, then blocked", () => {
-    const f = extractFacts("Spent the morning working with Max's draft.", lex("Max Brenner"));
+  test("possessive of a known person ('Sigrid's') is stripped, then blocked", () => {
+    const f = extractFacts(
+      "Spent the morning working with Sigrid's draft.",
+      lex("Sigrid Halvorsen"),
+    );
     expect(f.orgs).toEqual([]);
   });
 
   test("a stoplisted city/jargon token is not an org even with a work cue", () => {
-    const f = extractFacts("I worked at Wuhan for two years.", EMPTY, new Set(["wuhan"]));
+    const f = extractFacts(
+      "I worked at Springfield for two years.",
+      EMPTY,
+      new Set(["springfield"]),
+    );
     expect(f.orgs).toEqual([]);
     expect(f.worksAt).toEqual([]);
   });
@@ -185,19 +199,19 @@ describe("extractFacts org-poisoning guard", () => {
   test("stoplist is exact-match: a real org containing the word still extracts", () => {
     const stop = new Set(["school"]);
     expect(extractFacts("I left my bag at School yesterday.", EMPTY, stop).orgs).toEqual([]);
-    expect(extractFacts("She works at Goddard School now.", EMPTY, stop).orgs).toEqual([
-      "Goddard School",
+    expect(extractFacts("She works at Acme School now.", EMPTY, stop).orgs).toEqual([
+      "Acme School",
     ]);
   });
 
   test("a legitimate single-word org via 'at' + cue is still extracted (no over-blocking)", () => {
-    const f = extractFacts("I work at Equinor now.", EMPTY, new Set(["wuhan"]));
-    expect(f.orgs).toEqual(["Equinor"]);
+    const f = extractFacts("I work at Fjordsonics now.", EMPTY, new Set(["springfield"]));
+    expect(f.orgs).toEqual(["Fjordsonics"]);
   });
 
   test("parseNonOrgTerms: comments and blank lines ignored, case-folded", () => {
-    const s = parseNonOrgTerms("# header\nWuhan\n\n  CAR-T  \npcr\n");
-    expect([...s].sort()).toEqual(["car-t", "pcr", "wuhan"]);
+    const s = parseNonOrgTerms("# header\nSpringfield\n\n  Downtown  \natlas\nSignal-Lattice\n");
+    expect([...s].sort()).toEqual(["atlas", "downtown", "signal-lattice", "springfield"]);
   });
 });
 
@@ -317,26 +331,26 @@ My physiotherapist Solveig Dahl at Lade Fysio fixed my knee.`;
 
   test("family-relation people never get a works_at edge (kids don't work at orgs)", async () => {
     // A family narrative co-mentions a child, a work cue, and orgs in one paragraph —
-    // exactly the shape that minted phantom "Mia works_at Hehuang Pharma" edges. With the
+    // exactly the shape that minted phantom "Mina Solberg works_at Acme Corp" edges. With the
     // child stored as relation='daughter', extractAndLink must refuse any works_at edge.
     const { ensurePerson, setPersonRelationIfNull } = await import("../src/db/repo");
-    const { id: miaId } = await ensurePerson("Mialin Tofteberg", "test", "capture");
-    await setPersonRelationIfNull(miaId, "daughter");
+    const { id: minaId } = await ensurePerson("Mina Solberg", "test", "capture");
+    await setPersonRelationIfNull(minaId, "daughter");
 
     await extractAndLink(
       "page",
       pageId,
-      "Mialin Tofteberg joined her violin class; meanwhile work at Havlyd AS continued and she visited Lade Fysio.",
+      "Mina Solberg joined her violin class; meanwhile work at Havlyd AS continued and she visited Lade Fysio.",
     );
 
     const work = await testSql`
       select count(*)::int as n from edges
-      where rel = 'works_at' and src_type = 'person' and src_id = ${miaId}`;
+      where rel = 'works_at' and src_type = 'person' and src_id = ${minaId}`;
     expect(work[0]!.n).toBe(0);
     // a normal mentions edge is still fine — the guard is works_at-specific
     const mentions = await testSql`
       select count(*)::int as n from edges
-      where rel = 'mentions' and dst_type = 'person' and dst_id = ${miaId}`;
+      where rel = 'mentions' and dst_type = 'person' and dst_id = ${minaId}`;
     expect(mentions[0]!.n).toBeGreaterThan(0);
   });
 
@@ -379,10 +393,23 @@ describe("minime_review_queue tool", () => {
     const ctx = { actor: "agent:test" };
     const tool = toolByName("minime_review_queue");
 
-    const { id } = await insertReviewItem("inbox_unfiled", { raw_path: "inbox/x.txt" });
+    const { id } = await insertReviewItem("inbox_unfiled", {
+      inbox_item_id: "11111111-1111-4111-8111-111111111111",
+      raw_path: "/private/owner/inbox/x.txt",
+      classifier: {
+        type: "unknown",
+        confidence: 0.2,
+        fields: { text: "LEGACY-CLASSIFIER-CONTENT-SENTINEL" },
+      },
+    });
     const list = await invokeTool(tool, { action: "list", kind: "inbox_unfiled" }, ctx);
     if (!list.ok) throw new Error(list.error.message);
     expect((list.envelope.data as any).items.some((i: any) => i.id === id)).toBe(true);
+    const wire = JSON.stringify(list.envelope);
+    expect(wire).not.toContain("raw_path");
+    expect(wire).not.toContain("/private/owner/inbox/x.txt");
+    expect(wire).not.toContain("classifier");
+    expect(wire).not.toContain("LEGACY-CLASSIFIER-CONTENT-SENTINEL");
 
     const res = await invokeTool(tool, { action: "resolve", id, status: "resolved" }, ctx);
     expect(res.ok).toBe(true);

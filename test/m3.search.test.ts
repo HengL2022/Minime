@@ -3,11 +3,12 @@
 
 import { beforeAll, describe, expect, test } from "bun:test";
 import evalQueries from "../fixtures/eval-queries.json";
-import { insertUnlock, upsertPage, withActorDbSession } from "../src/db/repo";
+import { upsertPage, withActorDbSession } from "../src/db/repo";
 import { chunkMarkdown } from "../src/search/chunker";
 import { hybridSearch } from "../src/search/hybrid";
 import { indexParent } from "../src/search/index-parent";
 import { resetAndSeed, testSql as sql } from "./helpers";
+import { requestAndApproveTier2, sessionToolCtx } from "./support/unlock";
 
 beforeAll(async () => {
   await resetAndSeed();
@@ -79,32 +80,32 @@ describe("derived penalty", () => {
 
 describe("tier filter (I3)", () => {
   test("tier-2 journal content is invisible while locked, visible after unlock", async () => {
-    const actor = "test";
-    const locked = await hybridSearch({
-      query: "gratitude unprompted health work people",
-      limit: 20,
-      actor,
-    });
+    const ctx = sessionToolCtx("agent:m3-search");
+    const search = () =>
+      withActorDbSession(
+        ctx.actor,
+        () =>
+          hybridSearch({
+            query: "gratitude unprompted health work people",
+            limit: 20,
+            actor: ctx.actor,
+          }),
+        ctx.sessionId,
+      );
+    const locked = await search();
     expect(locked.every((h) => h.type !== "journal" && h.type !== "interaction")).toBe(true);
 
-    await withActorDbSession(actor, () => insertUnlock(5, actor));
-    const unlocked = await hybridSearch({
-      query: "gratitude unprompted health work people",
-      limit: 20,
-      actor,
-    });
+    const { requestId } = await requestAndApproveTier2(ctx);
+    const unlocked = await search();
     expect(unlocked.some((h) => h.type === "journal")).toBe(true);
 
     // Expiry is enforced by PostgreSQL's clock inside app_allowed_tier().
     await sql`
       update session_unlocks
-      set expires_at = clock_timestamp() - interval '1 second'
-      where granted_via = ${actor}`;
-    const relocked = await hybridSearch({
-      query: "gratitude unprompted health work people",
-      limit: 20,
-      actor,
-    });
+      set approved_at = clock_timestamp() - interval '2 seconds',
+          expires_at = clock_timestamp() - interval '1 second'
+      where id = ${requestId}::uuid`;
+    const relocked = await search();
     expect(relocked.every((h) => h.type !== "journal")).toBe(true);
   });
 

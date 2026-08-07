@@ -84,10 +84,11 @@ if [ -n "${RESTIC_REPOSITORY:-}" ] || [ -n "$RESTIC_CANDIDATE" ]; then
 fi
 
 if ! printf '%s\0' "$SOURCE_URL" "$ADMIN_URL_VALUE" "$DRILL_URL_VALUE" "$LIVE_URL_VALUE" "$RESTORE_URL_VALUE" |
-  "$TRUSTED_BUN" run "$SCRIPT_DIR/validate-recovery-endpoints.ts" > /dev/null 2>&1; then
+  "$TRUSTED_BUN" --no-env-file run "$SCRIPT_DIR/validate-recovery-endpoints.ts" > /dev/null 2>&1; then
   echo "restore pitr failed (endpoint_boundary)" >&2
   exit 1
 fi
+readonly SOURCE_URL ADMIN_URL_VALUE DRILL_URL_VALUE LIVE_URL_VALUE RESTORE_URL_VALUE
 
 [ -n "${TIME:-}" ] || { echo "restore pitr failed (usage)" >&2; exit 2; }
 DUMP_ROOT="$REPO_ROOT/db-dump"
@@ -148,11 +149,11 @@ capture_utility() { local output="$1"; shift; "$@" >"$output" 2>"$UTILITY_STDERR
 RESTORE_DIR="$WORK_DIR/restic"; REPLAY_ERR="$WORK_DIR/replay.stderr"; RESTIC_STDOUT="$WORK_DIR/restic.stdout"; RESTIC_STDERR="$WORK_DIR/restic.stderr"; BUN_STDERR="$WORK_DIR/pick-snapshot.stderr"; PSQL_STDOUT="$WORK_DIR/psql.stdout"; PSQL_STDERR="$WORK_DIR/psql.stderr"; BRIDGE_STDERR="$WORK_DIR/libpq-service.stderr"; MANIFEST_VERIFY_STDERR="$WORK_DIR/manifest-verify.stderr"; COUNTS_OUTPUT="$WORK_DIR/restored-counts.tsv"
 LIVE_SERVICE_FILE="$WORK_DIR/live.pg_service.conf"; RESTORE_SERVICE_FILE="$WORK_DIR/restore.pg_service.conf"; ADMIN_SERVICE_FILE="$WORK_DIR/admin.pg_service.conf"
 for capture in "$REPLAY_ERR" "$RESTIC_STDOUT" "$RESTIC_STDERR" "$BUN_STDERR" "$PSQL_STDOUT" "$PSQL_STDERR" "$BRIDGE_STDERR" "$MANIFEST_VERIFY_STDERR" "$COUNTS_OUTPUT"; do if ! : > "$capture" 2>/dev/null || ! "$TRUSTED_CHMOD" 600 "$capture" >/dev/null 2>&1; then echo "restore pitr failed (workspace)" >&2; exit 1; fi; done
-bridge_service() { local raw="$1" output="$2"; export -n raw output; : > "$BRIDGE_STDERR"; if ! printf '%s' "$raw" | "$TRUSTED_BUN" run "$SCRIPT_DIR/libpq-service.ts" "$output" > /dev/null 2>"$BRIDGE_STDERR"; then echo "restore pitr failed (service_handoff)" >&2; return 1; fi; }
+bridge_service() { local raw="$1" output="$2"; export -n raw output; : > "$BRIDGE_STDERR"; if ! printf '%s' "$raw" | "$TRUSTED_BUN" --no-env-file run "$SCRIPT_DIR/libpq-service.ts" "$output" > /dev/null 2>"$BRIDGE_STDERR"; then echo "restore pitr failed (service_handoff)" >&2; return 1; fi; }
 bridge_service "$LIVE_URL_VALUE" "$LIVE_SERVICE_FILE" || exit 1
 bridge_service "$RESTORE_URL_VALUE" "$RESTORE_SERVICE_FILE" || exit 1
 bridge_service "$ADMIN_URL_VALUE" "$ADMIN_SERVICE_FILE" || exit 1
-[ -n "${RESTIC_REPOSITORY:-}" ] || { echo "restore pitr failed (cleanup_dependency)" >&2; exit 1; }
+[ -n "${RESTIC_REPOSITORY:-}" ] || { echo "restore pitr failed (unconfigured)" >&2; exit 2; }
 live_psql() { PGSERVICE=minime_ephemeral PGSERVICEFILE="$LIVE_SERVICE_FILE" "$TRUSTED_PSQL" "$@" > /dev/null 2>"$PSQL_STDERR"; }
 restore_psql() { PGSERVICE=minime_ephemeral PGSERVICEFILE="$RESTORE_SERVICE_FILE" "$TRUSTED_PSQL" "$@" > /dev/null 2>"$PSQL_STDERR"; }
 restore_psql_replay() { H3_REPLAY_ERR_FILE="$REPLAY_ERR" PGSERVICE=minime_ephemeral PGSERVICEFILE="$RESTORE_SERVICE_FILE" "$TRUSTED_PSQL" "$@" > /dev/null 2>"$REPLAY_ERR"; }
@@ -162,8 +163,16 @@ if ! admin_psql -qAt -c "do \$\$ begin if current_database() <> 'postgres' then 
 if ! live_psql -qAt -c "do \$\$ begin if current_database() <> 'minime' then raise exception 'recovery_endpoint_invalid'; end if; end \$\$;"; then echo "restore pitr failed (endpoint_boundary)" >&2; exit 1; fi
 
 echo "==> selecting private snapshot"
+echo "restore source: restic"
 if ! "$TRUSTED_RESTIC" snapshots --json >"$RESTIC_STDOUT" 2>"$RESTIC_STDERR"; then echo "restore pitr failed (restic_snapshots)" >&2; exit 1; fi
-if ! PICK="$(TIME="$TIME" "$TRUSTED_BUN" run "$SCRIPT_DIR/pick-snapshot.ts" < "$RESTIC_STDOUT" 2>"$BUN_STDERR")"; then echo "restore pitr failed (snapshot_selection)" >&2; exit 1; fi
+if PICK="$(TIME="$TIME" "$TRUSTED_BUN" --no-env-file run "$SCRIPT_DIR/pick-snapshot.ts" < "$RESTIC_STDOUT" 2>"$BUN_STDERR")"; then
+  :
+else
+  status=$?
+  if [ "$status" = 3 ]; then echo "restore pitr failed (snapshot_missing)" >&2; exit 3; fi
+  echo "restore pitr failed (snapshot_selection)" >&2
+  exit 1
+fi
 if ! SNAP_ID="$(printf '%s' "$PICK" | "$TRUSTED_CUT" -f1 2>"$UTILITY_STDERR")"; then echo "restore pitr failed (snapshot_selection)" >&2; exit 1; fi
 case "$SNAP_ID" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_.:-]*) echo "restore pitr failed (snapshot_selection)" >&2; exit 1 ;; esac
 
@@ -175,7 +184,7 @@ adopt_restored_pair() { local candidate dump_count=0 manifest_count=0 dump_found
 if ! adopt_restored_pair; then echo "restore pitr failed (snapshot_dump_missing)" >&2; exit 1; fi
 
 echo "==> restoring into private scratch database"
-if ! "$TRUSTED_BUN" run "$SCRIPT_DIR/snapshot-manifest.ts" verify "$DUMP" "$MANIFEST" > /dev/null 2>"$MANIFEST_VERIFY_STDERR"; then echo "restore pitr failed (snapshot_manifest)" >&2; exit 1; fi
+if ! "$TRUSTED_BUN" --no-env-file run "$SCRIPT_DIR/snapshot-manifest.ts" verify "$DUMP" "$MANIFEST" > /dev/null 2>"$MANIFEST_VERIFY_STDERR"; then echo "restore pitr failed (snapshot_manifest)" >&2; exit 1; fi
 if ! admin_psql -qAt -c "drop database if exists minime_restore"; then echo "restore pitr failed (psql)" >&2; exit 1; fi
 if ! admin_psql -qAt -c "create database minime_restore with owner minime template minime_test"; then echo "restore pitr failed (psql)" >&2; exit 1; fi
 if ! restore_psql -qAt -c "do \$\$ begin if current_database() <> 'minime_restore' then raise exception 'recovery_endpoint_invalid'; end if; end \$\$;"; then echo "restore pitr failed (endpoint_boundary)" >&2; exit 1; fi
@@ -183,6 +192,7 @@ if ! restore_psql -qAt -c "drop owned by minime cascade"; then echo "restore pit
 if ! restore_psql_replay -q -v ON_ERROR_STOP=1 -f "$DUMP"; then echo "restore validation failed; promotion refused" >&2; exit 4; fi
 if ! restore_psql -v ON_ERROR_STOP=1 -qAt -c "select 1"; then echo "restore validation failed; promotion refused" >&2; exit 4; fi
 if ! PGSERVICE=minime_ephemeral PGSERVICEFILE="$RESTORE_SERVICE_FILE" "$TRUSTED_PSQL" -qAt -F "$(printf '\t')" -c "select 'm', name, '-' from schema_migrations union all select 'c', 'tasks', count(*)::text from tasks union all select 'c', 'people', count(*)::text from people union all select 'c', 'journal_entries', count(*)::text from journal_entries union all select 'c', 'chunks', count(*)::text from chunks union all select 'c', 'events', count(*)::text from events order by 1,2" >"$COUNTS_OUTPUT" 2>"$PSQL_STDERR"; then echo "restore pitr failed (restore_counts)" >&2; exit 1; fi
-if ! "$TRUSTED_BUN" run "$SCRIPT_DIR/snapshot-manifest.ts" compare "$MANIFEST" <"$COUNTS_OUTPUT" > /dev/null 2>"$MANIFEST_VERIFY_STDERR"; then echo "restore pitr failed (restore_counts)" >&2; exit 1; fi
+if ! "$TRUSTED_BUN" --no-env-file run "$SCRIPT_DIR/snapshot-manifest.ts" compare "$MANIFEST" <"$COUNTS_OUTPUT" > /dev/null 2>"$MANIFEST_VERIFY_STDERR"; then echo "restore pitr failed (restore_counts)" >&2; exit 1; fi
+if ! printf '%s' "$RESTORE_URL_VALUE" | "$TRUSTED_BUN" --no-env-file run "$SCRIPT_DIR/restore-schema-gate.ts" > /dev/null 2>"$MANIFEST_VERIFY_STDERR"; then echo "restore pitr failed (schema_gate)" >&2; exit 1; fi
 echo "==> dump replay validation complete"
 echo "scratch database left in place"

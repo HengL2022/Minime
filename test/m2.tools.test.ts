@@ -2,11 +2,15 @@
 // every call writes an events row; redaction works; envelope shape is honored.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { withAdminDbTransaction } from "../src/db/client";
+import { approveTier2UnlockRequest } from "../src/db/repo";
 import { buildServer } from "../src/mcp/server";
 import { ALL_TOOLS } from "../src/mcp/tools";
-import { setNow } from "../src/util/clock";
+import { config } from "../src/util/config";
 import { resetAndSeed, testSql as sql } from "./helpers";
 
 let client: Client;
@@ -108,6 +112,56 @@ describe("MCP server", () => {
     expect(parsed.sources[0]).toHaveProperty("updated_at");
   });
 
+  test("get_context transport audit covers every visible related row", async () => {
+    const personName = "Context Audit Person";
+    const [person] = await sql`
+      insert into people (canonical_name, tier, created_by, source)
+      values (${personName}, 1, 'fixture', 'test')
+      returning id`;
+    const [org] = await sql`
+      insert into orgs (canonical_name, kind, tier, created_by, source)
+      values ('Context Audit Org', 'company', 1, 'fixture', 'test')
+      returning id`;
+    const [edge] = await sql`
+      insert into edges
+        (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by)
+      values
+        ('person', ${person!.id}, 'works_at', 'org', ${org!.id},
+         'people', ${person!.id}, 'system:test')
+      returning id`;
+    const [task] = await sql`
+      insert into tasks (title, status, due, tier, created_by, source)
+      values (${`Follow up with ${personName}`}, 'active', '2026-12-20', 1, 'fixture', 'test')
+      returning id`;
+    const [commitment] = await sql`
+      insert into commitments (what, to_whom, status, due, tier, created_by, source)
+      values ('Send context audit notes', ${personName}, 'open', '2026-12-21', 1, 'fixture', 'test')
+      returning id`;
+    const [marker] = await sql`select coalesce(max(id), 0)::bigint as id from events`;
+
+    const { parsed, isError } = await call("minime_get_context", { person_name: personName });
+    expect(isError).toBe(false);
+    expect(parsed.sources[0]).toMatchObject({ type: "person", id: person!.id });
+    expect(parsed.sources.map((source: any) => source.id)).toEqual(
+      expect.arrayContaining([edge!.id, task!.id, commitment!.id]),
+    );
+    expect(parsed.data.related).toContainEqual(
+      expect.objectContaining({
+        id: edge!.id,
+        source_table: "people",
+        source_id: person!.id,
+      }),
+    );
+
+    const events = await toolEventsAfter(marker!.id, 3);
+    const resultEvent = events.find((event) => event.verb === "tool:minime_get_context");
+    expect(resultEvent).toBeDefined();
+    expect(resultEvent!.payload.returned_ids).toEqual(
+      parsed.sources.map((source: any) => source.id),
+    );
+    expect(resultEvent!.payload.returned_count).toBe(parsed.sources.length);
+  });
+
   test("MCP tier-0 content is denied at the transport boundary", async () => {
     const [page] = await sql`
       insert into pages (path, title, body_md, content_hash, tier, created_by, source)
@@ -136,6 +190,8 @@ describe("MCP server", () => {
     expect(locked.raw).not.toContain("MCP-TIER2-SENTINEL");
     const unlock = await call("minime_unlock", { minutes: 5 });
     expect(unlock.isError).toBe(false);
+    expect(unlock.parsed.data.status).toBe("pending");
+    await withAdminDbTransaction(() => approveTier2UnlockRequest(unlock.parsed.data.request_id));
     const unlocked = await call("minime_search", { query: "MCP-TIER2-SENTINEL" });
     expect(unlocked.raw).toContain("MCP-TIER2-SENTINEL");
   });
@@ -168,16 +224,102 @@ describe("MCP server", () => {
     expect(bad.parsed.error.code).toBe("UNKNOWN_METRIC");
   });
 
-  test("minime_capture writes an inbox file + row", async () => {
-    const { parsed } = await call("minime_capture", {
+  test("metric days honor caller timezone and rollups use declared sum/last semantics", async () => {
+    await sql`
+      insert into health_samples (kind, at, value, unit, source, created_by, tier)
+      values
+        ('steps', '2026-01-01T16:30:00Z', 321, 'steps', 'test:metric-tz', 'fixture', 0),
+        ('steps', '2026-01-05T12:00:00Z', 10, 'steps', 'test:metric-rollup', 'fixture', 0),
+        ('steps', '2026-01-06T12:00:00Z', 20, 'steps', 'test:metric-rollup', 'fixture', 0)`;
+
+    const singapore = await call("minime_query_metric", {
+      name: "steps",
+      from: "2026-01-02",
+      to: "2026-01-02",
+      time_zone: "Asia/Singapore",
+    });
+    expect(singapore.parsed.data.series).toEqual([{ period_start: "2026-01-02", value: 321 }]);
+    const utc = await call("minime_query_metric", {
+      name: "steps",
+      from: "2026-01-01",
+      to: "2026-01-01",
+      time_zone: "UTC",
+    });
+    expect(utc.parsed.data.series).toEqual([{ period_start: "2026-01-01", value: 321 }]);
+
+    for (const granularity of ["week", "month"] as const) {
+      const additive = await call("minime_query_metric", {
+        name: "steps",
+        from: "2026-01-05",
+        to: "2026-01-06",
+        granularity,
+        time_zone: "UTC",
+      });
+      expect(additive.parsed.data.series).toEqual([
+        { period_start: granularity === "week" ? "2026-01-05" : "2026-01-01", value: 30 },
+      ]);
+    }
+
+    await sql`
+      insert into journal_entries (at, entry_md, source, created_by, tier)
+      values
+        ('2025-12-31T12:00:00Z', 'Fictional streak day one.', 'test:metric-streak', 'fixture', 2),
+        ('2026-01-01T12:00:00Z', 'Fictional streak day two.', 'test:metric-streak', 'fixture', 2),
+        ('2026-01-02T12:00:00Z', 'Fictional streak day three.', 'test:metric-streak', 'fixture', 2),
+        ('2026-01-03T12:00:00Z', 'Fictional streak day four.', 'test:metric-streak', 'fixture', 2)`;
+    const streakDays = await call("minime_query_metric", {
+      name: "journal_streak",
+      from: "2026-01-02",
+      to: "2026-01-03",
+      time_zone: "UTC",
+    });
+    expect(streakDays.parsed.data.series).toEqual([
+      { period_start: "2026-01-02", value: 3 },
+      { period_start: "2026-01-03", value: 4 },
+    ]);
+    for (const granularity of ["week", "month"] as const) {
+      const streakRollup = await call("minime_query_metric", {
+        name: "journal_streak",
+        from: "2026-01-02",
+        to: "2026-01-03",
+        granularity,
+        time_zone: "UTC",
+      });
+      expect(streakRollup.parsed.data.series).toEqual([
+        { period_start: granularity === "week" ? "2025-12-29" : "2026-01-01", value: 4 },
+      ]);
+    }
+
+    const [callerZoneCache] =
+      await sql`select count(*)::int as n from metric_values where source = 'query'`;
+    expect(callerZoneCache!.n).toBe(0);
+  });
+
+  test("minime_capture returns an opaque receipt and writes a private inbox file + row", async () => {
+    const { raw, parsed } = await call("minime_capture", {
       text: "todo: test the capture path by 2026-12-01",
     });
     expect(parsed.data.inbox_item_id).toBeString();
-    const [row] =
-      await sql`select status, created_by from inbox_items where id = ${parsed.data.inbox_item_id}`;
+    expect(Object.keys(parsed.data)).toEqual(["inbox_item_id"]);
+    expect(raw).not.toContain(config.dataDir);
+    const [row] = await sql`
+      select status, created_by, raw_path, content_hash
+      from inbox_items where id = ${parsed.data.inbox_item_id}`;
     expect(row!.status).toBe("pending");
     expect(row!.created_by).toBe("agent:test-harness");
-    expect(await Bun.file(parsed.data.path).exists()).toBe(true);
+    expect(await Bun.file(row!.raw_path).exists()).toBe(true);
+    expect(row!.content_hash).toBe(
+      new Bun.CryptoHasher("sha256")
+        .update(await Bun.file(row!.raw_path).arrayBuffer())
+        .digest("hex"),
+    );
+    expect((await stat(config.dataDir)).mode & 0o777).toBe(0o700);
+    expect((await stat(dirname(row!.raw_path))).mode & 0o777).toBe(0o700);
+    expect((await stat(row!.raw_path)).mode & 0o777).toBe(0o600);
+
+    const seededPage = join(config.dataDir, "brain", "travel", "tokyo-trip-plan.md");
+    expect((await stat(dirname(seededPage))).mode & 0o777).toBe(0o700);
+    expect((await stat(seededPage)).mode & 0o777).toBe(0o600);
   });
 
   test("minime_journal / minime_upsert_task / minime_log_interaction write rows stamped agent:<client>", async () => {
@@ -206,38 +348,63 @@ describe("MCP server", () => {
       kind: "message",
       summary: "Harness ping",
     });
-    expect(i.parsed.data.person_created).toBe(false); // alias resolved to Sam Chen
-    const [p] = await sql`select last_contact_at from people where id = ${i.parsed.data.person_id}`;
+    const [sam] = await sql`
+      select p.id from people p join person_aliases a on a.person_id = p.id
+      where lower(a.alias) = 'sammy'`;
+    expect(Object.keys(i.parsed.data)).toEqual(["interaction_id"]);
+    expect(i.parsed.sources).toEqual([{ type: "interaction", id: i.parsed.data.interaction_id }]);
+    const [interaction] = await sql`
+      select person_id from interactions where id = ${i.parsed.data.interaction_id}`;
+    expect(interaction!.person_id).toBe(sam!.id); // alias resolved to Sam Chen
+    const [p] = await sql`select last_contact_at from people where id = ${interaction!.person_id}`;
     expect(p!.last_contact_at).not.toBeNull();
+  });
+
+  test("minime_upsert_task keeps unexpected database errors off the wire", async () => {
+    const sentinel = "PRIVATE-TASK-TITLE-SENTINEL";
+    const result = await call("minime_upsert_task", {
+      title: sentinel,
+      goal_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.parsed).toEqual({
+      error: { code: "INTERNAL", message: "Internal tool error." },
+    });
+    expect(result.raw).not.toContain(sentinel);
   });
 
   test("minime_log_interaction with subject_type='org' attaches to an org, not a phantom person", async () => {
     const before =
-      await sql`select count(*)::int n from people where lower(canonical_name) = 'vazyme'`;
+      await sql`select count(*)::int n from people where lower(canonical_name) = 'fjordsonics'`;
     const r = await call("minime_log_interaction", {
-      person_name: "Vazyme",
+      person_name: "Fjordsonics",
       kind: "email",
-      summary: "Quote request for lysis buffer.",
+      summary: "Quote request for a sensor order.",
       subject_type: "org",
     });
-    // org-keyed: envelope carries org_id, no person_id, and NO phantom person was minted
-    expect(r.parsed.data.org_id).toBeString();
-    expect(r.parsed.data.person_id).toBeUndefined();
+    // The receipt is subject-invariant, and NO phantom person was minted.
+    expect(Object.keys(r.parsed.data)).toEqual(["interaction_id"]);
+    expect(r.parsed.sources).toEqual([{ type: "interaction", id: r.parsed.data.interaction_id }]);
     const after =
-      await sql`select count(*)::int n from people where lower(canonical_name) = 'vazyme'`;
+      await sql`select count(*)::int n from people where lower(canonical_name) = 'fjordsonics'`;
     expect(after[0]!.n).toBe(before[0]!.n); // no phantom person created
     // interaction row is org-keyed and satisfies the XOR
     const [row] =
       await sql`select person_id, org_id from interactions where id = ${r.parsed.data.interaction_id}`;
     expect(row!.person_id).toBeNull();
-    expect(row!.org_id).toBe(r.parsed.data.org_id);
+    expect(row!.org_id).not.toBeNull();
     // 'auto' mode now resolves the existing org rather than minting a person
     const r2 = await call("minime_log_interaction", {
-      person_name: "Vazyme",
+      person_name: "Fjordsonics",
       kind: "call",
       summary: "Follow-up on lead time.",
     });
-    expect(r2.parsed.data.org_id).toBe(r.parsed.data.org_id);
+    expect(Object.keys(r2.parsed.data)).toEqual(["interaction_id"]);
+    expect(r2.parsed.sources).toEqual([{ type: "interaction", id: r2.parsed.data.interaction_id }]);
+    const [row2] = await sql`
+      select person_id, org_id from interactions where id = ${r2.parsed.data.interaction_id}`;
+    expect(row2!.person_id).toBeNull();
+    expect(row2!.org_id).toBe(row!.org_id);
   });
 
   test("minime_log_decision + minime_review_decision close the loop", async () => {
@@ -253,6 +420,18 @@ describe("MCP server", () => {
       lesson: "Always write the harness test first",
     });
     expect(r.parsed.data.principle_id).toBeString();
+    const edgeRows = await sql`
+      select rel, source, created_by, derived_from, source_id
+      from edges
+      where (src_type = 'decision' and src_id = ${d.parsed.data.decision_id})
+         or (src_type = 'principle' and src_id = ${r.parsed.data.principle_id})
+      order by rel, id`;
+    expect(edgeRows.length).toBeGreaterThan(0);
+    for (const edge of edgeRows) {
+      expect(edge.created_by).toBe("agent:test-harness");
+      expect(edge.derived_from).toBe(edge.source_id);
+      expect(edge.source).toBe(edge.rel === "learned_from" ? "review" : "capture");
+    }
   });
 
   test("redaction: card numbers, IBANs, long account numbers never leave the server", async () => {
@@ -275,15 +454,10 @@ describe("MCP server", () => {
   });
 
   test("MCP responses render timestamps in the caller timezone", async () => {
-    setNow(new Date("2026-06-17T01:00:00.000Z"));
-    try {
-      const res = await call("minime_unlock", {
-        minutes: 5,
-        time_zone: "America/Los_Angeles",
-      });
-      expect(res.parsed.data.expires_at).toBe("2026-06-16T18:05:00.000-07:00");
-    } finally {
-      setNow(null);
-    }
+    const res = await call("minime_search", {
+      query: "sourdough starter feeding",
+      time_zone: "America/Los_Angeles",
+    });
+    expect(res.parsed.sources[0].updated_at).toMatch(/-0[78]:00$/);
   });
 });

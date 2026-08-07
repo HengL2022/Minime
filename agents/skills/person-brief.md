@@ -9,7 +9,10 @@ honest about recency.
    `last_contact_at`, typed edges (employer via `works_at`, shared mentions), open items.
 2. **Interactions are tier 2.** If `interactions` comes back empty and the gap note says
    tier-locked, ask: "Interaction history is locked — want a 15-minute unlock?" Only call
-   `minime_unlock` after a yes.
+   `minime_unlock` after a yes. Give the owner the returned request ID and local approval
+   command, wait for them to approve it in their terminal, then re-read. Approval is time-boxed,
+   loudly audited, and bound to this MCP connection; a reconnect is locked again. Tier 0 is
+   never readable.
 3. `minime_search` with the person's name — notes that mention them beyond the edge list
    (limit 5; skip if the dossier already covers it).
 4. `minime_state` — only to check whether an open commitment or due task involves them.

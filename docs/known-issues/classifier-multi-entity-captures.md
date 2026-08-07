@@ -12,17 +12,20 @@ first-class records via `minime_get_context`.
 
 ### Reproduction (observed)
 
+The example below is fictionalized; it preserves the shape of the original incident without
+publishing owner or contact data.
+
 Capture text:
 
-> On 2026-06-14 I emailed three Chinese companies about lysis buffer for SNPsnipe:
-> 菲鹏生物 / Fapon Biotech (Guangdong); 珠海宝瑞生物 / Biori (Zhuhai); 宝创生物 / Biotron
-> (Guangzhou). … Chen Mengwei, the Singapore sales lead for Vazyme, was asked to help.
+> I emailed three fictional suppliers about calibration gel for Project SILDRE:
+> Northstar Reagents AS (Bergen), Bluefin Labs AS (Oslo), and Aster Bio AS (Trondheim).
+> Nadia Rossi, the sales lead at Corvid Biotech, was asked to help.
 
-Result: filed as **one `interaction`** (`kind=email`, `person_name="Chen Mengwei"`,
+Result: filed as **one `interaction`** (`kind=email`, `person_name="Nadia Rossi"`,
 confidence 0.78). The three vendor companies were **not** created as entities — they
 existed only as text in `interactions.summary`, which is **tier-2** and therefore
 hidden from `minime_search` unless the caller holds an unlock. Net effect: "what are
-my lysis buffer vendors?" returned nothing findable until the vendors were re-captured
+my calibration-gel suppliers?" returned nothing findable until the vendors were re-captured
 one-per-call.
 
 ## Root cause
@@ -47,19 +50,29 @@ best-fit type and everything else is narrative residue.
 The classifier's type set has **no `org`/`company`/`person` creation path** at all.
 Captures describing a company are best-filed as `note` (pages). In the repro above,
 three explicit single-vendor captures *with* `hint: "org / company record"` were each
-filed as `note` (pages 892c9ec6 / 38bda369 / 09089365) — correct and searchable, but
+filed as `note` (fixture pages A / B / C) — correct and searchable, but
 they are pages, not org entities, so `minime_get_context(type='org', …)` can't resolve
 them and no `works_at`-style edges can attach. (Compare the pre-existing bad edge where
-Chen Mengwei `works_at` an org literally named "Heng" — orgs today only appear via
+Nadia Rossi `works_at` an org literally named "Priya" — orgs today only appear via
 extraction side-paths, not the capture door, so their quality is uncontrolled.)
 
 ## Suggested fix (design options, smallest first)
+
+### 2026-08-06 foundation update
+
+Inbox replay and filing are now safe foundations for this future work: each capture has immutable
+byte identity, a fenced claim, and one final database transaction. The two existing conservative
+action+decision and decision+completed-task splits commit all-or-nothing, so crashes and concurrent
+replay cannot duplicate their companions. This does **not** solve general entity segmentation:
+there is still no stable segment plan, derivation-key ledger, uncertain-segment review contract, or
+first-class org/person capture type. This issue therefore remains open and is intentionally kept in
+the ordinary product backlog rather than guessed into the identity migration.
 
 1. **Split step (recommended).** Add an optional pre-pass that asks the model to
    segment a capture into 1..N self-contained items *before* classifying each. Keep the
    single-label classifier unchanged; loop it over the segments. The watcher files N
    rows, all carrying the same `derived_from` inbox-item id for provenance. Gate behind
-   a confidence/þcount sanity check so a normal one-thing capture still costs one call.
+   a confidence/count sanity check so a normal one-thing capture still costs one call.
 
 2. **Multi-label classify.** Change `classify()` to return `Classification[]` and have
    the watcher file each. Bigger blast radius (every caller + `filed_table`/`filed_id`

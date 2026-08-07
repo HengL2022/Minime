@@ -626,8 +626,8 @@ branch mechanics, review evidence, and plan adjustments do not need entries.
 
 - **Context:** Backup/restore beyond the nightly dream-job backup (spec §4 restic stack,
   invariant I1; builds on the 2026-06-11 cloud-restic amendment — same repo, same
-  client-side AES-256, B2 target, no new network surface). Plan:
-  `~/.claude/plans/read-through-this-project-spicy-lynx.md`.
+  client-side AES-256, B2 target, no new network surface). The original owner-reviewed
+  home-directory plan is retired; its durable choices are recorded here.
 - **Decision:** Phase 1 implemented: `dbSnapshot()` in new `src/pipeline/backup.ts`
   (extracted from dream.ts; `backup` re-exported so dream step 7 is unchanged) runs every
   15 min via `BACKUP_CRON` (croner, empty string disables, only when restic configured).
@@ -658,8 +658,7 @@ branch mechanics, review evidence, and plan adjustments do not need entries.
 
 - **Context:** Post-M9 new scope (spec §15 deferred list never covered agent-session
   capture; the access boost changes search weights, spec §9 Phase-1a amendment lineage).
-  Source: owner-requested review of github.com/rohitg00/agentmemory. Plan:
-  `~/.claude/plans/https-github-com-rohitg00-agentmemory-ta-humming-karp.md`. Their
+  Source: owner-requested review of github.com/rohitg00/agentmemory and a retired local plan. Their
   retrieval/eval stack is behind ours (95.2% R@5 session-level/MiniLM vs our 97.2%
   chunk-level) — only the capture idea and the access signal were adopted; TTL hard-delete
   forgetting rejected (conflicts I5/I8 append-only provenance), per-parent diversity cap
@@ -766,17 +765,17 @@ branch mechanics, review evidence, and plan adjustments do not need entries.
 
 - **Context:** The zero-LLM edge extractor's `ORG_PREP` rule mints an org from "at/for/with +
   Capitalized word". Its person guard only excluded people named in the *same sentence*, so bare
-  first names (a note's "Heng" vs. the stored "Heng Liu"), people known only elsewhere, and
-  non-person capitalized words (cities, lab/assay jargon) became phantom orgs — one node had
-  accreted 206 spurious edges.
+  first names (a note's "Priya" vs. the stored "Priya Raghunathan"), people known only elsewhere, and
+  non-person capitalized words (places and domain-specific jargon) became phantom orgs — one node had
+  accreted `<spurious-edge-count>` edges in the production incident.
 - **Decision:** `orgsIn` now blocks any org candidate that (a) matches a known person by full
   name *or bare first token* over the entire people lexicon — owner included, since the owner is
   a people row, so no separate owner list is maintained; (b) is a trailing possessive once
-  stripped ("Max's" → "Max"); or (c) appears in a non-org stoplist. The stoplist is owner-domain
+  stripped ("Sigrid's" → "Sigrid"); or (c) appears in a non-org stoplist. The stoplist is owner-domain
   data (cities, lab/therapy concepts) with no structural signal separating it from real
-  single-word orgs ("Equinor"), so it lives in a **local, gitignored** file
+  single-word orgs ("Fjordsonics"), so it lives in a **local, gitignored** file
   `$MINIME_DATA_DIR/non-org-terms.txt` (a committed `.example.txt` documents the format),
-  matched case-folded and EXACT so a real org containing a listed word ("Goddard School") still
+  matched case-folded and EXACT so a fictional org containing a listed word ("Acme School") still
   extracts. Missing file = empty set (filter inert), so the extractor never depends on it.
 - **Why:** Prevention at ingestion beats periodic cleanup. The person-name guard is
   self-maintaining (grows with the lexicon); keeping the owner's bio terms out of committed
@@ -790,18 +789,16 @@ branch mechanics, review evidence, and plan adjustments do not need entries.
 
 ## 2026-06-16 — Classifier: completed-result captures mis-filed as open decisions (TODO, code fix)
 
-- **Context:** Owner captured a lab update that contained BOTH a finished result and a future
-  open question: *"FACS analysis done, results good, gene transduction works. Note: U87/U251
-  endogenously express IL-13R + EGFRvIII — okay for prelim but probably need knockout lines, need
-  to think further."* The classifier collapsed the whole capture into a **single open `decision`
-  row** (`7be013f0`) whose `reasoning` field carried the achievement ("FACS confirms transduction
-  works") while `choice` stayed null.
+- **Context (fictional incident example):** A capture contained BOTH a finished result and a future
+  open question: *"Calibration run finished successfully. Note: decide whether to repeat it with
+  a larger sample."* The classifier collapsed the whole capture into a **single open `decision`
+  row** (`<mixed-decision-id>`) whose `reasoning` field carried the achievement while `choice`
+  stayed null.
 - **Symptom:** The accomplishment became invisible to the evening review's "What moved today",
   because `minime_state` sources that section from **tasks marked done + commitments closed**, not
   from decision `reasoning` text. An open decision surfaces only under "decision reviews due" (the
-  pending-question bucket). Net effect: a real completed lab task produced no done-task/journal
-  row, so the day looked empty of lab work and the originating FACS/Daniel-sorting task was never
-  recorded as done.
+  pending-question bucket). Net effect: completed work produced no done-task/journal row, so the
+  day looked empty and the originating action was never recorded as done.
 - **Decision (SHIPPED 2026-06-16, approach (b)):** Detect completion-signal phrasing and split
   the capture. Implemented in `src/pipeline/classify.ts` (`completionSignal` — word-boundary regex
   for done/finished/confirmed/works/succeeded/etc.; `completionTitle` — leading-clause extractor
@@ -821,21 +818,19 @@ branch mechanics, review evidence, and plan adjustments do not need entries.
   cases: a mixed "decision + finished work" capture yields BOTH a decision and a `done` task (with
   non-null `completed_at`, derived from the same inbox item); a plain forward-looking decision yields
   NO done-task. Full suite 197 pass / 0 fail; `tsc --noEmit` clean.
-- **Manual remediation applied (data, this instance):** Logged the FACS win as a done task
-  (`fe909fef`, due 2026-06-16) and "Decide on Daniel sorting" as an open task (`4bc25704`) via the
-  MCP tools; fleshed out decision `7be013f0` with 3 real options + criteria + review_at 2026-06-30
-  (one-off in-place UPDATE, row backed up to `data/backups/` first). These are the owner's life
-  data and stay in the DB; this engineering note stays in git only.
+- **Manual remediation applied (owner data):** Recorded the completed action and pending choice via
+  MCP, then filled the decision's options, criteria, and review date after a pre-image backup.
+  Production row identifiers and the backup location are represented here as `<completed-task-id>`,
+  `<mixed-decision-id>`, and `<private-backup-dir>/`; owner content remains only in the database.
 - **Approved by:** human (owner, 2026-06-16 — "note the classifier mis-filing for a code fix").
 
 ### 2026-06-16 — Follow-up: completion signals on the plain-`task` branch + close-existing consistency
 
-- **Trigger:** Same day, a capture "Check returned sequences & re-label the 5 plasmids correctly —
-  done" was classified as a plain `task` (not `decision_note`), so the split-mixed-captures fix above
-  never ran on it. It filed as `status=inbox` and was reported "✅ complete" to the owner while the DB
-  row was still open — a false-success that lost the accomplishment from "what moved today". (Real ID
-  was `437157a9`; an earlier message even cited a non-existent id `3127260c` — display state and DB
-  state had diverged.)
+- **Trigger (fictional incident example):** A capture "Finalize the calibration labels — done" was
+  classified as a plain `task` (not `decision_note`), so the split-mixed-captures fix above never
+  ran on it. It filed as `status=inbox` and was reported "✅ complete" while the DB row was still
+  open — a false-success that lost the accomplishment from "what moved today". The persisted row
+  (`<completed-task-id>`) and a mistakenly reported identifier (`<nonexistent-task-id>`) diverged.
 - **Root cause:** completion-signal handling lived ONLY in the `decision_note` branch of
   `fileRow`. The `task` branch ignored "— done" phrasing entirely, and a completion report that
   matched an existing OPEN task was routed to the duplicate-review queue, leaving the original task
@@ -855,8 +850,8 @@ branch mechanics, review evidence, and plan adjustments do not need entries.
   `task:` capture with "— done" files as `done` with non-null `completed_at`; a completion capture
   matching an existing open task CLOSES it (status done, completed_at stamped, no second row, no
   stuck duplicate-review item). Full suite 199 pass / 0 fail; `tsc --noEmit` clean.
-- **Data remediation (this instance):** plasmid task `437157a9` set to `done` / `completed_at`
-  2026-06-16 via MCP; "Decide on Daniel sorting" `4bc25704` dropped (owner decided not to do it).
+- **Data remediation (owner data):** The affected task (`<completed-task-id>`) was set to `done`
+  with `completed_at` via MCP, and its obsolete companion (`<obsolete-task-id>`) was dropped.
 - **Open follow-up (not code):** the *false-success report* itself — the assistant said "marked
   complete" when the write landed as inbox — is an agent-side reporting discipline issue (verify the
   written row's status before reporting done), not a watcher bug. Noted for the agent workflow, no
@@ -867,9 +862,9 @@ branch mechanics, review evidence, and plan adjustments do not need entries.
 ## 2026-06-16 — Sanctioned entity retype/supersede (org→person) + DB-wide mistype screen
 
 **Context:** The relation extractor mints an `org` row for entities that are really people
-when the name is first seen only inside a task title (e.g. "Hai Yan", the owner's boss).
+when the name is first seen only inside a task title (e.g. "Sigrid Halvorsen", a fictional manager).
 No classifier path retypes an existing wrong row, so this mistake class blocked work three
-times (Hai Yan; Liz dedup; today's org failure mode). `minime_capture` can only write
+times (the manager fixture; a separate dedup case; the day's org failure mode). `minime_capture` can only write
 notes/pages — it cannot retype/retire/merge an existing entity. A code-level fix was required.
 
 **Decision:**
@@ -884,8 +879,8 @@ notes/pages — it cannot retype/retire/merge an existing entity. A code-level f
 - Added `detectMistypedEntities()` — a **read-only** DB-wide screen for the class
   (`org_should_be_person`, `person_from_pronoun`). Conservative: only `system:extract` rows
   are candidates (never human-confirmed), and org-name matching requires a **2–3-token
-  "First Last"** shape so single-token biotech brands ("Vazyme", "Fapon") are not false
-  positives. (The initial 1–3-token rule flagged Vazyme on the live screen; tightened + added
+  "First Last"** shape so single-token fictional brands ("Fjordsonics", "Glasswing") are not false
+  positives. (The initial 1–3-token rule flagged Fjordsonics on the screen; tightened + added
   a regression test.)
 
 **TDD:** `test/m11.entity-retype.test.ts` — 9 tests (retype convert/repoint+dedup/merge-into-
@@ -894,27 +889,28 @@ ignores human-confirmed and single-token extractor orgs). Full suite 208 pass / 
 biome clean.
 
 **Live cleanup (owner-approved 2026-06-16, "a"):** Backed up affected rows to
-`~/.hermes/cron/output/minime-backups/retype_<ts>.sql`, then:
-- "Hai Yan" org → person (relation: boss), 2 edges repointed, org retired.
-- "She" — a phantom person minted from a bare pronoun, with a junk `She works_at Vazyme`
-  edge. Dropped its 3 edges + alias and removed the row (kept the real source page
-  "Iris / Lew Kah Xin" + the email interaction it mentioned). Hard-delete (no people.retired_at
+`<private-backup-dir>/retype_<timestamp>.sql`, then:
+- "Sigrid Halvorsen" org → person (relation: boss), `<repointed-edge-count>` edges repointed,
+  org retired.
+- "She" — a phantom person minted from a bare pronoun, with a junk `She works_at Fjordsonics`
+  edge. Dropped its `<phantom-edge-count>` edges + alias and removed the row (kept the source page
+  and the email interaction it mentioned). Hard-delete (no people.retired_at
   column) justified: content-free pronoun row, fully covered by the backup.
 - Post-fix screen returns empty.
 
 **Approved by:** human (owner, 2026-06-16 — "implement the split-mixed-captures classifier fix"
 thread → approved retype + screen build, then "a" to apply both live fixes).
 
-## 2026-06-16 — Family-relation people never get works_at edges (+ live cleanup of 59)
+## 2026-06-16 — Family-relation people never get works_at edges (+ live cleanup)
 
-- **Context:** Verifying the recovered family graph through the MCP read path, `minime_get_context`
-  for Mia (daughter) / Max (son) returned bogus `works_at` edges — e.g. *Mia works_at Hehuang
-  Pharma*, *Max works_at Huashan Hospital*, *Liz works_at CAR-T*. Root cause: the zero-LLM edge
+- **Context (fictional incident example):** Verifying a fictional family graph through the MCP read
+  path returned bogus `works_at` edges for family members — e.g. *Mina Solberg works_at Acme Corp*
+  and *Oskar Solberg works_at Corvid Biotech*. Root cause: the zero-LLM edge
   extractor's paragraph-scope (0.7) and page-dominant-org (0.6) inference pairs any person with an
   org when a work cue ("school", "clinic", "violin class") co-occurs in the same paragraph. Family
-  narratives constantly do this, so children/spouse/helper got phantom employment. 59 such edges
-  existed live (Liz 19, Max 19, Mia 14, Pinky 7): 113-origin from the Mac dump + new ones minted by
-  today's re-index backfill. Not merge damage — pre-existing extractor noise, FK-clean.
+  narratives constantly do this, so children/spouse/helper got phantom employment. A production
+  set of `<affected-edge-count>` rows contained a mix of imported and newly backfilled extractor
+  noise; it was not merge damage and remained FK-clean.
 - **Decision:**
   1. **Guard (code):** `extractAndLink` now refuses to insert a `works_at` edge when the resolved
      person's STORED relation is a non-working family/household relation (son, daughter, child,
@@ -923,9 +919,10 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
      pure `extractFacts` rules — because only there is the stored relation known. Logs
      `extract:skip-works-at`. New repo helper `personById(id)` (NOT tier-gated: system extractor
      reads only id/canonical_name/relation, never tier-2 free text; not exposed via MCP).
-  2. **Cleanup (live data):** deleted the 59 existing family `works_at` edges via the sanctioned
-     engineering path (graph-plumbing repair, not life-DB content), after a CSV backup to
-     /tmp/minime-edge-cleanup/. Verified 0 remain and Mia/Max read clean through `minime_get_context`.
+  2. **Cleanup (live data):** deleted the `<affected-edge-count>` family `works_at` edges via the
+     sanctioned engineering path (graph-plumbing repair, not life-DB content), after a CSV backup
+     to `<private-backup-dir>/edge-cleanup/`. Verified none remain and the fictional family cases
+     read clean through `minime_get_context`.
 - **TDD:** RED→GREEN in test/m7.graph.test.ts ("family-relation people never get a works_at edge"):
   a daughter co-mentioned with orgs + work cue gets zero works_at but keeps her mentions edge.
   Full suite 208 pass / 1 skip / 1 fail; the single fail (m8.agenda future-dated task) is
@@ -1010,18 +1007,17 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
 
 ## 2026-06-17 — Split compound "do X AND decide on Y" task captures (umbrella double-report fix)
 
-- **Trigger:** The morning brief double-reported completed work: an umbrella task "Do FACS
-  analysis for target-gene transduced cells and decide on Daniel sorting" (`0f980ad5`) stayed
-  `active` even though both halves had separately resolved — the FACS analysis was done
-  (`fe909fef`, transduction confirmed) and the Daniel sorting decision had been dropped
-  (`4bc25704`, decided NOT to sort). The combined row matched neither single later capture, so
-  nothing closed it and it kept surfacing.
+- **Trigger (fictional incident example):** The morning brief double-reported completed work: an
+  umbrella task "Run the calibration sequence and decide whether to repeat it" (`<umbrella-task-id>`)
+  stayed `active` even though both halves had separately resolved — the calibration run was done
+  (`<completed-task-id>`) and the repeat decision had been dropped (`<obsolete-decision-id>`).
+  The combined row matched neither single later capture, so nothing closed it and it kept surfacing.
 - **Root cause:** the two existing split paths only covered (a) `decision_note` captures that
   ALSO report finished work → companion done-task, and (b) plain `task` completion reports →
   close the matching open row. Neither handles a single `task` capture that bundles an ACTION
   with a forward-looking DECISION ("do X **and decide on** Y"). It files as one umbrella task; a
-  later "FACS done" report doesn't title-match the whole umbrella (dedup misses), and the Daniel
-  decision was never a task at all — so the umbrella never closes and double-reports.
+  later "calibration done" report doesn't title-match the whole umbrella (dedup misses), and the
+  repeat decision was never a task at all — so the umbrella never closes and double-reports.
 - **Fix (TDD, failing-first):**
   - `src/pipeline/classify.ts` — new pure helper `splitActionDecision(text)` returns
     `{action, decision}` when a capture has a real leading action clause followed by an explicit
@@ -1040,20 +1036,20 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   compound capture that REPORTS the action done spawns NO decision. Targeted RED verified by
   forcing `splitActionDecision` to return null (the 2 unit + e2e split test fail; negative cases
   stay green). Full suite 219 pass / 1 skip / 0 fail; tsc + biome clean.
-- **Data remediation (this instance, owner-approved "Yes"):** via MCP tools — closed umbrella
-  `0f980ad5` as `done` with a split-note body pointing at `fe909fef` (done) and `4bc25704`
-  (dropped); both outcome rows were already recorded. Also fixed the recurring "license"→"lysis"
-  buffer classifier typo across 3 task rows (`c42de8d9` title+body, `29161385` body, `95e8767b`
-  body). All writes read-back-verified.
+- **Data remediation (owner data, owner-approved "Yes"):** via MCP tools, closed
+  `<umbrella-task-id>` as `done` with a split-note pointing at `<completed-task-id>` and
+  `<obsolete-decision-id>`; both outcome rows were already recorded. Also fixed a recurring
+  classifier typo across `<affected-task-count>` related task rows. All writes were
+  read-back-verified; production row identifiers are intentionally omitted.
 - **Approved by:** human (owner, 2026-06-17 — "implement the split-mixed-captures classifier fix
   (TDD + commit + close-out email)" → "Yes").
 
 ## 2026-06-17 — Morning brief STILL showed yesterday's date: localDateStr was process-TZ bound (incomplete 37f95bf fix)
 
-- **Trigger:** After 37f95bf the morning brief title was correct (Jun 17) but the *content*
-  (tasks_due, decision_reviews_due) was still anchored to Jun 16 — yesterday's items, and today's
-  actual events (Liz's appointment, Mia's Father's Day) were missing. Observed at 07:43 SGT
-  (= 23:43 UTC Jun 16).
+- **Trigger (fictional incident example):** After 37f95bf the morning brief title used the local
+  date, but the *content* (`tasks_due`, `decision_reviews_due`) was still anchored to the previous
+  UTC date, so a fictional appointment and family event due that morning were missing. This was
+  observed during the early-morning SGT window, when UTC was still on the prior calendar day.
 - **Root cause (two compounding):**
   1. **Stale daemon.** The live MCP server (`mcp-only.ts`) and `serve` both started *before*
      37f95bf landed, so they ran the old `${now()}::date` UTC cast.
@@ -1071,15 +1067,16 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
     `Asia/Singapore`) regardless of how/where the daemon was launched. Added `import { config }`.
   - **Belt-and-braces deploy fix** so correctness no longer *depends* on this but the env is also
     right: `TZ=Asia/Singapore` added to the systemd user unit
-    (`~/.config/systemd/user/minime.service`) and to the Hermes MCP server env
-    (`mcp_servers.minime.env.TZ` in `~/.hermes/config.yaml`, via `hermes config set`).
+    (`<user-systemd-dir>/minime.service`) and to the agent-harness MCP server env
+    (`mcp_servers.minime.env.TZ` in `<agent-config-dir>/config.yaml`).
 - **Tests:** `test/m9.clock-tz.test.ts` — 2 tests: an instant that is Jun 17 in SGT but Jun 16 in
   UTC resolves to `2026-06-17`; result matches an independent Intl computation in `config.tz`.
   Targeted RED proven by running the OLD impl under a genuine UTC process (no TZ leak) →
   `2026-06-16`; the new impl → `2026-06-17`. Full suite 221 pass / 1 skip / 0 fail; tsc + biome clean.
-- **Note:** `serve` daemon restarted under the new unit (TZ verified in `/proc/<pid>/environ`). The
-  MCP server (gateway child) picks up both the code fix and the new TZ env on its next gateway
-  restart — until then `minime_state` answers from the stale pre-fix process.
+- **Note:** `serve` was restarted under the new unit (TZ verified through the symbolic
+  `<daemon-process-environment>` inspection point). The MCP server child picks up both the code
+  fix and new TZ env on its next harness restart; until then `minime_state` answers from the stale
+  pre-fix process.
 - **Approved by:** human (owner, 2026-06-17 — "The morning briefing only title is today, but
   content are still yesterday" → "Both" [restart now + durable code fix]).
 
@@ -1129,8 +1126,9 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
 
 ## 2026-07-01 — Minime owns person-vs-org classification (phantom-org root fix)
 
-- **Context:** Logging contact with a vendor/company repeatedly minted a phantom *person* row
-  (BioTree, and earlier vendors). Migration 015 let `interactions` attach to an `org`, but the
+- **Context (fictional incident example):** Logging contact with the fictional vendor
+  "Glasswing" reproduced a bug that minted a phantom *person* row. Migration 015 let
+  `interactions` attach to an `org`, but the
   decision of *person vs. org* still leaked to the caller: the MCP `log_interaction` binding
   can't pass `subject_type` (always `auto`), so Hermes had to pre-create the org or repair after.
   That put classification intelligence in Hermes — a violation of the architecture (Minime owns
@@ -1141,7 +1139,7 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   2. `watcher.ts` — the interaction branch routes to an org when: an org of that name already
      exists (`resolveOrg`), OR `subject_type === "org"`, OR (subject_type absent) the *name*
      carries a company cue. Otherwise it files a person, unchanged. Name-only cue fallback so
-     "met Daniel at the hospital" never misfiles Daniel.
+     "met Nadia Rossi at the clinic" never misfiles Nadia Rossi.
   3. Nightly watchdog (`dream` step `3b_phantom_persons` + `phantomPersonCandidates` in repo.ts)
      flags existing person rows that look like an org (name matches a live org, or company-cue
      name with zero human signal) as a **flag-only** `review_queue('phantom_person')` item —
@@ -1157,9 +1155,9 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
 
 ## 2026-07-18 — Adopted the 2026-07 improvement program (W1–W9)
 
-- **Context:** External repo review + WeKnora v0.6.0 comparative study produced
-  ~/Downloads/minime-improvement-plan.md (owner-reviewed). Reconnaissance against main@2c49cb2
-  grounded it; program touches spec §1/§9/§10/§12 areas via eval-gated workstreams.
+- **Context:** External repo review + WeKnora v0.6.0 comparative study produced an owner-reviewed
+  improvement proposal. Reconnaissance against main@2c49cb2 grounded it; program touches
+  spec §1/§9/§10/§12 areas via eval-gated workstreams.
 - **Decision:** Execute W3→W1→W4+W2 (phase 1), W5→W6 (2), W8 (3), W7 (4), W9 (last) per
   .claude/plans/improve-2026-07-program.md; detailed wave-1 task cards in
   .claude/plans/improve-w{3,1,4,2}-*.md. Orchestrator Fable 5; executors + first-pass review
@@ -1285,43 +1283,27 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
 
 ## 2026-07-18 — Fixture hygiene: owner-real names replaced with fictional equivalents
 
-- **Context:** Two invariant reviews found spec §14 violations ("fixtures are realistic but
-  fictional — never the owner's real data") predating the improvement program: "Hai Yan" (a
-  real colleague, the 2026-06-16 mistyped-org retype incident) appeared in
-  test/m11.entity-retype.test.ts and the retypeOrgToPerson comment in src/db/repo.ts;
-  "BioTree" (a real vendor, the 2026-07-01 phantom-org incident) appeared in
-  test/m12.phantom-org.test.ts and the classify.ts/dream.ts comments describing that fix.
-- **Decision:** Renamed "Hai Yan" → "Vera Saltmarsh" throughout test/m11.entity-retype.test.ts
-  (comment + all fixture/assertion occurrences, including the lower-cased SQL literal and the
-  task-title string) and reworded the repo.ts comment to cite "the 2026-06-16 mistyped-org
-  retype incident (DECISIONS.md)" instead of the name. Renamed "BioTree" → "Glasswing" in
-  test/m12.phantom-org.test.ts wherever the bare name appeared, and "BioTree Biotech" →
-  "Glasswing Biotech" wherever the cue-bearing form appeared, so each fixture keeps exercising
-  the exact same trigger it did before (the ORG_CUE_RE company/biotech cue word vs. the
-  existing-org-by-name-match branch, independent of any cue) — confirmed
-  `orgCue("Glasswing") === false` and `orgCue("Glasswing Biotech") === true`, mirroring the
-  original pair exactly. Reworded the matching classify.ts prompt example and comment, and the
-  dream.ts phantom-person-scan comment, to the fictional name. Left untouched: DECISIONS.md
-  history (append-only, the real names are the historical record), test/m15.roles.test.ts and
-  fixtures/graph-hygiene.ts (already fictional), and docs/benchmarks/ scorecards.
-- **Why:** Both names identified real people/vendors from the owner's life that had leaked
-  into committed test data via earlier incident write-ups; spec §14 requires fixtures to be
-  fictional. The renames preserve every property under test (regex cue triggers, name-match
-  branches, alias preservation, mistyped-entity detection) while removing the real-world
-  identifiers, so the fix is pure hygiene with no behavior change.
-  Integration addendum (same day): also swapped the gratuitous prompt-example mention
-  ("called Vazyme about the order" → "Corvid Biotech" in classify.ts — it disclosed a real
-  vendor relationship inside the committed prompt) and the executed plan docs'
-  illustrative fixture names (.claude/plans/improve-w{1,4}-*.md → the shipped fictional
-  names). Boundary drawn: PUBLIC brand names (Vazyme/Fapon) are retained in
-  m11/m12/m2 fixtures and the repo.ts screen comment where brand-vs-surname ambiguity IS
-  the property under test — renaming those would weaken what the tests prove; owner may
-  veto and request fully fictional brands with equivalent ambiguity.
-- **Verified:** test/m11.entity-retype.test.ts + test/m12.phantom-org.test.ts: 24 pass / 0 fail
-  (same test count as before the rename). Full suite: 306 pass / 1 skip / 0 fail (unchanged
-  baseline). `tsc --noEmit` clean; `biome check` zero diagnostics on the 5 touched files.
-  `grep -rn "Hai Yan\|BioTree" src/ test/ fixtures/ scripts/` returns zero hits.
-- **Approved by:** human (owner, 2026-07-18 — "yes" to the sweep).
+- **Context:** Invariant reviews found spec §14 violations ("fixtures are realistic but fictional
+  — never the owner's real data") predating the improvement program. Owner-real colleague and
+  vendor identifiers from live incident write-ups had entered tests, comments, and historical
+  examples.
+- **Decision:** Replace identity-bearing examples with an explicitly fictional persona while
+  preserving every tested shape: Priya/Priya Raghunathan for owner bare-first/full-name matching;
+  Nadia Rossi, Sigrid Halvorsen, and Vera Saltmarsh for contacts; Fjordsonics and Glasswing for
+  ambiguous one-token brands; and Corvid Biotech or Acme Corp where a company cue or multi-token
+  organization is required. Alias preservation, name-match routing, mistyped-entity detection,
+  possessive handling, and near-duplicate organization behavior remain unchanged. Historical live
+  row identifiers, counts, and host backup/configuration paths are represented symbolically rather
+  than copied into the repository.
+- **Why:** The identifiers came from the owner's life and did not belong in committed fixtures or
+  incident narratives. Fictional substitutions preserve the structural regression coverage while
+  satisfying the repository's local-first privacy contract; durable technical decisions remain in
+  this append-only history without retaining owner data.
+- **Verified:** Focused entity-retype, phantom-org, graph, and tool tests retain their semantic
+  assertions; targeted privacy scans cover source, tests, migrations, fixtures, and this decision
+  log.
+- **Approved by:** human (owner, 2026-07-18 — "yes" to the sweep; expanded in the later privacy
+  hygiene pass).
 
 ## 2026-07-23 — Pre-W5 hardening Sol/Luna review workflow
 
@@ -1788,7 +1770,7 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   overlapping full-suite runs are superseded by the owner-authorized isolated recovery
   run. The canonical `bun test` result was 869 pass, 1 skip, 0 fail, all remaining gates
   were green, the generated scorecard
-  `/tmp/minime-h4-biome-repair-scratch.W9kf4p/docs/benchmarks/2026-07-25-mock-minimebench.md`
+  `<temporary-workspace>/docs/benchmarks/2026-07-25-mock-minimebench.md`
   was verified at SHA-256
   `d3718a5f0c80cc0dabef567ec92a7927d4a42f66cc638aa547686d76cb3bb906` and deleted as
   authorized, and fresh Luna plus binding Sol returned PASS with C0/I0/M0.
@@ -2200,3 +2182,244 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   at-or-before snapshot selector, not a WAL/PITR claim.
 - **Approved by:** human owner in the end-to-end lightweight release request on 2026-08-05; Sol
   xhigh independently reviewed the critical runtime and installer boundaries.
+
+## 2026-08-06 — Tier-2 reads require session-bound owner approval
+
+- **Context:** The prior `minime_unlock` interface immediately authorized tier-2 reads using
+  the reusable MCP client name as actor identity. This changes the privacy/tier authorization
+  interface: a caller-controlled name can recur across connections, while legacy actor-only
+  grants cannot be safely associated with one live MCP connection. Tier-0 remains unreadable.
+- **Decision:** `minime_unlock` creates only a pending request after validating its duration
+  against the configured ceiling; it does not grant access. The owner activates one pending
+  request locally with `bun run src/cli.ts unlock:approve <request-id>`. Approval matches both
+  actor and a fresh unguessable session UUID created for that MCP connection, expires from the
+  approval time, fails closed for absent or malformed session state, and is locked again after
+  reconnect. Session identifiers are never returned or audited. Migration 023 invalidates
+  legacy actor-only unlock rows and leaves the app role only narrow request/check functions,
+  with no direct table privileges.
+- **Why:** Local owner approval prevents an agent from authorizing its own private-data access,
+  and connection binding prevents client-name replay. Reusable client credentials, caller-chosen
+  session tokens, and process-wide grants would add replay or secret-lifecycle surface. Existing
+  actor-only grants are discarded because they cannot be conservatively rebound.
+- **Approved by:** human owner in the approved remediation implementation on 2026-08-06.
+
+## 2026-08-06 — Derived identities inherit source privacy and provenance
+
+- **Context:** People, organizations, aliases, and graph edges can be created or reused while
+  indexing prose. Schema defaults previously allowed an identity or alias derived from tier-2
+  prose to remain tier 1, and some edge paths defaulted agent work to `manual`/`human`. That
+  exposed names or relationships independently of the private source and made their origin
+  unreliable.
+- **Decision:** Every derived person, organization, alias, and edge inherits the strongest
+  readable source tier and records its real `source`, `created_by`, and `derived_from` origin.
+  Promotion is monotonic from tier 1 to tier 2; tier 0 is an absorbing quarantine and is never
+  lifted. Within tiers 1–2, exact/alternate-name reuse and the few structural post-promotion
+  operations use narrow database functions without returning hidden row content. Tier-0 names
+  and aliases occupy a separate quarantine namespace and never affect readable matching. Alias
+  insertion locks its parent before publication so a concurrent parent quarantine cannot leave a
+  readable child behind; parent-tier cascades and direct alias quarantine preserve the absorbing
+  floor and merge readable/quarantined twins into one namespace-zero row. Alias RLS also requires
+  a readable parent, so a stored-tier drift cannot expose a quarantined identity. Compiled-note,
+  contradiction, and edge-validation evidence includes matched alias and endpoint tiers in its
+  route floor and excludes tier zero before model candidacy. Migration 022 repairs legacy
+  graph-derived rows before synchronizing alias tiers. Lessons derived from decisions follow the
+  same rule.
+- **Why:** A name, alias, relationship, or lesson can itself disclose the private source. Keeping
+  every derivative at least as private as its evidence closes that side channel, while explicit
+  provenance preserves auditability and safe future reprocessing.
+- **Approved by:** human owner in the approved remediation implementation on 2026-08-06.
+
+## 2026-08-06 — Local runtime and engineering surfaces are closed by default
+
+- **Context:** The resident MCP child was built by subtracting known secrets from the owner's
+  environment, but an unknown token could still pass through and Bun could reload the repository
+  `.env` in the child. The engineering role also inherited `SELECT` on every current and future
+  table, including un-tiered review/model-output carriers, while audit callers could persist
+  arbitrary JSON and generated personal files could inherit permissive process defaults.
+- **Decision:** The MCP child receives only a fixed set of runtime settings, minimal OS variables,
+  and credentials for providers selected by the active routes; provider names must use exact
+  canonical enum values and the child starts with `--no-env-file`.
+  Owner/app database URLs must name the same exact loopback host, port, and guarded database at
+  configuration load. Recovery endpoints additionally require their fixed database names, and
+  live provisioning and promotion accept only the exact `minime` database as their live side.
+  `minime_engineer_ro` now has an explicit reviewed table allowlist, no direct access to events,
+  review queues, edge validations, or unlock rows, and no default privilege on future tables.
+  Its role flags and memberships are cluster-global: migration 024 repairs them only while
+  migrating the canonical `minime` database, while test and restore databases apply their local
+  ACL closure and verify the same global postcondition without rewriting the shared role. A fresh
+  cluster creates the role with the exact closed posture in migration 018; adversarial migration
+  tests use disposable role names so parallel scratch databases cannot race on production-named
+  catalog tuples.
+  Audit payloads are required and bound to an exact verb/schema registry with field-specific
+  identifiers and fixed error codes. Cloud intent/outcome rows use a dedicated autocommit pool so
+  real egress remains recorded across actor rollback without starving the runtime pool; sanctioned
+  repair mutations and their required completion event commit atomically. New personal
+  archive/prose writes use mode-0700 directories and atomic mode-0600 files.
+- **Why:** All four boundaries now fail closed when a new environment variable, table, event
+  field, or generated file path is introduced. Provider credentials and tier-gated rows remain
+  usable where explicitly required without relying on an ever-growing denylist or on the owner's
+  umask.
+- **Approved by:** human owner in the approved remediation implementation on 2026-08-06.
+
+## 2026-08-06 — Inbox captures have immutable byte identity and fenced finalization
+
+- **Context:** Inbox rows previously identified a capture only by its mutable filesystem path,
+  archives could overwrite a same-named earlier capture, and derivative rows, search chunks,
+  review records, audit events, and inbox status committed independently. This changes the durable
+  inbox schema and crash/replay contract; it does not change privacy tiers or cloud routing.
+- **Decision:** A newly observed capture is identified by `(raw_path, SHA-256(content bytes))`.
+  Its data-root-relative archive path is write-once, includes the full inbox UUID, and is published
+  without replacing an existing file. Changed bytes at the same path create a new identity; an
+  exact replay returns the original identity. Legacy rows keep nullable identity fields because a
+  migration cannot truthfully reconstruct historical bytes: an untouched pending row may be
+  adopted when its source is observed, while a terminal unhashed row remains historical and the
+  first post-upgrade bytes are preserved as a separate hashed capture. This deliberately prefers a
+  reviewable one-time duplicate over silently losing an edit made during upgrade downtime.
+  Duplicate untouched legacy pending rows converge on one identity and audited terminal cleanup.
+  MCP capture identity commits on a dedicated restricted-runtime connection before its source file
+  is published, so an enclosing request rollback cannot erase the originating agent provenance.
+  Processing uses a time-bounded UUID claim;
+  every state mutation verifies that token, and finalization locks it before atomically committing
+  the primary derivative, existing deterministic companions, chunks, extracted edges, review/audit
+  rows, and terminal inbox state. The classifier plan is retained under the claim for deterministic
+  retry. A close-aware lease-expiry timer re-runs recovery without requiring a new filesystem event,
+  and recovery probes the deterministic archive filename when a crash preceded the archive-path
+  commit. Every inbox content read and claim retains the explicit tier lower/upper predicate in
+  addition to RLS. Network embeddings drain after commit. Note Markdown is a UUID-suffixed projection
+  published only after the database commit and reconciled from the immutable archive after a
+  publication interruption. General model-driven multi-entity segmentation remains a separate
+  backlog item rather than being inferred from this identity change.
+- **Why:** Byte identity makes unchanged replay idempotent without hiding real edits. Immutable
+  archives preserve every observed version, fencing prevents an expired worker from committing
+  after takeover, scheduled recovery prevents a fresh crash lease from becoming stranded, and one
+  database transaction prevents partial or duplicate derivatives. Nullable legacy identity is more
+  honest than assigning current bytes to a historical row, while preserving the ambiguous current
+  version is safer than silently dropping it. Durable actor-stamped allocation closes the
+  file-visible/request-rollback provenance gap, and post-commit note projection avoids claiming an
+  impossible filesystem/database transaction.
+- **Approved by:** human owner in the approved remediation implementation request on 2026-08-06.
+
+## 2026-08-06 — Recovery evidence is source-labelled and promotion is compensating
+
+- **Context:** This changes Minime's recovery contract. The old drill could silently substitute a
+  fresh live dump for a configured-backup proof, restored snapshots were not upgraded to the
+  checked-out schema before promotion, and the documented “atomic” database swap was implemented
+  as two PostgreSQL renames without a compensating cutover contract.
+- **Decision:** Make recovery commands parse repository `.env` as inert data in one TypeScript
+  wrapper, pass only an allowlisted child environment, and validate one exact loopback database
+  topology before utilities run. `make restore-drill` requires and labels a real restic source;
+  the direct shell helper may retain its explicitly labelled fresh-live-dump mode for internal
+  compatibility. A restored dump must first match its historical hash, ledger, and representative
+  counts, then only its scratch database is migrated. Promotion requires an exact checked-out
+  ledger and catalog safety posture. `restore-pitr` remains a logical snapshot-at-or-before-time
+  operation, not WAL/PITR, and leaves `minime_restore` for inspection. Promotion remains a manual
+  owner action: refuse existing replacement state, active sessions, or prepared transactions;
+  write a private safety dump; block and recheck both databases; rename live to
+  `minime_replaced`; then rename restore to live. If the second rename fails, compensate the first
+  rename and restore the original connection posture. After success, retain the prior live
+  database connection-blocked as `minime_replaced`; an unrecoverable compensation result requires
+  owner inspection rather than an automatic retry.
+- **Why:** A recovery check is useful only when it proves the backup medium being claimed and the
+  database that could actually be promoted. Historical validation before forward-only scratch
+  migration preserves evidence while still making the restored database compatible with the
+  checked-out code. PostgreSQL has no atomic multi-database rename, so an explicit, bounded
+  compensation path is more truthful and recoverable than claiming atomicity or adding an
+  automatic recovery state machine.
+- **Approved by:** human owner in the approved remediation implementation request on 2026-08-06.
+
+## 2026-08-06 — Calendar days and metric buckets use explicit time zones
+
+- **Context:** Calendar imports discarded ICS parameters and interpreted floating/all-day values
+  in the JavaScript process timezone. Metric SQL bucketed timestamps in the database timezone,
+  every week/month rollup was summed even when `journal_streak` is a state, and caller-zone metric
+  requests could populate a cache with no timezone dimension. Decision review offsets used fixed
+  24-hour durations, while resident cron schedules depended on the process timezone. This
+  supersedes the three-argument metric-door/always-sum portion of the 2026-06-10 decision and the
+  2026-06-17 conclusion that UTC dream rollups were harmless.
+- **Decision:** ICS imports preserve UTC and `TZID`; floating and `VALUE=DATE` values use the
+  configured owner timezone, with deterministic first-occurrence fall-back and shift-forward gap
+  handling. Invalid dates, zones, mismatched value types, and non-positive intervals are skipped.
+  `metric_agg(name, from, to, time_zone)` is the only tier-0 aggregate door and buckets timestamp
+  sources in that explicit IANA zone. Every metric declares a checked `sum` or `last` rollup;
+  `journal_streak` computes continuity before the requested lower bound and takes the last daily
+  value in each week/month. MCP metric calls use the caller timezone and remain read-only. Only
+  owner-side dream maintenance may write the configured-timezone cache used by state anomalies;
+  the runtime app role has read-only cache access. Decision review offsets add local calendar
+  days, due-review/anomaly queries receive an explicit owner-local date, and both resident cron
+  expressions run in the configured timezone.
+- **Why:** An instant, a calendar date, and a duration are different values around midnight and
+  daylight-saving transitions. Making the zone and rollup rule explicit keeps imports, answers,
+  scheduled maintenance, and cached anomalies consistent without exposing tier-0 rows or mixing
+  multiple vector-like calendar spaces in one cache.
+- **Approved by:** human owner in the approved remediation implementation request on 2026-08-06.
+
+## 2026-08-06 — The persisted metric cache has one explicit owner-zone identity
+
+- **Context:** This changes the live-data semantics and schema meaning of derived rows in
+  `metric_values`. Migration 026 introduces cache identity but remains unapplied to owner data in
+  this working tree. Previously, Dream/query rows could survive a timezone change, a changed
+  rollup rule, or mutable source data moving out of a bucket, while a migration-time purge would
+  also have risked deleting manual and stored-only values.
+- **Decision:** `metric_cache_state` is a singleton naming the configured owner timezone for the
+  persisted Dream cache. The upgrade creates it empty and preserves every existing metric row;
+  until the first post-upgrade Dream run, state anomalies ignore derived rows without a matching
+  identity. Establishing or changing the identity atomically removes only source-backed
+  `dream`/legacy `query` rows and rebuilds their full history in the configured timezone. An
+  ordinary run transactionally reconciles exact day, week, and month refresh windows before
+  repopulating them, including each leading bucket, so moved or deleted source data cannot leave
+  stale derived values. Caller-zone metric queries remain read-only. Manual/custom rows,
+  stored-only metrics, and Dream rows outside an ordinary refresh window are preserved, and a
+  failed rebuild rolls back both the identity and values.
+- **Why:** One owner-maintained anomaly cache is enough; adding a timezone dimension for every
+  caller would make cache ownership and invalidation ambiguous. An explicit identity plus scoped
+  reconciliation keeps reads coherent and upgrades lossless without treating manual facts as
+  disposable derived data.
+- **Approved by:** human owner in the approved remediation implementation request on 2026-08-06.
+
+## 2026-08-06 — Installation has one pinned runtime and one persisted database identity
+
+- **Context:** This changes the pinned stack and durable install/update lifecycle contract, not
+  owner data. Bun versions previously drifted between package metadata, CI, install, and update;
+  PostgreSQL reruns could rediscover a different backend or port; and the advertised offline gate
+  was not one shared command. No live service or database was operated while implementing this
+  decision.
+- **Decision:** `.bun-version` is the canonical exact Bun version and must agree with package and
+  lock metadata; install, update, CI, and verification enforce it. PostgreSQL lifecycle identity is
+  the tuple of exact loopback owner DSN, `native|docker` backend, and host port persisted in `.env`;
+  existing state wins over later flags or service availability, while only a fresh installer may
+  choose it. Before its first service mutation, the installer holds one repository-local lock and
+  atomically records that tuple with `MINIME_PG_INSTALL_PENDING=1`. A fresh run refuses any
+  occupied or already-running known target. An interrupted run may resume only the absent or exact
+  persisted target, reruns idempotent bootstrap, and clears pending only after both `minime` and
+  `minime_test`, required extensions, the fixed bootstrap role, database ownership, and exact owner
+  connectivity all pass. Daily start, update, migrate, and resident serve reject pending,
+  malformed, or ambient-disagreed state; stop acts only on the exact persisted service. The single
+  `scripts/verify-offline.sh` contract is used by Make, install, update, and CI.
+- **Why:** A solo project benefits from fewer paths, not a release bureaucracy. Exact persisted
+  identity prevents accidental service adoption, the one-bit pending state makes a failed first
+  install honestly resumable, and one verification script prevents documentation and automation
+  from silently testing different things.
+- **Approved by:** human owner in the approved remediation implementation request on 2026-08-06.
+
+## 2026-08-06 — Scratch cleanup gives known PostgreSQL maintenance its own bounded grace
+
+- **Context:** The expanded release suite passed all 1,371 functional tests twice but then
+  exhausted the scratch-database cleanup window. A live, read-only process inspection identified
+  one PostgreSQL autovacuum worker on the already fenced generated database for about 12 seconds;
+  no leaked client or child process was present. The prior 20-by-100ms limit was still correct for
+  foreign or unclassified activity but too short for known server maintenance under full-suite
+  load. This supersedes only the single shared-cycle-budget portion of the 2026-07-30 bounded
+  blocker decision.
+- **Decision:** Cleanup still fences the exact process-owned generated database before every
+  activity snapshot. Foreign clients, hidden fields, eligible-client/background mixtures,
+  unknown worker types, and ordinary-drop busy races retain a cumulative maximum of 20 cycles.
+  A separate maximum of 300 cycles applies only when every observed row is an exactly classified
+  autovacuum worker for the current or server-owned role, or a current-role parallel worker.
+  Every cycle takes a fresh snapshot; blocker cycles never terminate a worker or attempt a drop.
+  Cleanup proceeds with the existing ordinary drop only after a safe snapshot, and any exhausted
+  budget leaves the branded target fenced and retryable.
+- **Why:** A longer universal sleep would weaken fast failure for leaked or foreign clients.
+  Separating the maintenance grace keeps the ownership boundary and bounded failure behavior while
+  allowing PostgreSQL's own work to finish naturally under the larger solo-project regression
+  suite.
+- **Approved by:** human owner in the approved remediation implementation request on 2026-08-06.

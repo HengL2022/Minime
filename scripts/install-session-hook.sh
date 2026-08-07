@@ -8,6 +8,10 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 HOOK="$REPO_DIR/agents/hooks/session-capture.sh"
 DATA_DIR="${MINIME_DATA_DIR:-$REPO_DIR/data}"
+case "$DATA_DIR" in
+  /*) ;;
+  *) DATA_DIR="$REPO_DIR/$DATA_DIR" ;;
+esac
 SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 CMD="MINIME_DATA_DIR='$DATA_DIR' '$HOOK'"
 

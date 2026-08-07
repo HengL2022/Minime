@@ -1,4 +1,4 @@
-// Classifier guardrails (regression for the two real-world classifier bugs):
+// Classifier guardrails (fictional regression cases for the classifier bugs):
 //   1. date anchor   — the classify prompt must tell the model today's date so relative
 //                       phrases ("tomorrow") don't resolve to a wrong (past) year.
 //   2. date guardrail — the watcher must drop a past due date instead of storing it, and
@@ -43,31 +43,36 @@ describe("classify prompt date anchor", () => {
 
 describe("dedup similarity (unit)", () => {
   test("tokens strips possessives, punctuation, and stopwords", () => {
-    const t = tokens("Attend Mia's KiddieWinkie Father's Day event");
-    expect(t.has("mia")).toBe(true);
-    expect(t.has("kiddiewinkie")).toBe(true);
+    const t = tokens("Attend Tomasz's Fjordsonics Founder's Day event");
+    expect(t.has("tomasz")).toBe(true);
+    expect(t.has("fjordsonics")).toBe(true);
     expect(t.has("event")).toBe(false); // stopword
     expect(t.has("day")).toBe(false); // stopword
   });
 
   test("re-mention of the same event scores as a duplicate", () => {
-    const a = "Attend Mia's KiddieWinkie Father's Day event at SAFRA Mount Faber";
-    const b = "Attend Mia KiddieWinkie Father's Day event (arrive 2.15pm, covered shoes)";
+    const a = "Attend Tomasz's Fjordsonics Founder's Day event at Pirsenteret";
+    const b = "Attend Tomasz Fjordsonics Founder's Day event (arrive 2.15pm, bring safety shoes)";
     expect(titleSimilarity(a, b)).toBeGreaterThan(0.5);
   });
 
   test("different tasks do NOT collide", () => {
     expect(
-      titleSimilarity("Freeze down all cells before leave", "Refresh Jurkat cell media"),
+      titleSimilarity(
+        "Calibrate the six hydrophone nodes before deployment",
+        "Update beamforming firmware",
+      ),
     ).toBeLessThan(0.5);
   });
 
   test("findDuplicate respects the due-date window (recurring chore is not a dup)", () => {
-    const open = [{ id: "x", title: "Refresh Jurkat cell media", due: "2026-06-19" }];
+    const open = [{ id: "x", title: "Inspect calibration rig connectors", due: "2026-06-19" }];
     // same title, far-apart date → not a duplicate
-    expect(findDuplicate("Refresh Jurkat cell media", "2026-07-19", open)).toBeNull();
+    expect(findDuplicate("Inspect calibration rig connectors", "2026-07-19", open)).toBeNull();
     // same title, same date → duplicate
-    expect(findDuplicate("Refresh Jurkat cell media", "2026-06-20", open)?.match.id).toBe("x");
+    expect(findDuplicate("Inspect calibration rig connectors", "2026-06-20", open)?.match.id).toBe(
+      "x",
+    );
   });
 });
 
@@ -77,7 +82,7 @@ describe("watcher date guardrail (e2e, classifier mocked)", () => {
     await mkdir(inbox, { recursive: true });
     const path = join(inbox, "past-date-task.md");
     // heuristic classifier emits the `by YYYY-MM-DD` date; this one is in the past
-    await Bun.write(path, "todo: submit grant renewal by 2020-01-01");
+    await Bun.write(path, "todo: submit the SILDRE field report by 2020-01-01");
 
     const result = await processInboxFile(path);
     expect(result.filed).toBe(true);
@@ -91,51 +96,55 @@ describe("watcher date guardrail (e2e, classifier mocked)", () => {
 
 describe("split mixed captures — completion detection (unit)", () => {
   test("completionSignal detects finished-work phrasing", () => {
-    expect(completionSignal("FACS analysis done, transduction works")).toBe(true);
-    expect(completionSignal("results confirmed, assay finished")).toBe(true);
+    expect(completionSignal("array calibration done, beamforming works")).toBe(true);
+    expect(completionSignal("sensor readings confirmed, wet test finished")).toBe(true);
     expect(completionSignal("got it working; succeeded today")).toBe(true);
   });
 
   test("completionSignal is false for purely forward-looking text", () => {
-    expect(completionSignal("Should we use knockout lines? need to think further")).toBe(false);
-    expect(completionSignal("Deciding whether to order more reagents next week")).toBe(false);
+    expect(completionSignal("Should we use spare hydrophone nodes? need to think further")).toBe(
+      false,
+    );
+    expect(
+      completionSignal("Deciding whether to order more Bluefin wet-mate connectors next week"),
+    ).toBe(false);
   });
 
   test("completionTitle extracts a concise done-task title", () => {
     const title = completionTitle(
-      "FACS analysis done, results good, gene transduction works. Note: need knockout lines, think further.",
+      "Array calibration done, sensor readings good, beamforming works. Note: need spare hydrophone nodes, think further.",
     );
     expect(title.length).toBeGreaterThan(0);
     expect(title.length).toBeLessThanOrEqual(120);
-    expect(title.toLowerCase()).toContain("facs");
+    expect(title.toLowerCase()).toContain("array calibration");
   });
 });
 
 describe("split compound action+decision captures (unit)", () => {
   test("splitActionDecision peels a decision clause off an action", () => {
     const s = splitActionDecision(
-      "Do FACS analysis for target-gene transduced cells and decide on Daniel sorting",
+      "Run array calibration for six hydrophone nodes and decide on Munkholmen deployment",
     );
     expect(s).not.toBeNull();
-    expect(s!.action.toLowerCase()).toContain("facs");
+    expect(s!.action.toLowerCase()).toContain("array calibration");
     expect(s!.action.toLowerCase()).not.toContain("decide");
-    expect(s!.decision.toLowerCase()).toContain("daniel sorting");
+    expect(s!.decision.toLowerCase()).toContain("munkholmen deployment");
     expect(s!.decision.toLowerCase()).toMatch(/^decide/);
   });
 
   test("splitActionDecision strips a leading task:/todo: prefix from the action", () => {
-    const s = splitActionDecision("task: Run the assay and decide whether to repeat it");
+    const s = splitActionDecision("task: Run the wet test and decide whether to repeat it");
     expect(s).not.toBeNull();
-    expect(s!.action.toLowerCase()).toBe("run the assay");
+    expect(s!.action.toLowerCase()).toBe("run the wet test");
     expect(s!.decision.toLowerCase()).toContain("whether to repeat");
   });
 
   test("splitActionDecision returns null for a plain action task", () => {
-    expect(splitActionDecision("Refresh the media of the Jurkat cells")).toBeNull();
+    expect(splitActionDecision("Refresh the hydrophone node firmware")).toBeNull();
   });
 
   test("splitActionDecision does not fire on a pure decision (no leading action)", () => {
-    expect(splitActionDecision("decide on Daniel sorting")).toBeNull();
+    expect(splitActionDecision("decide on Munkholmen deployment")).toBeNull();
   });
 });
 
@@ -144,32 +153,35 @@ describe("compound action+decision split (e2e, classifier mocked)", () => {
     const inbox = join(config.dataDir, "inbox");
     await mkdir(inbox, { recursive: true });
     const path = join(inbox, "compound-task.md");
-    // The FACS-and-Daniel umbrella bug: a single combined task that no later single
+    // The calibration-and-deployment umbrella bug: a single combined task that no later single
     // capture fully closes. The action half must file as a task (without the decision
     // clause in its title) AND a companion decision must be created from the same item.
     await Bun.write(
       path,
-      "task: Do FACS analysis for target-gene transduced cells and decide on Daniel sorting",
+      "task: Run array calibration for six hydrophone nodes and decide on Munkholmen deployment",
     );
     const result = await processInboxFile(path);
     expect(result.filed).toBe(true);
 
     const [item] = await sql`select filed_id from inbox_items where id = ${result.inboxId}`;
     const [task] = await sql`select title, status from tasks where id = ${item!.filed_id}`;
-    expect(task!.title.toLowerCase()).toContain("facs");
+    expect(task!.title.toLowerCase()).toContain("array calibration");
     expect(task!.title.toLowerCase()).not.toContain("decide");
 
     const [dec] =
       await sql`select id, question from decisions where derived_from = ${result.inboxId}`;
     expect(dec).toBeTruthy();
-    expect(dec!.question.toLowerCase()).toContain("daniel sorting");
+    expect(dec!.question.toLowerCase()).toContain("munkholmen deployment");
   });
 
   test("a compound capture that REPORTS the action done does not spawn a decision", async () => {
     const inbox = join(config.dataDir, "inbox");
     await mkdir(inbox, { recursive: true });
     const path = join(inbox, "compound-done.md");
-    await Bun.write(path, "task: Ran the FACS analysis and decided on Daniel sorting — done");
+    await Bun.write(
+      path,
+      "task: Ran the array calibration and decided on Munkholmen deployment — done",
+    );
     const result = await processInboxFile(path);
     expect(result.filed).toBe(true);
     const [dec] =
@@ -188,7 +200,7 @@ describe("split mixed captures (e2e, classifier mocked)", () => {
     // the evening review's "what moved today").
     await Bun.write(
       path,
-      "decision: FACS analysis done and transduction works, but need to decide whether to use knockout lines",
+      "decision: Array calibration done and beamforming works, but need to decide whether to use spare hydrophone nodes",
     );
 
     const result = await processInboxFile(path);
@@ -213,7 +225,7 @@ describe("split mixed captures (e2e, classifier mocked)", () => {
     const path = join(inbox, "plain-decision.md");
     await Bun.write(
       path,
-      "decision: should we switch the lysis buffer vendor or stay with the current one",
+      "decision: should we switch the acoustic release vendor or stay with the current one",
     );
 
     const result = await processInboxFile(path);
@@ -235,7 +247,7 @@ describe("task-branch completion (e2e, classifier mocked)", () => {
     // be stamped done (else it stays open and vanishes from "what moved today").
     await Bun.write(
       path,
-      "task: check returned sequences & re-label the 5 plasmids correctly — done",
+      "task: check returned sensor readings & re-label the 5 hydrophone nodes correctly — done",
     );
 
     const result = await processInboxFile(path);
@@ -252,16 +264,16 @@ describe("task-branch completion (e2e, classifier mocked)", () => {
     await mkdir(inbox, { recursive: true });
 
     // first: an open task exists
-    const p1 = join(inbox, "freeze-open.md");
-    await Bun.write(p1, "task: freeze down all the cells before leaving");
+    const p1 = join(inbox, "calibration-open.md");
+    await Bun.write(p1, "task: calibrate all hydrophone nodes before deployment");
     const r1 = await processInboxFile(p1);
     expect(r1.filed).toBe(true);
     const [item1] = await sql`select filed_id from inbox_items where id = ${r1.inboxId}`;
     const openId = item1!.filed_id;
 
     // then: a completion report for the same task must CLOSE it, not queue a duplicate
-    const p2 = join(inbox, "freeze-done.md");
-    await Bun.write(p2, "task: freeze down all the cells before leaving — done");
+    const p2 = join(inbox, "calibration-done.md");
+    await Bun.write(p2, "task: calibrate all hydrophone nodes before deployment — done");
     const r2 = await processInboxFile(p2);
 
     // the original task is now done
@@ -271,7 +283,7 @@ describe("task-branch completion (e2e, classifier mocked)", () => {
 
     // and we did NOT spawn a second open row for the same work
     const [cnt] =
-      await sql`select count(*)::int as n from tasks where title ilike '%freeze down all the cells%'`;
+      await sql`select count(*)::int as n from tasks where title ilike '%calibrate all hydrophone nodes%'`;
     expect(cnt!.n).toBe(1);
 
     // nor leave it stuck in the duplicate review queue
@@ -290,18 +302,24 @@ describe("watcher dedup (e2e, classifier mocked)", () => {
 
     // first capture files a normal task
     const p1 = join(inbox, "dedup-first.md");
-    await Bun.write(p1, "todo: order lysis buffer membranes for the assay by 2026-12-01");
+    await Bun.write(
+      p1,
+      "todo: order Bluefin wet-mate connectors for the calibration rig by 2026-12-01",
+    );
     const r1 = await processInboxFile(p1);
     expect(r1.filed).toBe(true);
 
     // near-identical second capture must NOT create a second task
     const p2 = join(inbox, "dedup-second.md");
-    await Bun.write(p2, "todo: order lysis buffer membranes for the assay by 2026-12-02");
+    await Bun.write(
+      p2,
+      "todo: order Bluefin wet-mate connectors for the calibration rig by 2026-12-02",
+    );
     const r2 = await processInboxFile(p2);
     expect(r2.filed).toBe(false); // routed to review, not filed
 
     const [tasks] =
-      await sql`select count(*)::int as n from tasks where title ilike '%lysis buffer membranes%'`;
+      await sql`select count(*)::int as n from tasks where title ilike '%bluefin wet-mate connectors for the calibration rig%'`;
     expect(tasks!.n).toBe(1); // still only one task
 
     const [dupq] =

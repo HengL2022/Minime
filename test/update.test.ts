@@ -3,7 +3,7 @@
 // network remote and is exercised by owner runs of `make update`.
 
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -31,9 +31,50 @@ describe("update script", () => {
     writeFileSync(join(dir, "tracked.txt"), "v2 dirty\n");
 
     const proc = Bun.spawnSync(["bash", "scripts/update.sh"], { cwd: dir });
-    expect(proc.exitCode).toBe(30);
+    expect(proc.exitCode, `${proc.stdout.toString()}\n${proc.stderr.toString()}`).toBe(30);
     const out = proc.stdout.toString();
     expect(out).toContain("local modifications");
     expect(out).toContain("FIX: git stash");
+  });
+
+  test("refuses pending install state before Bun, backup, or network", () => {
+    const dir = join(tmpdir(), `minime-update-pending-${Math.random().toString(36).slice(2, 10)}`);
+    mkdirSync(join(dir, "scripts"), { recursive: true });
+    writeFileSync(
+      join(dir, "scripts", "update.sh"),
+      readFileSync(join(REPO, "scripts/update.sh")),
+      {
+        mode: 0o700,
+      },
+    );
+    writeFileSync(join(dir, "scripts", "lib.sh"), readFileSync(join(REPO, "scripts/lib.sh")), {
+      mode: 0o600,
+    });
+    writeFileSync(
+      join(dir, ".env"),
+      [
+        "DATABASE_URL=postgres://minime:minime@localhost:55449/minime",
+        "MINIME_PG_BACKEND=docker",
+        "MINIME_PG_PORT=55449",
+        "MINIME_PG_INSTALL_PENDING=1",
+        "",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+    writeFileSync(join(dir, "tracked.txt"), "v1\n");
+    const git = (...args: string[]) => Bun.spawnSync(["git", "-C", dir, ...args]);
+    git("init", "-q");
+    git("-c", "user.email=t@t", "-c", "user.name=t", "add", "scripts", "tracked.txt");
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init");
+
+    const proc = Bun.spawnSync(["bash", "scripts/update.sh"], {
+      cwd: dir,
+      env: { PATH: "/usr/bin:/bin", HOME: dir },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(proc.exitCode, `${proc.stdout.toString()}\n${proc.stderr.toString()}`).toBe(30);
+    expect(proc.stdout.toString()).toContain("bootstrap is incomplete");
+    expect(proc.stdout.toString()).toContain("FIX: run bash scripts/install.sh");
   });
 });

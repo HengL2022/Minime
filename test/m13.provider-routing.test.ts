@@ -4,7 +4,12 @@
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { createServer } from "node:http";
 import { chunkPairsSharingPerson } from "../src/db/repo";
-import { classifyIsCloudForTier, classifyProviderForTier, classifyRouteForTier } from "../src/llm";
+import {
+  classifyIsCloudForTier,
+  classifyProviderForTier,
+  classifyRouteForTier,
+  validateProviderRoutes,
+} from "../src/llm";
 import { classify } from "../src/pipeline/classify";
 import { contradictionScan } from "../src/pipeline/dream";
 import { compileNotes } from "../src/pipeline/notes";
@@ -53,6 +58,17 @@ describe("classifyRouteForTier resolution", () => {
     config.cloudMaxTier = 1;
     config.providerRouteTier2 = "bedrock";
     expect(() => classifyRouteForTier(2)).toThrow(/stricter/);
+  });
+
+  test("startup accepts an implicit cloud fallback above the ceiling, but not an explicit route", () => {
+    config.classifyProvider = "openrouter";
+    config.cloudMaxTier = 1;
+    config.providerRouteTier1 = undefined;
+    config.providerRouteTier2 = undefined;
+    expect(() => validateProviderRoutes()).not.toThrow();
+
+    config.providerRouteTier2 = "openrouter";
+    expect(() => validateProviderRoutes()).toThrow(/stricter/);
   });
 
   test("malformed CLOUD_MAX_TIER fails closed, not open (NaN/out-of-range throws)", () => {
@@ -105,6 +121,38 @@ function fakeFetch(responder: (c: Captured) => unknown): { calls: Captured[]; fn
 describe("egress audit route_tier", () => {
   beforeAll(async () => {
     await resetDb();
+  });
+
+  test("effective cloud fallback above the ceiling is refused before fetch or audit", async () => {
+    config.classifyProvider = "openrouter";
+    config.openrouterApiKey = "test-key";
+    config.cloudMaxTier = 1;
+    config.providerRouteTier1 = undefined;
+    config.providerRouteTier2 = undefined;
+    const { calls, fn } = fakeFetch(() => ({
+      choices: [{ message: { content: '{"ok":true}' } }],
+    }));
+    const [before] =
+      await testSql`select count(*)::int as n from events where verb = 'egress:classify'`;
+
+    let error: unknown;
+    try {
+      await classifyProviderForTier(2, fn).completeJson("TIER2 MUST STAY LOCAL");
+    } catch (caught) {
+      error = caught;
+    }
+
+    const [after] =
+      await testSql`select count(*)::int as n from events where verb = 'egress:classify'`;
+    expect({
+      error: error instanceof Error ? error.message : null,
+      fetchCalls: calls.length,
+      egressRows: after!.n - before!.n,
+    }).toEqual({
+      error: expect.stringMatching(/effective classify provider.*CLOUD_MAX_TIER=1.*tier-2 egress/),
+      fetchCalls: 0,
+      egressRows: 0,
+    });
   });
 
   test("cloud classify via a tier route stamps route_tier; payload never contains the prompt", async () => {
@@ -178,13 +226,14 @@ async function patchFetch(ollamaResponder: (request: LocalOllamaRequest) => unkn
   };
 }
 
-type H5RoutingFloorArm = "edge" | "person" | "chunk" | "parent";
+type H5RoutingFloorArm = "edge" | "person" | "chunk" | "parent" | "alias";
 
 async function h5RoutingPair(
   label: string,
   zeroArm?: H5RoutingFloorArm,
 ): Promise<{ personId: string }> {
-  const canonicalName = `H5 Route ${label}`;
+  const mentionName = `H5 Route ${label}`;
+  const canonicalName = zeroArm === "alias" ? `H5 Canonical ${label}` : mentionName;
   const sentinel = zeroArm ? `H5-TIER0-${label.toUpperCase()}-SENTINEL` : "";
   const [person] = await testSql`
     insert into people (canonical_name, tier, source, created_by)
@@ -195,9 +244,14 @@ async function h5RoutingPair(
       'test:h5-amendment'
     )
     returning id`;
+  if (zeroArm === "alias") {
+    await testSql`
+      insert into person_aliases (person_id, alias, tier, source, created_by)
+      values (${person!.id}, ${mentionName}, 0, 'test:h5-amendment', 'test:h5-amendment')`;
+  }
   for (const side of [0, 1] as const) {
     const parentId = crypto.randomUUID();
-    const text = `${canonicalName}${sentinel ? ` ${sentinel}` : ""} ${
+    const text = `${mentionName}${sentinel ? ` ${sentinel}` : ""} ${
       side === 0 ? "always" : "never"
     } rings at noon.`;
     await testSql`
@@ -291,15 +345,21 @@ describe("notes distillation per-tier routing", () => {
   test("parent, target-entity, and accepted-edge tier two all select the tier-two provider route", async () => {
     await resetDb();
     const fixtures = [
-      { name: "Parent Route Two", evidence: "parent" },
-      { name: "Entity Route Two", evidence: "entity" },
-      { name: "Edge Route Two", evidence: "edge" },
+      { name: "Parent Route Two", title: "Parent Route Two", evidence: "parent" },
+      { name: "Entity Route Two", title: "Entity Route Two", evidence: "entity" },
+      { name: "Edge Route Two", title: "Edge Route Two", evidence: "edge" },
+      { name: "Private Alias Route Two", title: "Alias Canonical One", evidence: "alias" },
     ] as const;
     for (const fixture of fixtures) {
       const [person] = await testSql`
         insert into people (canonical_name, tier)
-        values (${fixture.name}, ${fixture.evidence === "entity" ? 2 : 1})
+        values (${fixture.title}, ${fixture.evidence === "entity" ? 2 : 1})
         returning id`;
+      if (fixture.evidence === "alias") {
+        await testSql`
+          insert into person_aliases (person_id, alias, tier, source, created_by)
+          values (${person!.id}, ${fixture.name}, 2, 'test:route-evidence', 'test:route-evidence')`;
+      }
       for (let index = 0; index < 3; index++) {
         const text = `${fixture.name} authoritative source ${index}.`;
         const [page] = await testSql`
@@ -345,7 +405,7 @@ describe("notes distillation per-tier routing", () => {
       const generateBodies = patched.localRequests
         .filter((request) => request.path === "/api/generate")
         .map((request) => request.body);
-      expect(generateBodies).toHaveLength(3);
+      expect(generateBodies).toHaveLength(4);
       for (const fixture of fixtures) {
         expect(generateBodies.some((body) => body.includes(fixture.name))).toBe(true);
       }
@@ -353,7 +413,7 @@ describe("notes distillation per-tier routing", () => {
         select title, tier from pages where source = 'dream:notes' order by title`;
       expect(notes.map((row) => ({ title: row.title, tier: row.tier }))).toEqual(
         fixtures
-          .map((fixture) => ({ title: fixture.name, tier: 2 }))
+          .map((fixture) => ({ title: fixture.title, tier: 2 }))
           .sort((left, right) => left.title.localeCompare(right.title)),
       );
       const [egress] =
@@ -472,12 +532,8 @@ describe("notes distillation per-tier routing", () => {
     }));
     try {
       const result = await compileNotes();
-      expect(result.results).toContainEqual({
-        status: "failed",
-        target_hash: expect.stringMatching(/^[0-9a-f]{16}$/),
-        code: "tier0_source_blocked",
-        kind: "person",
-      });
+      expect(result.candidates).toBe(0);
+      expect(result.results).toEqual([]);
       expect(patched.localRequests).toEqual([]);
       expect(patched.cloudCalls).toEqual([]);
       expect(JSON.stringify(patched.localRequests)).not.toContain(sentinel);
@@ -533,11 +589,58 @@ describe("contradiction scan per-tier routing", () => {
     }
   });
 
+  test("a matched tier-two alias raises a tier-one contradiction pair onto the local route", async () => {
+    await resetDb();
+    const alias = "Private Alias Route H5";
+    const [person] = await testSql`
+      insert into people (canonical_name, tier) values ('Alias Canonical H5', 1) returning id`;
+    await testSql`
+      insert into person_aliases (person_id, alias, tier, source, created_by)
+      values (${person!.id}, ${alias}, 2, 'test:h5-alias-route', 'test:h5-alias-route')`;
+    for (const [index, claim] of ["always rings at noon", "never rings at noon"].entries()) {
+      const text = `${alias} ${claim}.`;
+      const [page] = await testSql`
+        insert into pages (path, title, body_md, content_hash, tier)
+        values (${`h5-alias-route/${index}.md`}, ${alias}, ${text},
+                ${`h5-alias-route-${index}`}, 1) returning id`;
+      const [chunk] = await testSql`
+        insert into chunks (parent_type, parent_id, ord, text, tier)
+        values ('page', ${page!.id}, 0, ${text}, 1) returning id`;
+      await testSql`
+        insert into edges
+          (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by)
+        values ('page', ${page!.id}, 'mentions', 'person', ${person!.id},
+                'chunks', ${chunk!.id}, 'system:extract')`;
+    }
+    const pairs = (await chunkPairsSharingPerson(100)).filter(
+      (pair) => pair.person_id === person!.id,
+    );
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0]).toMatchObject({ a_tier: 2, b_tier: 2 });
+
+    config.mockOllama = false;
+    config.classifyProvider = "openrouter";
+    config.openrouterApiKey = "test-key";
+    config.providerRouteTier1 = "openrouter";
+    config.providerRouteTier2 = "ollama";
+    const patched = await patchFetch(() => ({ response: '{"conflict":true}' }));
+    try {
+      expect(await contradictionScan(100)).toBe(1);
+      expect(patched.cloudCalls).toEqual([]);
+      expect(patched.localRequests).toHaveLength(1);
+      expect(patched.localRequests[0]!.body).toContain(alias);
+    } finally {
+      await patched.restore();
+    }
+  });
+
   test("H5 amendment RED: tier-zero pairs reach no provider, egress event, or review item", async () => {
     await resetDb();
     const positive = await h5RoutingPair("Positive");
     const blocked = await Promise.all(
-      (["edge", "person", "chunk", "parent"] as const).map((arm) => h5RoutingPair(arm, arm)),
+      (["edge", "person", "chunk", "parent", "alias"] as const).map((arm) =>
+        h5RoutingPair(arm, arm),
+      ),
     );
 
     // This is the fail-closed RED boundary. Keep only content-free counts and assert them
@@ -546,7 +649,7 @@ describe("contradiction scan per-tier routing", () => {
     const blockedPairCounts = blocked.map(
       (fixture) => candidatePairs.filter((pair) => pair.person_id === fixture.personId).length,
     );
-    expect(blockedPairCounts).toEqual([0, 0, 0, 0]);
+    expect(blockedPairCounts).toEqual([0, 0, 0, 0, 0]);
 
     // The remaining assertions execute only after corrected production passes the preflight.
     config.mockOllama = false;
@@ -597,6 +700,45 @@ describe("inbox classify assumed-tier-2 routing", () => {
       const egress =
         await testSql`select count(*)::int as n from events where verb like 'egress:%'`;
       expect(egress[0]!.n).toBe(0);
+    } finally {
+      await patched.restore();
+      config.mockOllama = true;
+    }
+  });
+
+  test("cloud fallback above max tier returns unknown without local or cloud egress", async () => {
+    await resetDb();
+    config.mockOllama = false;
+    config.classifyProvider = "openrouter";
+    config.openrouterApiKey = "test-key";
+    config.cloudMaxTier = 1;
+    config.providerRouteTier1 = undefined;
+    config.providerRouteTier2 = undefined;
+    const patched = await patchFetch(() => ({
+      response: JSON.stringify({ type: "journal", confidence: 0.9, fields: {}, reason: "test" }),
+    }));
+    const [before] =
+      await testSql`select count(*)::int as n from events where verb = 'egress:classify'`;
+    try {
+      const classification = await classify("dear diary, this raw capture must stay private");
+      const [after] =
+        await testSql`select count(*)::int as n from events where verb = 'egress:classify'`;
+      expect({
+        classification,
+        localRequests: patched.localRequests.length,
+        cloudCalls: patched.cloudCalls.length,
+        egressRows: after!.n - before!.n,
+      }).toEqual({
+        classification: {
+          type: "unknown",
+          confidence: 0,
+          fields: {},
+          reason: "classifier error or unparseable output",
+        },
+        localRequests: 0,
+        cloudCalls: 0,
+        egressRows: 0,
+      });
     } finally {
       await patched.restore();
       config.mockOllama = true;

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   chmod as fsChmod,
+  link as fsLink,
   mkdir as fsMkdir,
   open as fsOpen,
   rename as fsRename,
@@ -9,7 +10,8 @@ import {
   realpath,
 } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
-import { config } from "./config";
+import { REPO_ROOT, config } from "./config";
+import { UNSAFE_DATA_ROOT, assertDedicatedDataRoot } from "./data-root";
 
 export interface AtomicFileOps {
   mkdir(path: string, options: { recursive: true; mode: number }): Promise<unknown>;
@@ -27,7 +29,7 @@ export interface AtomicFileOps {
   unlink(path: string): Promise<void>;
 }
 
-export const UNSAFE_PRIVATE_ROOT = "UNSAFE_PRIVATE_ROOT";
+export const UNSAFE_PRIVATE_ROOT = UNSAFE_DATA_ROOT;
 
 function unsafe(): Error {
   return new Error(UNSAFE_PRIVATE_ROOT);
@@ -39,6 +41,11 @@ function lexicallyContained(anchor: string, target: string, allowEqual = false):
   const rel = relative(root, candidate);
   if (!allowEqual && !rel) return false;
   return !!rel && !isAbsolute(rel) && rel !== ".." && !rel.startsWith("../");
+}
+
+/** Reject roots whose permission normalization could lock unrelated owner/system data. */
+export function assertDedicatedPrivateDataRoot(dataRoot: string): string {
+  return assertDedicatedDataRoot(dataRoot, REPO_ROOT);
 }
 
 async function nearestExistingAncestor(path: string): Promise<string> {
@@ -129,41 +136,102 @@ export async function preflightPrivateRoot(
   const mode = options.mode ?? 0o700;
   if (!lexicallyContained(root, target)) throw unsafe();
 
-  await assertNoSymlinkComponents(root, target);
-  let targetStat: Awaited<ReturnType<typeof lstat>>;
-  try {
-    targetStat = await lstat(target);
-  } catch (error) {
-    if (!options.create || (error as NodeJS.ErrnoException).code !== "ENOENT") throw unsafe();
-    // The nearest ancestor has already been checked; recursive mkdir is safe
-    // only after that validation and is followed by a complete re-check.
+  await ensurePrivateDataRoot(root);
+
+  let current = root;
+  const components = relative(root, target).split("/").filter(Boolean);
+  for (let index = 0; index < components.length; index++) {
+    current = resolve(current, components[index]!);
+    await assertNoSymlinkComponents(root, current);
+    let stat: Awaited<ReturnType<typeof lstat>>;
     try {
-      await fsMkdir(target, { recursive: true, mode });
-    } catch {
-      throw unsafe();
+      stat = await lstat(current);
+    } catch (error) {
+      if (!options.create || (error as NodeJS.ErrnoException).code !== "ENOENT") throw unsafe();
+      // Create one component at a time. This lets us validate and normalize every
+      // Minime-owned directory instead of relying on the process umask for a
+      // recursive suffix.
+      try {
+        await fsMkdir(current, { mode: 0o700 });
+      } catch {
+        throw unsafe();
+      }
+      await assertNoSymlinkComponents(root, current);
+      try {
+        stat = await lstat(current);
+      } catch {
+        throw unsafe();
+      }
     }
-    await assertNoSymlinkComponents(root, target);
-    try {
-      targetStat = await lstat(target);
-    } catch {
-      throw unsafe();
-    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw unsafe();
+    const componentMode = index === components.length - 1 ? mode : 0o700;
+    await chmodVerifiedDirectory(current, componentMode);
   }
-  if (targetStat.isSymbolicLink() || !targetStat.isDirectory()) throw unsafe();
+}
+
+async function chmodVerifiedDirectory(path: string, mode: number): Promise<void> {
+  let stat: Awaited<ReturnType<typeof lstat>>;
   try {
-    await realpath(target);
+    stat = await lstat(path);
   } catch {
     throw unsafe();
   }
-  // Only a verified regular directory reaches chmod. Re-check immediately
-  // before the mutation so a replacement symlink is never chmodded.
-  const finalStat = await lstat(target).catch(() => null);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) throw unsafe();
+  try {
+    await realpath(path);
+  } catch {
+    throw unsafe();
+  }
+  // Re-check immediately before chmod so a final-component symlink is never
+  // followed by the permission normalization.
+  const finalStat = await lstat(path).catch(() => null);
   if (!finalStat || finalStat.isSymbolicLink() || !finalStat.isDirectory()) throw unsafe();
   try {
-    await fsChmod(target, mode);
+    await fsChmod(path, mode);
   } catch {
     throw unsafe();
   }
+}
+
+/**
+ * Establish the configured data directory itself as the private trust anchor.
+ * The root may be absent on first capture, but an existing symlink or non-directory
+ * is always rejected before chmod or any child write.
+ */
+export async function ensurePrivateDataRoot(dataRoot: string): Promise<void> {
+  const root = assertDedicatedPrivateDataRoot(dataRoot);
+  // Anchor validation at the filesystem root so an existing symlink in any parent component is
+  // rejected before mkdir or chmod can follow it.
+  await assertNoSymlinkComponents(resolve("/"), root);
+  let stat: Awaited<ReturnType<typeof lstat>>;
+  try {
+    stat = await lstat(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw unsafe();
+    const ancestor = await nearestExistingAncestor(root);
+    const ancestorStat = await lstat(ancestor).catch(() => null);
+    if (!ancestorStat || ancestorStat.isSymbolicLink() || !ancestorStat.isDirectory())
+      throw unsafe();
+    let current = ancestor;
+    for (const component of relative(ancestor, root).split("/").filter(Boolean)) {
+      current = resolve(current, component);
+      try {
+        await fsMkdir(current, { mode: 0o700 });
+      } catch {
+        throw unsafe();
+      }
+      await assertNoSymlinkComponents(resolve("/"), current);
+      const created = await lstat(current).catch(() => null);
+      if (!created || created.isSymbolicLink() || !created.isDirectory()) throw unsafe();
+    }
+    try {
+      stat = await lstat(root);
+    } catch {
+      throw unsafe();
+    }
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) throw unsafe();
+  await chmodVerifiedDirectory(root, 0o700);
 }
 
 async function closeHandle(handle: { close(): Promise<void> }): Promise<void> {
@@ -181,6 +249,10 @@ async function closeHandle(handle: { close(): Promise<void> }): Promise<void> {
 
 function isEnoent(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
+}
+
+function isEexist(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | undefined)?.code === "EEXIST";
 }
 
 export function createAtomicFileWriter(
@@ -241,10 +313,64 @@ export function createAtomicFileWriter(
   };
 }
 
-const nativeOps: AtomicFileOps = {
+interface AtomicCreateFileOps extends AtomicFileOps {
+  link(from: string, to: string): Promise<void>;
+}
+
+async function createAtomicFileNoReplace(
+  ops: AtomicCreateFileOps,
+  target: string,
+  bytes: Uint8Array | string,
+): Promise<boolean> {
+  const parent = dirname(target);
+  const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  let tempHandle: Awaited<ReturnType<AtomicFileOps["open"]>> | undefined;
+  let ownsTemporary = false;
+  try {
+    await ops.mkdir(parent, { recursive: true, mode: 0o700 });
+    await ops.chmod(parent, 0o700);
+    tempHandle = await ops.open(temporary, "wx", 0o600);
+    ownsTemporary = true;
+    await ops.chmod(temporary, 0o600);
+    try {
+      await tempHandle.writeFile(bytes);
+      await tempHandle.sync();
+    } finally {
+      const handle = tempHandle;
+      tempHandle = undefined;
+      await closeHandle(handle);
+    }
+
+    let created = true;
+    try {
+      await ops.link(temporary, target);
+    } catch (error) {
+      if (!isEexist(error)) throw error;
+      created = false;
+    }
+    await ops.unlink(temporary);
+    ownsTemporary = false;
+
+    const directoryHandle = await ops.open(parent, "r");
+    try {
+      await directoryHandle.sync();
+    } finally {
+      await closeHandle(directoryHandle);
+    }
+    return created;
+  } catch {
+    throw new Error("ATOMIC_CREATE_FAILED");
+  } finally {
+    if (tempHandle) await closeHandle(tempHandle).catch(() => undefined);
+    if (ownsTemporary) await ops.unlink(temporary).catch(() => undefined);
+  }
+}
+
+const nativeOps: AtomicCreateFileOps = {
   mkdir: async (path, options) => fsMkdir(path, options),
   chmod: async (path, mode) => fsChmod(path, mode),
   open: async (path, flags, mode) => fsOpen(path, flags, mode),
+  link: async (from, to) => fsLink(from, to),
   rename: async (from, to) => fsRename(from, to),
   unlink: async (path) => fsUnlink(path),
 };
@@ -256,10 +382,29 @@ export async function atomicWritePrivate(
   const dataRoot = resolve(config.dataDir);
   const absoluteTarget = resolve(target);
   if (!lexicallyContained(dataRoot, absoluteTarget)) throw unsafe();
+  await ensurePrivateDataRoot(dataRoot);
   await assertNoSymlinkComponents(dataRoot, absoluteTarget);
   const parent = dirname(absoluteTarget);
   if (parent !== dataRoot)
     await preflightPrivateRoot(dataRoot, parent, { create: true, mode: 0o700 });
   await assertNoSymlinkComponents(dataRoot, absoluteTarget);
   await createAtomicFileWriter(nativeOps)(absoluteTarget, bytes);
+}
+
+export async function atomicCreatePrivate(
+  target: string,
+  bytes: Uint8Array | string,
+): Promise<boolean> {
+  const dataRoot = resolve(config.dataDir);
+  const absoluteTarget = resolve(target);
+  if (!lexicallyContained(dataRoot, absoluteTarget)) throw unsafe();
+  await ensurePrivateDataRoot(dataRoot);
+  await assertNoSymlinkComponents(dataRoot, absoluteTarget);
+  const parent = dirname(absoluteTarget);
+  if (parent !== dataRoot)
+    await preflightPrivateRoot(dataRoot, parent, { create: true, mode: 0o700 });
+  await assertNoSymlinkComponents(dataRoot, absoluteTarget);
+  const created = await createAtomicFileNoReplace(nativeOps, absoluteTarget, bytes);
+  await assertNoSymlinkComponents(dataRoot, absoluteTarget);
+  return created;
 }

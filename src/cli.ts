@@ -1,8 +1,9 @@
 // minime <cmd> — ops CLI (spec §5). The chat agent is the interface; this is for plumbing.
 
+import { join } from "node:path";
 import { closeDb, withAdminDbTransaction } from "./db/client";
 import { assertSchemaCurrent, migrate, parseMigrationCliContext } from "./db/migrate";
-import { eventsSince } from "./db/repo";
+import { approveTier2UnlockRequest, eventsSince } from "./db/repo";
 import { importCalendar } from "./importers/calendar";
 import { importEmailMeta } from "./importers/email-meta";
 import { importHealth } from "./importers/health";
@@ -21,8 +22,9 @@ import {
   startOwnerMaintenanceSchedule,
   superviseRuntimeChild,
 } from "./serve";
-import { config } from "./util/config";
+import { REPO_ROOT, config, repositoryInstallPendingState } from "./util/config";
 import { ollamaPreflight } from "./util/ollama-url";
+import { parseLocalPostgresUrl, samePostgresServer } from "./util/postgres-url";
 
 const USAGE = `minime <command>
 
@@ -35,6 +37,7 @@ const USAGE = `minime <command>
   dream                            run the nightly maintenance job once
   backup                           take a tagged db snapshot now (pg_dump -> restic db-snap)
   backup:pre-update                take the fail-closed pre-update db snapshot
+  unlock:approve <request-id>      approve one pending tier-2 request for its MCP connection
   serve                            MCP server (stdio) + inbox watcher + dream cron
   audit --since <Nd>               show what left the box (events), default 7d
   import:calendar <file.ics>
@@ -54,50 +57,81 @@ export function assertServeRuntimeRole(
   ownerRaw = config.databaseUrl,
 ): void {
   if (!runtimeRaw) throw new Error("runtime_role_required");
-  let runtime: URL;
-  let owner: URL;
   try {
-    runtime = new URL(runtimeRaw);
-    owner = new URL(ownerRaw);
-    const protocol = (url: URL) => url.protocol === "postgres:" || url.protocol === "postgresql:";
-    const host = (url: URL) => {
-      const normalized = url.hostname.toLowerCase();
-      if (normalized === "localhost" || normalized === "127.0.0.1") return "loopback";
-      if (normalized === "[::1]" || normalized === "::1") return "loopback";
-      return undefined;
-    };
-    const database = (url: URL) => decodeURIComponent(url.pathname.replace(/^\//, ""));
-    const sameEndpoint =
-      protocol(runtime) &&
-      protocol(owner) &&
-      host(runtime) !== undefined &&
-      host(runtime) === host(owner) &&
-      (runtime.port || "5432") === (owner.port || "5432") &&
-      database(runtime) === "minime" &&
-      database(owner) === "minime";
-    if (!sameEndpoint || !owner.username || owner.username === "minime_app") {
+    const runtime = parseLocalPostgresUrl(runtimeRaw, "minime");
+    const owner = parseLocalPostgresUrl(ownerRaw, "minime");
+    const ownerUser = decodeURIComponent(owner.url.username);
+    const runtimeUser = decodeURIComponent(runtime.url.username);
+    if (
+      !samePostgresServer(runtime, owner) ||
+      !ownerUser ||
+      ownerUser === "minime_app" ||
+      runtimeUser !== "minime_app" ||
+      !runtime.url.password ||
+      runtime.url.toString() === owner.url.toString()
+    ) {
       throw new Error("runtime_role_required");
     }
   } catch {
-    throw new Error("runtime_role_required");
-  }
-  if (
-    (runtime.protocol !== "postgres:" && runtime.protocol !== "postgresql:") ||
-    runtime.username !== "minime_app" ||
-    !runtime.password ||
-    runtime.toString() === owner.toString()
-  ) {
     throw new Error("runtime_role_required");
   }
 }
 
 async function main(): Promise<number> {
   const cmd = process.argv[2];
+  if (cmd === "migrate" || cmd === "serve" || cmd === "serve:runtime") {
+    const installState = repositoryInstallPendingState();
+    if (installState !== "ready") {
+      console.error(
+        installState === "pending"
+          ? "ERROR: PostgreSQL installation bootstrap is incomplete"
+          : "ERROR: PostgreSQL installation lifecycle state is invalid",
+      );
+      console.error("FIX: run bash scripts/install.sh before migrate or serve");
+      return 40;
+    }
+  }
   if (cmd === "backup:pre-update") {
     const outcome = await preUpdateSnapshot();
     if (outcome.kind === "taken") return 0;
     if (outcome.kind === "unconfigured") return 3;
     return 1;
+  }
+  if (cmd === "unlock:approve") {
+    const requestId = process.argv[3];
+    if (
+      !requestId ||
+      process.argv.length !== 4 ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId)
+    ) {
+      console.error("ERROR: unlock request id is invalid");
+      console.error("FIX: copy the request id returned by minime_unlock");
+      return 2;
+    }
+    try {
+      await assertSchemaCurrent();
+    } catch (error) {
+      if (error instanceof Error && error.message === "schema_not_current") {
+        console.error("ERROR: schema is not current");
+        console.error("FIX: run make migrate, or rerun make update");
+        return 50;
+      }
+      throw error;
+    }
+    try {
+      const approved = await withAdminDbTransaction(() => approveTier2UnlockRequest(requestId));
+      console.log(
+        `approved tier-2 request ${approved.id} for ${approved.minutes}min until ${approved.expires_at.toISOString()}`,
+      );
+      return 0;
+    } catch (error) {
+      if (error instanceof Error && error.message === "unlock_request_not_approvable") {
+        console.error("ERROR: unlock request is not pending and eligible");
+        console.error("FIX: ask the agent to create a fresh minime_unlock request");
+        return 1;
+      }
+      throw error;
+    }
   }
   const ollama = ollamaPreflight(config.ollamaUrl);
   if (!ollama.ok) {
@@ -309,8 +343,13 @@ async function main(): Promise<number> {
     case "import:transactions": {
       const profileName = arg("--profile");
       if (!target || !profileName) break;
+      if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(profileName)) {
+        console.error("ERROR: transaction profile name is invalid");
+        console.error("FIX: choose a profile name from config/tx-profiles without .json");
+        return 2;
+      }
       const profile = (await Bun.file(
-        `config/tx-profiles/${profileName}.json`,
+        join(REPO_ROOT, "config", "tx-profiles", `${profileName}.json`),
       ).json()) as TxProfile;
       console.log(JSON.stringify(await importTransactions(await Bun.file(target).text(), profile)));
       return 0;

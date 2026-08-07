@@ -931,6 +931,62 @@ describe("test database adapter source contract", () => {
     }
   });
 
+  test("known maintenance workers receive a separate bounded grace beyond client blockers", async () => {
+    for (const row of [
+      { pid: 96460, usename: "minime", backend_type: "autovacuum worker" },
+      { pid: 96460, usename: null, backend_type: "autovacuum worker" },
+      { pid: 96460, usename: "minime", backend_type: "parallel worker" },
+    ]) {
+      const clock = retryClock();
+      const scenario = activityFactory({
+        snapshots: [...Array.from({ length: 25 }, () => [row]), []],
+      });
+      const deps = createDefaultTestDatabaseDeps(scenario.factory, clock);
+      const admin = await deps.connectAdmin(generatedPlan.adminUrl);
+      await admin.drop(generatedPlan.databaseName);
+      await admin.close();
+      expect(scenario.snapshotCount).toBe(26);
+      expect(clock.delays).toHaveLength(25);
+      expect(scenario.trace.filter((event) => event === "drop")).toHaveLength(1);
+      expect(scenario.trace).not.toContain("terminate");
+    }
+  });
+
+  test("persistent maintenance is bounded without extending mixed or hidden activity", async () => {
+    const backgroundClock = retryClock();
+    const background = activityFactory({
+      snapshots: Array.from({ length: 300 }, () => [
+        { pid: 96460, usename: "minime", backend_type: "autovacuum worker" },
+      ]),
+    });
+    const backgroundDeps = createDefaultTestDatabaseDeps(background.factory, backgroundClock);
+    const backgroundAdmin = await backgroundDeps.connectAdmin(generatedPlan.adminUrl);
+    await expect(backgroundAdmin.drop(generatedPlan.databaseName)).rejects.toThrow(
+      "test_database_cleanup_failed",
+    );
+    await backgroundAdmin.close();
+    expect(background.snapshotCount).toBe(300);
+    expect(backgroundClock.delays).toHaveLength(299);
+    expect(background.dropCount).toBe(0);
+
+    const mixedClock = retryClock();
+    const mixed = activityFactory({
+      snapshots: Array.from({ length: 20 }, () => [
+        { pid: 96460, usename: "minime", backend_type: "autovacuum worker" },
+        { pid: 96461, usename: "minime_engineer_ro", backend_type: null },
+      ]),
+    });
+    const mixedDeps = createDefaultTestDatabaseDeps(mixed.factory, mixedClock);
+    const mixedAdmin = await mixedDeps.connectAdmin(generatedPlan.adminUrl);
+    await expect(mixedAdmin.drop(generatedPlan.databaseName)).rejects.toThrow(
+      "test_database_cleanup_failed",
+    );
+    await mixedAdmin.close();
+    expect(mixed.snapshotCount).toBe(20);
+    expect(mixedClock.delays).toHaveLength(19);
+    expect(mixed.dropCount).toBe(0);
+  });
+
   test("55006 consumes the current cycle and requires a fresh safe snapshot", async () => {
     const clock = retryClock();
     const busy = Object.assign(new Error("busy"), { code: "55006" });
@@ -1161,11 +1217,13 @@ describe("test database adapter source contract", () => {
     for (const backendType of ["autovacuum worker", "parallel worker"]) {
       let ordinaryDrops = 0;
       let terminationCalls = 0;
+      let classificationCalls = 0;
       const deps = createDefaultTestDatabaseDeps((_url, _options) => {
         const reserved = Object.assign(
           async (strings: TemplateStringsArray) => {
             const query = strings.join(" ");
             if (query.includes("select pid, usename, backend_type")) {
+              classificationCalls += 1;
               return [{ pid: 4242, usename: "minime", backend_type: backendType }];
             }
             return [];
@@ -1190,6 +1248,7 @@ describe("test database adapter source contract", () => {
         "test_database_cleanup_failed",
       );
       await admin.close();
+      expect(classificationCalls).toBe(300);
       expect(terminationCalls).toBe(0);
       expect(ordinaryDrops).toBe(0);
     }

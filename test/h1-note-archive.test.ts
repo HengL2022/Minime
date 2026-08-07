@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { existsSync, realpathSync } from "node:fs";
 import {
   chmod,
   open as fsOpen,
@@ -13,11 +14,16 @@ import {
   symlink,
   unlink,
 } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   type AtomicFileOps,
+  UNSAFE_PRIVATE_ROOT,
+  assertDedicatedPrivateDataRoot,
   assertNoSymlinkComponents,
+  atomicWritePrivate,
   createAtomicFileWriter,
+  ensurePrivateDataRoot,
   preflightPrivateRoot,
 } from "../src/util/atomic-file";
 import {
@@ -36,17 +42,18 @@ import {
   renderCompiledNoteArchive,
   resolveCompiledNoteArchiveTarget,
 } from "../src/util/compiled-note-archive";
-import { config } from "../src/util/config";
+import { REPO_ROOT, config } from "../src/util/config";
 
 const PERSON_A = "11111111-2222-3333-4444-555555555555";
 const PERSON_B = "22222222-3333-4444-5555-666666666666";
 
 let privateRoots: string[] = [];
 let globalOriginalDataDir = config.dataDir;
+const PRIVATE_TMP = realpathSync(tmpdir());
 
 async function withPrivateDataDir<T>(fn: (root: string) => Promise<T>): Promise<T> {
   const original = config.dataDir;
-  const root = await mkdtemp(join("/tmp", "minime-h1-note-"));
+  const root = await mkdtemp(join(PRIVATE_TMP, "minime-h1-note-"));
   privateRoots.push(root);
   await chmod(root, 0o700);
   config.dataDir = root;
@@ -61,7 +68,7 @@ async function withPrivateDataDir<T>(fn: (root: string) => Promise<T>): Promise<
 
 beforeEach(async () => {
   globalOriginalDataDir = config.dataDir;
-  const root = await mkdtemp(join("/tmp", "minime-h1-note-test-"));
+  const root = await mkdtemp(join(PRIVATE_TMP, "minime-h1-note-test-"));
   privateRoots.push(root);
   await chmod(root, 0o700);
   config.dataDir = root;
@@ -269,9 +276,91 @@ describe("canonical compiled-note archive codec", () => {
 });
 
 describe("private archive roots and atomic writes", () => {
+  test("rejects broad data roots before changing their modes", async () => {
+    const broadSpellings = [
+      "/",
+      "/tmp",
+      "/var",
+      "/private/tmp",
+      "/private/var",
+      tmpdir(),
+      homedir(),
+      homedir().toUpperCase(),
+      `/System/Volumes/Data${homedir()}`,
+      REPO_ROOT,
+    ].filter(existsSync);
+    const broadRoots = new Set([
+      ...broadSpellings,
+      ...broadSpellings.map((path) => realpathSync(path)),
+    ]);
+    for (const candidate of broadRoots) {
+      expect(() => assertDedicatedPrivateDataRoot(candidate)).toThrow(UNSAFE_PRIVATE_ROOT);
+    }
+  });
+
+  test("rejects an intermediate-symlink data root without mutating its target", () =>
+    withPrivateDataDir(async (root) => {
+      const outside = await mkdtemp(join(PRIVATE_TMP, "minime-data-parent-outside-"));
+      privateRoots.push(outside);
+      await chmod(outside, 0o755);
+      const link = join(root, "linked-parent");
+      await symlink(outside, link);
+      const beforeMode = (await lstat(outside)).mode & 0o777;
+      const beforeEntries = await readdir(outside);
+
+      await expect(ensurePrivateDataRoot(join(link, "nested-data"))).rejects.toThrow(
+        UNSAFE_PRIVATE_ROOT,
+      );
+      expect((await lstat(outside)).mode & 0o777).toBe(beforeMode);
+      expect(await readdir(outside)).toEqual(beforeEntries);
+    }));
+
+  test("creates an absent data root privately and rejects a symlinked data root", () =>
+    withPrivateDataDir(async (root) => {
+      const original = config.dataDir;
+      const freshRoot = join(root, "fresh-data");
+      config.dataDir = freshRoot;
+      await atomicWritePrivate(join(freshRoot, "inbox", "capture.md"), "private bytes");
+      expect((await lstat(freshRoot)).mode & 0o777).toBe(0o700);
+      expect((await lstat(join(freshRoot, "inbox"))).mode & 0o777).toBe(0o700);
+      expect((await lstat(join(freshRoot, "inbox", "capture.md"))).mode & 0o777).toBe(0o600);
+
+      const outside = await mkdtemp(join(PRIVATE_TMP, "minime-private-root-outside-"));
+      privateRoots.push(outside);
+      await chmod(outside, 0o755);
+      const linkedRoot = join(root, "linked-data");
+      await symlink(outside, linkedRoot);
+      config.dataDir = linkedRoot;
+      await expect(
+        atomicWritePrivate(join(linkedRoot, "inbox", "capture.md"), "must not escape"),
+      ).rejects.toThrow(UNSAFE_PRIVATE_ROOT);
+      expect((await lstat(outside)).mode & 0o777).toBe(0o755);
+      expect(await readdir(outside)).toEqual([]);
+      config.dataDir = original;
+      await rm(outside, { recursive: true, force: true });
+      privateRoots = privateRoots.filter((candidate) => candidate !== outside);
+    }));
+
+  test("normalizes the data root and every owned directory before a private write", () =>
+    withPrivateDataDir(async (root) => {
+      const brain = join(root, "brain");
+      const derived = join(brain, "derived");
+      const notes = join(derived, "notes");
+      await mkdir(notes, { recursive: true, mode: 0o755 });
+      for (const path of [root, brain, derived, notes]) await chmod(path, 0o755);
+
+      const target = join(notes, "private.md");
+      await atomicWritePrivate(target, "private bytes");
+
+      for (const path of [root, brain, derived, notes]) {
+        expect((await lstat(path)).mode & 0o777).toBe(0o700);
+      }
+      expect((await lstat(target)).mode & 0o777).toBe(0o600);
+    }));
+
   test("preflights a private root without chmod or traversal of a symlink", () =>
     withPrivateDataDir(async (root) => {
-      const outside = await mkdtemp(join("/tmp", "minime-h1-note-outside-"));
+      const outside = await mkdtemp(join(PRIVATE_TMP, "minime-h1-note-outside-"));
       privateRoots.push(outside);
       await chmod(outside, 0o700);
       const sentinel = join(outside, "sentinel.txt");
@@ -293,7 +382,7 @@ describe("private archive roots and atomic writes", () => {
     "rejects a symlinked private root before injected filesystem operations: %s",
     (relativeRoot) =>
       withPrivateDataDir(async (root) => {
-        const outside = await mkdtemp(join("/tmp", "minime-h1-note-symlink-"));
+        const outside = await mkdtemp(join(PRIVATE_TMP, "minime-h1-note-symlink-"));
         privateRoots.push(outside);
         await chmod(outside, 0o700);
         const sentinel = join(outside, "sentinel.txt");
@@ -316,7 +405,7 @@ describe("private archive roots and atomic writes", () => {
     await withPrivateDataDir(async (root) => {
       const brain = join(root, "brain");
       await mkdir(join(brain, "derived", "notes"), { recursive: true, mode: 0o700 });
-      const outside = await mkdtemp(join("/tmp", "minime-h1-note-realpath-"));
+      const outside = await mkdtemp(join(PRIVATE_TMP, "minime-h1-note-realpath-"));
       privateRoots.push(outside);
       await chmod(outside, 0o700);
       await symlink(outside, join(brain, "derived", "escape"));

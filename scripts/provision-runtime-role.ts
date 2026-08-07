@@ -1,10 +1,30 @@
 // Owner-only installer step.  The application password arrives through the environment and is
 // never printed; DATABASE_URL remains the owner/control-plane connection for migrations.
 import postgres from "postgres";
+import {
+  derivePostgresCredentials,
+  parseLocalPostgresUrl,
+  validateMinimeDatabasePair,
+} from "../src/util/postgres-url";
 
 const password = process.env.MINIME_APP_PASSWORD;
 const databaseUrl = process.env.DATABASE_URL;
 if (!password || !/^[A-Za-z0-9_-]{24,128}$/.test(password) || !databaseUrl) {
+  console.error("runtime_role_configuration_invalid");
+  process.exit(1);
+}
+try {
+  parseLocalPostgresUrl(databaseUrl, "minime");
+  const expectedAppUrl = derivePostgresCredentials(databaseUrl, "minime_app", password, "minime");
+  const appUrl = process.env.MINIME_APP_DATABASE_URL ?? expectedAppUrl;
+  const pair = validateMinimeDatabasePair(databaseUrl, appUrl);
+  if (
+    decodeURIComponent(pair.owner.url.username) === "minime_app" ||
+    pair.app.url.toString() !== expectedAppUrl
+  ) {
+    throw new Error("runtime_role_configuration_invalid");
+  }
+} catch {
   console.error("runtime_role_configuration_invalid");
   process.exit(1);
 }

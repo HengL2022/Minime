@@ -1,0 +1,619 @@
+declare const auditPayloadBrand: unique symbol;
+
+export type AuditPayload = Readonly<Record<string, unknown>> & {
+  readonly [auditPayloadBrand]: true;
+};
+
+type AuditPayloadKind =
+  | "dreamSummary"
+  | "importMalformed"
+  | "importSummary"
+  | "inboxClosedExistingTask"
+  | "inboxDuplicate"
+  | "inboxFiled"
+  | "inboxLegacyDuplicate"
+  | "inboxOrphaned"
+  | "inboxSplitDecision"
+  | "inboxSplitDoneTask"
+  | "inboxUnfiled"
+  | "llmClassifyEgress"
+  | "llmClassifyOutcome"
+  | "llmEmbedEgress"
+  | "llmEmbedOutcome"
+  | "onboardComplete"
+  | "repair"
+  | "tier2Unlock"
+  | "toolAttempt"
+  | "toolDisposition"
+  | "toolResult";
+
+const payloadKinds = new WeakMap<object, AuditPayloadKind>();
+
+type AuditDelivery = "transport" | "direct";
+type AuditImporter = "calendar" | "email_meta" | "health" | "transactions";
+type AuditProvider = "ollama" | "anthropic" | "openai" | "openrouter" | "bedrock";
+type AuditEgressKind = "embed" | "classify";
+type ClassifierKind = "task" | "journal" | "interaction" | "note" | "decision_note" | "unknown";
+type FiledTable = "tasks" | "journal_entries" | "interactions" | "pages" | "decisions";
+type RepairCode =
+  | "repair_not_committed"
+  | "repair_module_failed"
+  | "repair_cleanup_failed"
+  | "repair_audit_failed"
+  | "repair_backup_failed"
+  | "repair_invalid_summary"
+  | "repair_complete";
+type RepairScript = "retype-org-to-person" | "unknown";
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const DECIMAL_EVENT_ID = /^[1-9]\d*$/;
+const METRIC_ID = /^[a-z][a-z0-9_]{0,63}$/;
+const MODEL_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,199}$/;
+const HASH = /^[a-f0-9]{16}$/;
+
+function invalidPayload(): never {
+  throw new Error("invalid_audit_payload");
+}
+
+function nonNegativeInteger(value: unknown): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) invalidPayload();
+  return value as number;
+}
+
+function positiveInteger(value: unknown): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) invalidPayload();
+  return value as number;
+}
+
+function unlockMinutes(value: unknown): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > 1_440)
+    invalidPayload();
+  return value as number;
+}
+
+function ratio(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1)
+    invalidPayload();
+  return value;
+}
+
+function uuid(value: unknown): string {
+  if (typeof value !== "string" || !UUID.test(value)) invalidPayload();
+  return value;
+}
+
+function returnedId(value: unknown): string {
+  if (typeof value !== "string" || (!UUID.test(value) && !METRIC_ID.test(value))) invalidPayload();
+  return value;
+}
+
+function returnedIds(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) invalidPayload();
+  return Object.freeze(value.slice(0, 100).map(returnedId));
+}
+
+function uuids(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) invalidPayload();
+  return Object.freeze(value.slice(0, 100).map(uuid));
+}
+
+function eventId(value: unknown): string {
+  if (typeof value !== "string" || !DECIMAL_EVENT_ID.test(value)) invalidPayload();
+  return value;
+}
+
+function paramsHash(value: unknown): string {
+  if (typeof value !== "string" || !HASH.test(value)) invalidPayload();
+  return value;
+}
+
+function errorCode(value: unknown): string {
+  return fixed(value, [
+    "AUDIT_UNAVAILABLE",
+    "BAD_INPUT",
+    "DUPLICATE_REQUEST_ID",
+    "INTERNAL",
+    "NOT_FOUND",
+    "SDK_REFUSAL",
+    "UNKNOWN_METRIC",
+    "UNKNOWN_TOOL",
+    "UNLOCK_TOO_LONG",
+  ]);
+}
+
+function routeTier(value: unknown): 1 | 2 {
+  if (value !== 1 && value !== 2) invalidPayload();
+  return value;
+}
+
+function modelIdentifier(value: unknown): string {
+  if (typeof value !== "string" || !MODEL_IDENTIFIER.test(value)) invalidPayload();
+  return value;
+}
+
+function fixed<T extends string>(value: unknown, allowed: readonly T[]): T {
+  if (typeof value !== "string" || !(allowed as readonly string[]).includes(value))
+    invalidPayload();
+  return value as T;
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function summaryCount(value: unknown): number {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? (value as number) : 0;
+}
+
+function nestedCount(value: unknown, key: string): number {
+  return summaryCount(record(value)[key]);
+}
+
+function deepFreeze<T>(value: T): T {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const nested of Object.values(value as Record<string, unknown>)) deepFreeze(nested);
+  return Object.freeze(value);
+}
+
+function construct(kind: AuditPayloadKind, fields: Record<string, unknown>): AuditPayload {
+  const payload = deepFreeze(fields) as AuditPayload;
+  payloadKinds.set(payload, kind);
+  return payload;
+}
+
+function toolAttempt(input: {
+  paramsHash: string;
+  requestedNameHash?: string;
+}): AuditPayload {
+  return construct("toolAttempt", {
+    params_hash: paramsHash(input.paramsHash),
+    ...(input.requestedNameHash
+      ? { requested_name_hash: paramsHash(input.requestedNameHash) }
+      : {}),
+  });
+}
+
+function toolResult(input: {
+  paramsHash: string;
+  returnedIds: string[];
+  returnedCount: number;
+  errorCode?: string;
+  requestedNameHash?: string;
+  delivery: AuditDelivery;
+}): AuditPayload {
+  return construct("toolResult", {
+    params_hash: paramsHash(input.paramsHash),
+    returned_ids: returnedIds(input.returnedIds),
+    returned_count: nonNegativeInteger(input.returnedCount),
+    ...(input.errorCode ? { error: errorCode(input.errorCode) } : {}),
+    ...(input.requestedNameHash
+      ? { requested_name_hash: paramsHash(input.requestedNameHash) }
+      : {}),
+    delivery: fixed(input.delivery, ["transport", "direct"]),
+  });
+}
+
+type ToolDispositionInput =
+  | {
+      resultEventId: string;
+      status: "suppressed";
+      outcome?:
+        | "cancelled_before_execution"
+        | "transport_closed_before_execution"
+        | "completed_not_released"
+        | "completed_after_disconnect";
+    }
+  | { resultEventId: string; status: "released" | "send_uncertain" };
+
+function toolDisposition(input: ToolDispositionInput): AuditPayload {
+  const base = {
+    result_event_id: eventId(input.resultEventId),
+    status: fixed(input.status, ["suppressed", "released", "send_uncertain"]),
+  };
+  if (input.status !== "suppressed") return construct("toolDisposition", base);
+  return construct("toolDisposition", {
+    ...base,
+    returned_ids: Object.freeze([]),
+    returned_count: 0,
+    ...(input.outcome
+      ? {
+          outcome: fixed(input.outcome, [
+            "cancelled_before_execution",
+            "transport_closed_before_execution",
+            "completed_not_released",
+            "completed_after_disconnect",
+          ]),
+        }
+      : {}),
+  });
+}
+
+function tier2Unlock(input: { requestId: string; minutes: number }): AuditPayload {
+  return construct("tier2Unlock", {
+    request_id: uuid(input.requestId),
+    minutes: unlockMinutes(input.minutes),
+  });
+}
+
+type LlmEgressInput = {
+  kind: AuditEgressKind;
+  provider: AuditProvider;
+  model: string;
+  items: number;
+  routeTier?: 1 | 2;
+};
+
+function llmEgress(input: LlmEgressInput): AuditPayload {
+  const kind = fixed(input.kind, ["embed", "classify"]);
+  if (kind === "embed") {
+    if ("routeTier" in input && input.routeTier !== undefined) invalidPayload();
+    return construct("llmEmbedEgress", {
+      provider: fixed(input.provider, ["openai", "openrouter"]),
+      model: modelIdentifier(input.model),
+      items: positiveInteger(input.items),
+    });
+  }
+  if (input.items !== 1) invalidPayload();
+  return construct("llmClassifyEgress", {
+    provider: fixed(input.provider, ["anthropic", "openai", "openrouter", "bedrock"]),
+    model: modelIdentifier(input.model),
+    items: 1,
+    ...(input.routeTier === undefined ? {} : { route_tier: routeTier(input.routeTier) }),
+  });
+}
+
+function llmEgressOutcome(input: {
+  kind: AuditEgressKind;
+  intentEventId: string;
+  status: "succeeded" | "failed";
+}): AuditPayload {
+  const kind = fixed(input.kind, ["embed", "classify"]);
+  return construct(kind === "embed" ? "llmEmbedOutcome" : "llmClassifyOutcome", {
+    intent_event_id: eventId(input.intentEventId),
+    status: fixed(input.status, ["succeeded", "failed"]),
+  });
+}
+
+type ImportMalformedInput =
+  | { importer: "calendar"; reason: "missing_required_fields"; recordNumber: number }
+  | { importer: "email_meta"; reason: "missing_required_fields"; recordNumber: number }
+  | { importer: "transactions"; reason: "invalid_date_or_amount"; recordNumber: number }
+  | {
+      importer: "health";
+      reason: "invalid_start_date" | "invalid_value";
+      recordNumber: number;
+    };
+
+function importMalformed(input: ImportMalformedInput): AuditPayload {
+  const importer = fixed(input.importer, ["calendar", "email_meta", "health", "transactions"]);
+  let reason: ImportMalformedInput["reason"];
+  if (importer === "calendar" || importer === "email_meta") {
+    reason = fixed(input.reason, ["missing_required_fields"]);
+  } else if (importer === "transactions") {
+    reason = fixed(input.reason, ["invalid_date_or_amount"]);
+  } else {
+    reason = fixed(input.reason, ["invalid_start_date", "invalid_value"]);
+  }
+  const base = {
+    importer,
+    reason,
+    record_number: nonNegativeInteger(input.recordNumber),
+  };
+  return construct("importMalformed", base);
+}
+
+function importSummary(input: {
+  importer: AuditImporter;
+  total: number;
+  inserted: number;
+  updated: number;
+  skipped: number;
+}): AuditPayload {
+  return construct("importSummary", {
+    importer: fixed(input.importer, ["calendar", "email_meta", "health", "transactions"]),
+    total: nonNegativeInteger(input.total),
+    inserted: nonNegativeInteger(input.inserted),
+    updated: nonNegativeInteger(input.updated),
+    skipped: nonNegativeInteger(input.skipped),
+  });
+}
+
+function onboardComplete(input: {
+  profile: number;
+  values: number;
+  goals: number;
+  principles: number;
+  people: number;
+  tasks: number;
+  journal: number;
+}): AuditPayload {
+  return construct("onboardComplete", {
+    profile: nonNegativeInteger(input.profile),
+    values: nonNegativeInteger(input.values),
+    goals: nonNegativeInteger(input.goals),
+    principles: nonNegativeInteger(input.principles),
+    people: nonNegativeInteger(input.people),
+    tasks: nonNegativeInteger(input.tasks),
+    journal: nonNegativeInteger(input.journal),
+  });
+}
+
+const DREAM_STEPS = [
+  "1_embed_backlog",
+  "2_entity_link",
+  "2b_compile_notes",
+  "2c_compile_decision_digests",
+  "3_contradictions",
+  "3b_phantom_persons",
+  "3c_validate_edges",
+  "4_stale",
+  "5_rollups",
+  "6_decision_reviews",
+  "7_backup",
+] as const;
+
+function dreamSummary(input: Record<string, unknown>): AuditPayload {
+  const noteFailed = nestedCount(input["2b_compile_notes"], "failed");
+  const failedSteps = DREAM_STEPS.filter((step) => typeof input[step] === "string").length;
+  const hasFailure = failedSteps > 0 || noteFailed > 0;
+  return construct("dreamSummary", {
+    status: hasFailure ? "partial_failure" : "complete",
+    ...(failedSteps > 0
+      ? { error_code: "dream_step_failed" }
+      : noteFailed > 0
+        ? { error_code: "dream_item_failed" }
+        : {}),
+    failed_step_count: failedSteps,
+    embed_backlog_count: summaryCount(input["1_embed_backlog"]),
+    entity_link_count: summaryCount(input["2_entity_link"]),
+    note_candidate_count: nestedCount(input["2b_compile_notes"], "candidates"),
+    note_created_count: nestedCount(input["2b_compile_notes"], "created"),
+    note_updated_count: nestedCount(input["2b_compile_notes"], "updated"),
+    note_repaired_count: nestedCount(input["2b_compile_notes"], "repaired"),
+    note_unchanged_count: nestedCount(input["2b_compile_notes"], "unchanged"),
+    note_failed_count: noteFailed,
+    decision_digest_candidate_count: nestedCount(
+      input["2c_compile_decision_digests"],
+      "candidates",
+    ),
+    decision_digest_compiled_count: nestedCount(input["2c_compile_decision_digests"], "compiled"),
+    decision_digest_skipped_count: nestedCount(input["2c_compile_decision_digests"], "skipped"),
+    contradiction_count: summaryCount(input["3_contradictions"]),
+    phantom_person_count: summaryCount(input["3b_phantom_persons"]),
+    edge_checked_count: nestedCount(input["3c_validate_edges"], "checked"),
+    edge_confirmed_count: nestedCount(input["3c_validate_edges"], "confirmed"),
+    edge_denied_count: nestedCount(input["3c_validate_edges"], "denied"),
+    edge_unsure_count: nestedCount(input["3c_validate_edges"], "unsure"),
+    edge_flagged_count: nestedCount(input["3c_validate_edges"], "flagged"),
+    stale_count: summaryCount(input["4_stale"]),
+    metric_rollup_count: summaryCount(input["5_rollups"]),
+    decision_review_count: summaryCount(input["6_decision_reviews"]),
+    backup_ran: record(input["7_backup"]).ran === true,
+  });
+}
+
+type RepairInput =
+  | {
+      script: "retype-org-to-person";
+      phase: "complete";
+      code: "repair_complete";
+      counts?: { edges_repointed?: number };
+      ids?: string[];
+    }
+  | {
+      script: RepairScript;
+      phase: "failed";
+      code: Exclude<RepairCode, "repair_complete">;
+      counts?: never;
+      ids?: never;
+    };
+
+function repair(input: RepairInput): AuditPayload {
+  const phase = fixed(input.phase, ["failed", "complete"]);
+  const script = fixed(input.script, ["retype-org-to-person", "unknown"]);
+  const code =
+    phase === "complete"
+      ? fixed(input.code, ["repair_complete"])
+      : fixed(input.code, [
+          "repair_not_committed",
+          "repair_module_failed",
+          "repair_cleanup_failed",
+          "repair_audit_failed",
+          "repair_backup_failed",
+          "repair_invalid_summary",
+        ]);
+  if (phase === "complete" && script !== "retype-org-to-person") invalidPayload();
+  if (phase === "failed" && (input.counts !== undefined || input.ids !== undefined)) {
+    invalidPayload();
+  }
+  const counts: Record<string, number> = {};
+  if (phase === "complete" && input.counts?.edges_repointed !== undefined) {
+    counts.edges_repointed = nonNegativeInteger(input.counts.edges_repointed);
+  }
+  return construct("repair", {
+    script,
+    phase,
+    code,
+    counts,
+    ids: phase === "complete" ? uuids(input.ids ?? []) : Object.freeze([]),
+  });
+}
+
+function classifierKind(value: unknown): ClassifierKind {
+  return fixed(value, ["task", "journal", "interaction", "note", "decision_note", "unknown"]);
+}
+
+function inboxClosedExistingTask(input: { taskId: string; score: number }): AuditPayload {
+  return construct("inboxClosedExistingTask", {
+    task_id: uuid(input.taskId),
+    score: ratio(input.score),
+  });
+}
+
+function inboxDuplicate(input: { existingTaskId: string; score: number }): AuditPayload {
+  return construct("inboxDuplicate", {
+    existing_task_id: uuid(input.existingTaskId),
+    score: ratio(input.score),
+  });
+}
+
+function inboxSplitDecision(input: { taskId: string; decisionId: string }): AuditPayload {
+  return construct("inboxSplitDecision", {
+    task_id: uuid(input.taskId),
+    decision_id: uuid(input.decisionId),
+  });
+}
+
+function inboxSplitDoneTask(input: { decisionId: string; taskId: string }): AuditPayload {
+  return construct("inboxSplitDoneTask", {
+    decision_id: uuid(input.decisionId),
+    task_id: uuid(input.taskId),
+  });
+}
+
+function inboxFiled(input: {
+  kind: ClassifierKind;
+  confidence: number;
+  filedTable: FiledTable;
+  filedId: string;
+}): AuditPayload {
+  return construct("inboxFiled", {
+    type: classifierKind(input.kind),
+    confidence: ratio(input.confidence),
+    filed_table: fixed(input.filedTable, [
+      "tasks",
+      "journal_entries",
+      "interactions",
+      "pages",
+      "decisions",
+    ]),
+    filed_id: uuid(input.filedId),
+  });
+}
+
+function inboxUnfiled(input: { kind: ClassifierKind; confidence: number }): AuditPayload {
+  return construct("inboxUnfiled", {
+    type: classifierKind(input.kind),
+    confidence: ratio(input.confidence),
+  });
+}
+
+function inboxOrphaned(): AuditPayload {
+  return construct("inboxOrphaned", { reason: "missing_local_source" });
+}
+
+function inboxLegacyDuplicate(): AuditPayload {
+  return construct("inboxLegacyDuplicate", { reason: "legacy_duplicate_identity" });
+}
+
+export const auditPayload = Object.freeze({
+  dreamSummary,
+  importMalformed,
+  importSummary,
+  inboxClosedExistingTask,
+  inboxDuplicate,
+  inboxFiled,
+  inboxLegacyDuplicate,
+  inboxOrphaned,
+  inboxSplitDecision,
+  inboxSplitDoneTask,
+  inboxUnfiled,
+  llmEgress,
+  llmEgressOutcome,
+  onboardComplete,
+  repair,
+  tier2Unlock,
+  toolAttempt,
+  toolDisposition,
+  toolResult,
+});
+
+const AUDITED_TOOL_NAMES = new Set([
+  "minime_agenda",
+  "minime_capture",
+  "minime_get_context",
+  "minime_journal",
+  "minime_log_decision",
+  "minime_log_interaction",
+  "minime_query_metric",
+  "minime_review_decision",
+  "minime_review_queue",
+  "minime_search",
+  "minime_state",
+  "minime_unlock",
+  "minime_upsert_task",
+  "unknown",
+]);
+
+function expectedPayloadKind(verb: string, payload: AuditPayload): AuditPayloadKind {
+  const tool = verb.match(/^tool:([^:]+)(?::(attempt|disposition))?$/);
+  if (tool) {
+    if (!AUDITED_TOOL_NAMES.has(tool[1]!)) invalidPayload();
+    return tool[2] === "attempt"
+      ? "toolAttempt"
+      : tool[2] === "disposition"
+        ? "toolDisposition"
+        : "toolResult";
+  }
+
+  const fixedKinds: Readonly<Record<string, AuditPayloadKind>> = {
+    "dream:summary": "dreamSummary",
+    "egress:classify": "llmClassifyEgress",
+    "egress:classify:outcome": "llmClassifyOutcome",
+    "egress:embed": "llmEmbedEgress",
+    "egress:embed:outcome": "llmEmbedOutcome",
+    "import:malformed": "importMalformed",
+    "inbox:closed-existing-task": "inboxClosedExistingTask",
+    "inbox:duplicate": "inboxDuplicate",
+    "inbox:filed": "inboxFiled",
+    "inbox:legacy-duplicate": "inboxLegacyDuplicate",
+    "inbox:orphaned": "inboxOrphaned",
+    "inbox:split-decision": "inboxSplitDecision",
+    "inbox:split-done-task": "inboxSplitDoneTask",
+    "inbox:unfiled": "inboxUnfiled",
+    "onboard:complete": "onboardComplete",
+    "unlock:tier2:approved": "tier2Unlock",
+    "unlock:tier2:requested": "tier2Unlock",
+  };
+  const fixedKind = fixedKinds[verb];
+  if (fixedKind) return fixedKind;
+
+  const importerByVerb: Readonly<Record<string, AuditImporter>> = {
+    "import:calendar": "calendar",
+    "import:email-meta": "email_meta",
+    "import:health": "health",
+    "import:transactions": "transactions",
+  };
+  const importer = importerByVerb[verb];
+  if (importer) {
+    if (payload.importer !== importer) invalidPayload();
+    return "importSummary";
+  }
+
+  const repairScriptByVerb: Readonly<Record<string, RepairScript>> = {
+    "repair:retype-org-to-person": "retype-org-to-person",
+    "repair:unknown": "unknown",
+  };
+  const script = repairScriptByVerb[verb];
+  if (script) {
+    if (payload.script !== script) invalidPayload();
+    return "repair";
+  }
+  return invalidPayload();
+}
+
+export function assertAuditPayload(value: unknown): asserts value is AuditPayload {
+  if (!value || typeof value !== "object" || !payloadKinds.has(value as object)) {
+    throw new Error("invalid_audit_payload");
+  }
+}
+
+export function assertAuditPayloadForVerb(
+  verb: string,
+  value: unknown,
+): asserts value is AuditPayload {
+  assertAuditPayload(value);
+  if (payloadKinds.get(value as object) !== expectedPayloadKind(verb, value)) invalidPayload();
+}

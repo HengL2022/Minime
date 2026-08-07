@@ -1,22 +1,27 @@
 // Nightly dream job (spec §10), 8 steps in order. Each step is best-effort: a failure is
 // recorded and the remaining steps still run. Flags, never auto-resolves (step 3).
 
+import { withAdminDbScope, withAdminDbTransaction } from "../db/client";
 import {
   chunkPairsSharingPerson,
+  clearDreamMetricRefreshWindow,
   decisionsNeedingReview,
   insertReviewItem,
   listMetricDefs,
   logEvent,
   parentsNeedingExtraction,
   phantomPersonCandidates,
+  prepareMetricCache,
   reviewItemExists,
   runMetricAgg,
   staleItems,
   upsertMetricValue,
 } from "../db/repo";
 import { drainEmbedBacklog } from "../search/index-parent";
-import { now } from "../util/clock";
+import { auditPayload } from "../util/audit-payload";
+import { configuredTimeZone, todayStr } from "../util/clock";
 import { config } from "../util/config";
+import { metricPeriodStart, reduceMetricSeries, shiftMetricDate } from "../util/metric-rollup";
 import { backup } from "./backup";
 
 const ACTOR = "system:dream";
@@ -30,7 +35,10 @@ export async function entityLinkPass(limit = 500): Promise<number> {
   const parents = await parentsNeedingExtraction(limit);
   let linked = 0;
   for (const p of parents) {
-    const stats = await extractAndLink(p.parent_type, p.parent_id, p.text).catch(() => null);
+    const stats = await extractAndLink(p.parent_type, p.parent_id, p.text, {
+      tier: p.tier,
+      derivedFrom: p.derived_from,
+    }).catch(() => null);
     linked += stats?.edges ?? 0;
   }
   return linked;
@@ -118,31 +126,68 @@ export async function phantomPersonScan(): Promise<number> {
 // -- step 5: metric rollups -------------------------------------------------
 
 export async function rollupMetrics(days = 90): Promise<number> {
-  const to = now().toISOString().slice(0, 10);
-  const from = new Date(now().getTime() - days * 86_400_000).toISOString().slice(0, 10);
-  let written = 0;
-  for (const def of await listMetricDefs()) {
-    if (!def.agg_sql) continue;
-    const daily = await runMetricAgg(def.name, from, to);
-    if (daily.some((r) => r.label !== null)) continue; // labeled metrics are live-only
-    const weekly = new Map<string, number>();
-    const monthly = new Map<string, number>();
-    for (const r of daily) {
-      await upsertMetricValue(def.name, r.period_start, "day", r.value, "dream");
-      written++;
-      const d = new Date(`${r.period_start}T00:00:00Z`);
-      const dow = (d.getUTCDay() + 6) % 7;
-      const week = new Date(d.getTime() - dow * 86_400_000).toISOString().slice(0, 10);
-      const month = `${r.period_start.slice(0, 7)}-01`;
-      weekly.set(week, (weekly.get(week) ?? 0) + r.value);
-      monthly.set(month, (monthly.get(month) ?? 0) + r.value);
-    }
-    for (const [start, value] of weekly)
-      await upsertMetricValue(def.name, start, "week", value, "dream");
-    for (const [start, value] of monthly)
-      await upsertMetricValue(def.name, start, "month", value, "dream");
+  return withAdminDbScope(() =>
+    withAdminDbTransaction(async () => {
+      const ownerTimeZone = configuredTimeZone(config.tz);
+      const to = todayStr(ownerTimeZone);
+      const requestedFrom = shiftMetricDate(to, -days);
+      const cacheChanged = await prepareMetricCache(ownerTimeZone);
+      const weekFrom = metricPeriodStart(requestedFrom, "week");
+      const monthFrom = metricPeriodStart(requestedFrom, "month");
+      const weekTo = metricPeriodStart(to, "week");
+      const monthTo = metricPeriodStart(to, "month");
+      // A timezone switch rebuilds every source-backed Dream value. Ordinary refreshes read from
+      // the earliest leading week/month boundary so a partial sliding window cannot erode a
+      // closed period. Only the requested day window is rewritten during the ordinary path.
+      const aggregateFrom = cacheChanged ? "0001-01-01" : [weekFrom, monthFrom].sort()[0]!;
+      let written = 0;
+      for (const def of await listMetricDefs()) {
+        if (!def.agg_sql) continue;
+        const daily = await runMetricAgg(def.name, aggregateFrom, to, ownerTimeZone);
+        if (!cacheChanged) {
+          await clearDreamMetricRefreshWindow({
+            name: def.name,
+            dayFrom: requestedFrom,
+            dayTo: to,
+            weekFrom,
+            weekTo,
+            monthFrom,
+            monthTo,
+          });
+        }
+        if (daily.some((r) => r.label !== null)) continue; // labeled metrics are live-only
+        for (const r of daily) {
+          if (!cacheChanged && r.period_start < requestedFrom) continue;
+          await upsertMetricValue(def.name, r.period_start, "day", r.value, "dream");
+          written++;
+        }
+        const weeklyDaily = cacheChanged
+          ? daily
+          : daily.filter((row) => row.period_start >= weekFrom);
+        const monthlyDaily = cacheChanged
+          ? daily
+          : daily.filter((row) => row.period_start >= monthFrom);
+        for (const row of reduceMetricSeries(weeklyDaily, "week", def.rollup))
+          await upsertMetricValue(def.name, row.period_start, "week", row.value, "dream");
+        for (const row of reduceMetricSeries(monthlyDaily, "month", def.rollup))
+          await upsertMetricValue(def.name, row.period_start, "month", row.value, "dream");
+      }
+      return written;
+    }),
+  );
+}
+
+export async function enqueueDecisionReviews(asOfDate: string): Promise<number> {
+  let queued = 0;
+  for (const decision of await decisionsNeedingReview(asOfDate)) {
+    if (await reviewItemExists("decision_review", "decision_id", decision.id)) continue;
+    await insertReviewItem("decision_review", {
+      decision_id: decision.id,
+      question: decision.question,
+    });
+    queued++;
   }
-  return written;
+  return queued;
 }
 
 // -- step 7: backup ----------------------------------------------------------
@@ -159,8 +204,10 @@ export async function dream(): Promise<Record<string, unknown>> {
   const step = async (name: string, fn: () => Promise<unknown>) => {
     try {
       summary[name] = await fn();
-    } catch (e) {
-      summary[name] = `failed: ${e instanceof Error ? e.message : e}`;
+    } catch {
+      // The summary is printed by the owner CLI as well as reduced into an audit event.
+      // Provider/SQL/filesystem exceptions may contain private prose or paths.
+      summary[name] = "failed";
     }
   };
 
@@ -196,18 +243,14 @@ export async function dream(): Promise<Record<string, unknown>> {
     return flagged;
   });
   await step("5_rollups", () => rollupMetrics());
-  await step("6_decision_reviews", async () => {
-    let queued = 0;
-    for (const d of await decisionsNeedingReview()) {
-      if (await reviewItemExists("decision_review", "decision_id", d.id)) continue;
-      await insertReviewItem("decision_review", { decision_id: d.id, question: d.question });
-      queued++;
-    }
-    return queued;
-  });
+  await step("6_decision_reviews", () => enqueueDecisionReviews(todayStr(config.tz)));
   await step("7_backup", () => backup());
 
   // step 8: the summary event
-  await logEvent({ actor: ACTOR, verb: "dream:summary", payload: summary });
+  await logEvent({
+    actor: ACTOR,
+    verb: "dream:summary",
+    payload: auditPayload.dreamSummary(summary),
+  });
   return summary;
 }

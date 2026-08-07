@@ -14,6 +14,7 @@ import {
 import { lstat, open, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { preservePreviousSnapshotPair, publishSnapshotManifest } from "../ops/snapshot-manifest";
+import { ensurePrivateDataRoot } from "../util/atomic-file";
 import { DB_DUMP_DIR, config, ensurePrivateDumpDir } from "../util/config";
 import { createLibpqService, registerEphemeralCleanup } from "../util/libpq-service";
 import type { LibpqServiceLease } from "../util/libpq-service";
@@ -34,6 +35,7 @@ export type PreUpdateSnapshotOutcome =
   | { kind: "failed" };
 
 const BACKUP_DETAIL = {
+  dataRoot: "backup failed (data_root)",
   dependency: "backup failed (dependency_unavailable)",
   connection: "backup failed (pg_connection_handoff)",
   connectionCleanup: "backup failed (connection_cleanup)",
@@ -402,6 +404,13 @@ async function runBackup(tag: "dream" | "db-snap"): Promise<{ ran: boolean; deta
         ran: false,
         detail: "restic not configured (RESTIC_REPOSITORY / RESTIC_PASSWORD_FILE)",
       };
+    }
+    if (tag === "dream") {
+      try {
+        await ensurePrivateDataRoot(config.dataDir);
+      } catch {
+        return { ran: false, detail: BACKUP_DETAIL.dataRoot };
+      }
     }
     const which = await run(["sh", "-c", "command -v restic && command -v pg_dump"]);
     if (!which.ok) return { ran: false, detail: BACKUP_DETAIL.dependency };

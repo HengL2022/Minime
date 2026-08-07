@@ -18,6 +18,20 @@ const runtimePool: DbPool = postgres(config.runtimeDatabaseUrl, {
   max: 5,
   onnotice: () => {},
 });
+// Durable egress audit must never compete with the actor transaction pool: if five handlers
+// each held one runtime slot and then requested a sixth, all could wait forever. This separate
+// app-role pool is intentionally single-purpose and single-connection.
+const runtimeAuditPool: DbPool = postgres(config.runtimeDatabaseUrl, {
+  max: 1,
+  onnotice: () => {},
+});
+// Capture identity must commit before its source file becomes visible, independently of the
+// enclosing actor transaction. Keep that work off both the actor and durable-audit pools so an
+// ambient transaction can neither absorb its commit nor exhaust the connection it needs.
+const runtimeDurabilityPool: DbPool = postgres(config.runtimeDatabaseUrl, {
+  max: 1,
+  onnotice: () => {},
+});
 // Administrative work (migrations and test/database lifecycle) must stay on the owner DSN;
 // it is never reachable through the MCP actor scope. The client object is constructed for the
 // explicit control-plane path. Resident `serve` retains it only in the non-MCP supervisor;
@@ -115,7 +129,34 @@ export async function withReservedDb<T>(work: (connection: DbReserved) => Promis
   }
 }
 
+/**
+ * Reserve an autocommit connection from the restricted runtime pool even when the caller is
+ * inside an actor/admin transaction. Used for audit intent that must survive caller rollback.
+ */
+export async function withRuntimeReservedDb<T>(
+  work: (connection: DbReserved) => Promise<T>,
+): Promise<T> {
+  const executor = await runtimeAuditPool.reserve();
+  try {
+    return await work(executor);
+  } finally {
+    await executor.release();
+  }
+}
+
+/** Commit restricted-runtime durability work independently of any ambient transaction. */
+export async function withDurableRuntimeDbTransaction<T>(
+  work: (tx: DbTransaction) => Promise<T>,
+): Promise<T> {
+  return (await runtimeDurabilityPool.begin((tx) => transactionScope.run(tx, () => work(tx)))) as T;
+}
+
 export async function closeDb(): Promise<void> {
   const adminClose = adminDisabled ? Promise.resolve() : adminSql.end({ timeout: 5 });
-  await Promise.all([runtimePool.end({ timeout: 5 }), adminClose]);
+  await Promise.all([
+    runtimePool.end({ timeout: 5 }),
+    runtimeAuditPool.end({ timeout: 5 }),
+    runtimeDurabilityPool.end({ timeout: 5 }),
+    adminClose,
+  ]);
 }

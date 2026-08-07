@@ -5,10 +5,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   chmodSync,
+  lstatSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
+  rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,14 +37,49 @@ import {
 } from "../src/pipeline/backup";
 import { config } from "../src/util/config";
 
+const originalDataDir = config.dataDir;
+
 afterEach(() => {
   __setInFlightForTest(false);
   __setProbeHookForTest(undefined);
   __setCommandRunnerForTest(undefined);
   config.resticRepository = undefined;
   config.resticPasswordFile = undefined;
+  config.dataDir = originalDataDir;
   __setDumpDirForTest(undefined);
   __setManifestWriterForTest(undefined);
+});
+
+describe("data archive boundary", () => {
+  test("dream backup rejects an unsafe fixture root before commands or chmod", async () => {
+    const calls: string[][] = [];
+    config.resticRepository = "test:repo";
+    config.resticPasswordFile = "/test/pass";
+    __setCommandRunnerForTest(async (cmd) => {
+      calls.push(cmd);
+      return { ok: true };
+    });
+    const fixtureRoot = mkdtempSync(join(realpathSync(tmpdir()), "minime-backup-root-"));
+    const outside = mkdtempSync(join(realpathSync(tmpdir()), "minime-backup-outside-"));
+    try {
+      chmodSync(outside, 0o755);
+      const linkedParent = join(fixtureRoot, "linked-parent");
+      symlinkSync(outside, linkedParent, "dir");
+      const beforeMode = lstatSync(outside).mode & 0o777;
+      const beforeEntries = readdirSync(outside);
+      config.dataDir = join(linkedParent, "minime-data");
+      await expect(backup()).resolves.toEqual({
+        ran: false,
+        detail: "backup failed (data_root)",
+      });
+      expect(lstatSync(outside).mode & 0o777).toBe(beforeMode);
+      expect(readdirSync(outside)).toEqual(beforeEntries);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+    expect(calls).toEqual([]);
+  });
 });
 
 describe("graceful degradation when restic is unconfigured", () => {

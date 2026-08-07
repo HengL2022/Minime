@@ -28,7 +28,7 @@ export function isValidTimeZone(timeZone: string): boolean {
 }
 
 export function configuredTimeZone(timeZone?: string | null): string {
-  const tz = timeZone?.trim() || config.tz;
+  const tz = timeZone?.trim() || config.tz.trim();
   if (!isValidTimeZone(tz)) throw new Error(`invalid time zone: ${tz}`);
   return tz;
 }
@@ -79,18 +79,88 @@ function partMap(d: Date, timeZone: string): Record<string, number> {
   return out;
 }
 
+interface DateTimeParts {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+  millisecond: number;
+}
+
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) return isLeapYear(year) ? 29 : 28;
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
+}
+
+function assertDateTimeParts(parts: DateTimeParts): void {
+  const { year, month, day, hour, minute, second, millisecond } = parts;
+  if (
+    !Object.values(parts).every(Number.isInteger) ||
+    year < 1 ||
+    year > 9999 ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > daysInMonth(year, month) ||
+    hour < 0 ||
+    hour > 23 ||
+    minute < 0 ||
+    minute > 59 ||
+    second < 0 ||
+    second > 59 ||
+    millisecond < 0 ||
+    millisecond > 999
+  ) {
+    throw new RangeError("invalid local date-time components");
+  }
+}
+
+function utcLikeInstant(parts: DateTimeParts): Date {
+  const d = new Date(0);
+  d.setUTCFullYear(parts.year, parts.month - 1, parts.day);
+  d.setUTCHours(parts.hour, parts.minute, parts.second, parts.millisecond);
+  return d;
+}
+
+function matchesLocalParts(d: Date, expected: DateTimeParts, timeZone: string): boolean {
+  const actual = partMap(d, timeZone);
+  return (
+    actual.year === expected.year &&
+    actual.month === expected.month &&
+    actual.day === expected.day &&
+    actual.hour === expected.hour &&
+    actual.minute === expected.minute &&
+    actual.second === expected.second &&
+    d.getUTCMilliseconds() === expected.millisecond
+  );
+}
+
+function nearbyOffsets(localEpochMs: number, timeZone: string): number[] {
+  const offsets = new Set<number>();
+  for (let hours = -48; hours <= 48; hours += 6) {
+    offsets.add(timeZoneOffsetMs(new Date(localEpochMs + hours * 3_600_000), timeZone));
+  }
+  return [...offsets];
+}
+
 export function timeZoneOffsetMs(d: Date, timeZone = config.tz): number {
   const p = partMap(d, timeZone);
-  const asUtc = Date.UTC(
-    p.year!,
-    p.month! - 1,
-    p.day!,
-    p.hour!,
-    p.minute!,
-    p.second!,
-    d.getUTCMilliseconds(),
-  );
-  return asUtc - d.getTime();
+  const localAsUtc = utcLikeInstant({
+    year: p.year!,
+    month: p.month!,
+    day: p.day!,
+    hour: p.hour!,
+    minute: p.minute!,
+    second: p.second!,
+    millisecond: d.getUTCMilliseconds(),
+  });
+  return localAsUtc.getTime() - d.getTime();
 }
 
 export function localDateTimeToUtc(
@@ -104,9 +174,40 @@ export function localDateTimeToUtc(
   timeZone = config.tz,
 ): Date {
   const tz = configuredTimeZone(timeZone);
-  const localAsUtc = Date.UTC(year, month - 1, day, hour, minute, second, millisecond);
-  const first = new Date(localAsUtc - timeZoneOffsetMs(new Date(localAsUtc), tz));
-  return new Date(localAsUtc - timeZoneOffsetMs(first, tz));
+  const parts = { year, month, day, hour, minute, second, millisecond };
+  assertDateTimeParts(parts);
+  const localEpochMs = utcLikeInstant(parts).getTime();
+  const candidates = nearbyOffsets(localEpochMs, tz)
+    .map((offset) => new Date(localEpochMs - offset))
+    .sort((a, b) => a.getTime() - b.getTime());
+  const exact = candidates.find((candidate) => matchesLocalParts(candidate, parts, tz));
+
+  // The first exact instant is the first occurrence in a fall-back overlap. If the wall
+  // time is inside a spring-forward gap, using the offset before the gap shifts it forward
+  // by the gap, matching RFC/Temporal's compatible disambiguation.
+  return exact ?? candidates[candidates.length - 1]!;
+}
+
+export function nextLocalMidnight(
+  year: number,
+  month: number,
+  day: number,
+  timeZone = config.tz,
+): Date {
+  const parts = { year, month, day, hour: 0, minute: 0, second: 0, millisecond: 0 };
+  assertDateTimeParts(parts);
+  let nextYear = year;
+  let nextMonth = month;
+  let nextDay = day + 1;
+  if (nextDay > daysInMonth(year, month)) {
+    nextDay = 1;
+    nextMonth++;
+    if (nextMonth > 12) {
+      nextMonth = 1;
+      nextYear++;
+    }
+  }
+  return localDateTimeToUtc(nextYear, nextMonth, nextDay, 0, 0, 0, 0, timeZone);
 }
 
 function pad(n: number, width = 2): string {
@@ -142,4 +243,27 @@ export function formatDateTimeInTimeZone(d: Date, timeZone = config.tz): string 
 // of how/where the daemon was launched. en-CA formats as YYYY-MM-DD. See DECISIONS.md.
 export function localDateStr(d: Date, timeZone = config.tz): string {
   return dayFormatter(timeZone).format(d);
+}
+
+/**
+ * Return the local calendar date `days` away from an instant. This deliberately
+ * adds to the YYYY-MM-DD value rather than adding 24-hour durations, which can
+ * skip or repeat a local date across daylight-saving transitions.
+ */
+export function addLocalCalendarDays(d: Date, days: number, timeZone = config.tz): string {
+  if (!Number.isInteger(days)) throw new RangeError("calendar-day offset must be an integer");
+  const [year, month, day] = localDateStr(d, timeZone).split("-").map(Number);
+  const shifted = utcLikeInstant({
+    year: year!,
+    month: month!,
+    day: day!,
+    hour: 0,
+    minute: 0,
+    second: 0,
+    millisecond: 0,
+  });
+  shifted.setUTCDate(shifted.getUTCDate() + days);
+  return `${pad(shifted.getUTCFullYear(), 4)}-${pad(shifted.getUTCMonth() + 1)}-${pad(
+    shifted.getUTCDate(),
+  )}`;
 }

@@ -12,14 +12,20 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertDedicatedDataRoot } from "./data-root";
+import { validateMinimeDatabasePair } from "./postgres-url";
 
 export const REPO_ROOT = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), "..", ".."));
 export const DB_DUMP_DIR = resolve(REPO_ROOT, "db-dump");
 
 export function resolveDataDir(value: string | undefined): string {
   const trimmed = value?.trim() ?? "";
-  if (!trimmed) return resolve(REPO_ROOT, "data");
-  return isAbsolute(trimmed) ? normalize(trimmed) : resolve(REPO_ROOT, trimmed);
+  const resolved = !trimmed
+    ? resolve(REPO_ROOT, "data")
+    : isAbsolute(trimmed)
+      ? normalize(trimmed)
+      : resolve(REPO_ROOT, trimmed);
+  return assertDedicatedDataRoot(resolved, REPO_ROOT);
 }
 
 export type PrivateDumpDirRule =
@@ -107,6 +113,68 @@ function env(name: string, fallback: string): string {
   return process.env[name] ?? fallback;
 }
 
+export const PROVIDER_NAMES = ["ollama", "anthropic", "openai", "openrouter", "bedrock"] as const;
+export type ProviderName = (typeof PROVIDER_NAMES)[number];
+export const EMBED_PROVIDER_NAMES = ["ollama", "openai", "openrouter"] as const;
+export type EmbedProviderName = (typeof EMBED_PROVIDER_NAMES)[number];
+
+/** Provider names are security-sensitive routing values, so aliases and normalization are refused. */
+export function parseProviderName(value: string, setting = "provider"): ProviderName {
+  if (!(PROVIDER_NAMES as readonly string[]).includes(value)) {
+    throw new Error(`${setting}_invalid`);
+  }
+  return value as ProviderName;
+}
+
+export function parseEmbedProviderName(value: string): EmbedProviderName {
+  if (!(EMBED_PROVIDER_NAMES as readonly string[]).includes(value)) {
+    throw new Error("EMBED_PROVIDER_invalid");
+  }
+  return value as EmbedProviderName;
+}
+
+export interface ProviderEnvironment {
+  embedProvider: EmbedProviderName;
+  classifyProvider: ProviderName;
+  providerRouteTier1?: ProviderName;
+  providerRouteTier2?: ProviderName;
+}
+
+/** Parse the provider-routing subset of an arbitrary environment with the same exact semantics. */
+export function parseProviderEnvironment(source: NodeJS.ProcessEnv): ProviderEnvironment {
+  const optional = (setting: "PROVIDER_ROUTE_TIER1" | "PROVIDER_ROUTE_TIER2") => {
+    const value = source[setting];
+    return value === undefined ? undefined : parseProviderName(value, setting);
+  };
+  return {
+    embedProvider: parseEmbedProviderName(source.EMBED_PROVIDER ?? "ollama"),
+    classifyProvider: parseProviderName(source.CLASSIFY_PROVIDER ?? "ollama", "CLASSIFY_PROVIDER"),
+    providerRouteTier1: optional("PROVIDER_ROUTE_TIER1"),
+    providerRouteTier2: optional("PROVIDER_ROUTE_TIER2"),
+  };
+}
+
+export const TIER2_UNLOCK_HARD_MAX_MINUTES = 1_440;
+
+export function parseTier2UnlockMaxMinutes(raw: string): number {
+  if (!/^[1-9]\d*$/.test(raw)) {
+    throw new Error("TIER2_UNLOCK_MAX_MINUTES must be a positive decimal integer");
+  }
+  const minutes = Number(raw);
+  if (!Number.isSafeInteger(minutes) || minutes > TIER2_UNLOCK_HARD_MAX_MINUTES) {
+    throw new Error(
+      `TIER2_UNLOCK_MAX_MINUTES must be between 1 and ${TIER2_UNLOCK_HARD_MAX_MINUTES}`,
+    );
+  }
+  return minutes;
+}
+
+export function assertTier2UnlockMaxMinutes(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 1 || value > TIER2_UNLOCK_HARD_MAX_MINUTES) {
+    throw new Error("TIER2_UNLOCK_MAX_MINUTES is invalid");
+  }
+}
+
 // Parse a minimal KEY=VALUE .env (full-line comments, unquoted-inline ` #` comments, blank
 // lines, `export ` prefix, surrounding quotes). Intentionally simple — not a full dotenv: no
 // interpolation or multiline values, none of which Minime's .env uses. Pure (no side effects)
@@ -140,6 +208,28 @@ export function parseDotenv(text: string): Record<string, string> {
   return out;
 }
 
+export type InstallPendingState = "ready" | "pending" | "invalid";
+
+/** Repository lifecycle state is authoritative for public migrate/serve entrypoints. */
+export function repositoryInstallPendingState(
+  source: NodeJS.ProcessEnv = process.env,
+  envPath = resolve(REPO_ROOT, ".env"),
+): InstallPendingState {
+  let persisted: string | undefined;
+  try {
+    if (existsSync(envPath)) {
+      persisted = parseDotenv(readFileSync(envPath, "utf8")).MINIME_PG_INSTALL_PENDING;
+    }
+  } catch {
+    return "invalid";
+  }
+  const ambient = source.MINIME_PG_INSTALL_PENDING;
+  if (persisted !== undefined && persisted !== "0" && persisted !== "1") return "invalid";
+  if (ambient !== undefined && ambient !== "0" && ambient !== "1") return "invalid";
+  if (persisted !== undefined && ambient !== undefined && persisted !== ambient) return "invalid";
+  return (persisted ?? ambient) === "1" ? "pending" : "ready";
+}
+
 // Fill only keys absent from `target` — a caller-provided var always wins. Pure given its
 // args (mutates `target` in place); unit-testable against a plain object.
 export function fillMissingEnv(parsed: Record<string, string>, target: NodeJS.ProcessEnv): void {
@@ -168,15 +258,11 @@ const databaseUrl = env("DATABASE_URL", "postgres://minime:minime@localhost:5432
 // restricted runtime role is cut over independently by the installer. One-shot owner commands
 // may use this fallback; resident `serve` refuses to start until the app endpoint is provisioned.
 const runtimeDatabaseUrl = env("MINIME_APP_DATABASE_URL", databaseUrl);
+// This runs at module load so no command can connect before both database aliases are proven to
+// be the same exact loopback server/database. The parser's error is fixed and never contains a DSN.
+validateMinimeDatabasePair(databaseUrl, runtimeDatabaseUrl);
 
-export type ProviderName = "ollama" | "anthropic" | "openai" | "openrouter" | "bedrock";
-
-// "" and unset both mean "no route". Name validation happens in src/llm/index.ts so a typo
-// fails loudly at first resolution, not silently at parse time.
-function routeEnv(name: string): ProviderName | undefined {
-  const v = process.env[name]?.trim();
-  return v ? (v as ProviderName) : undefined;
-}
+const providerEnvironment = parseProviderEnvironment(process.env);
 
 export const config = {
   databaseUrl,
@@ -186,15 +272,15 @@ export const config = {
   classifyModel: env("CLASSIFY_MODEL", "llama3.1:8b"),
   // LLM provider routing (I1 amendment, owner-approved — see DECISIONS.md 2026-06-11):
   // embeddings: ollama | openai (768-dim constraint); classify/scan: any provider below.
-  embedProvider: env("EMBED_PROVIDER", "ollama") as ProviderName,
-  classifyProvider: env("CLASSIFY_PROVIDER", "ollama") as ProviderName,
+  embedProvider: providerEnvironment.embedProvider,
+  classifyProvider: providerEnvironment.classifyProvider,
   // tier ceiling for content sent to CLOUD providers (tier 0 content is never sent
   // anywhere by construction — it is never chunked, classified, or scanned)
   cloudMaxTier: Number(env("CLOUD_MAX_TIER", "2")),
   // Per-tier classify routing (W3, DECISIONS.md 2026-07): optional stricter-only overrides of
   // CLASSIFY_PROVIDER per content tier. Tier 0 is never classified and has no route.
-  providerRouteTier1: routeEnv("PROVIDER_ROUTE_TIER1"),
-  providerRouteTier2: routeEnv("PROVIDER_ROUTE_TIER2"),
+  providerRouteTier1: providerEnvironment.providerRouteTier1,
+  providerRouteTier2: providerEnvironment.providerRouteTier2,
   anthropicApiKey: process.env.ANTHROPIC_API_KEY,
   anthropicModel: env("ANTHROPIC_MODEL", "claude-opus-4-8"),
   openaiApiKey: process.env.OPENAI_API_KEY,
@@ -208,7 +294,7 @@ export const config = {
   openrouterEmbedModel: env("OPENROUTER_EMBED_MODEL", "qwen/qwen3-embedding-8b"),
   bedrockModel: process.env.BEDROCK_MODEL, // required for bedrock; ids aren't guessable
   tz: env("TZ", "Asia/Singapore"),
-  tier2UnlockMaxMinutes: Number(env("TIER2_UNLOCK_MAX_MINUTES", "60")),
+  tier2UnlockMaxMinutes: parseTier2UnlockMaxMinutes(env("TIER2_UNLOCK_MAX_MINUTES", "60")),
   resticRepository: process.env.RESTIC_REPOSITORY,
   resticPasswordFile: process.env.RESTIC_PASSWORD_FILE,
   dreamCron: env("DREAM_CRON", "0 3 * * *"),

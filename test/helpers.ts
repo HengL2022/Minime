@@ -19,9 +19,23 @@ export async function resetDb(): Promise<void> {
     "touch_decision_from_transcript",
     "sync_decision_branch_update",
     "edge_source_tier",
+    "readable_source_tier",
     "set_edge_tier",
     "app_allowed_tier",
+    "app_request_tier2_unlock",
     "metric_agg",
+    "keep_entity_tier_monotonic",
+    "cascade_entity_tier_to_aliases",
+    "set_entity_alias_tier",
+    "person_has_nonworking_relation",
+    "touch_person_last_contact",
+    "set_person_relation_if_null",
+    "exact_active_org_exists",
+    "resolve_or_promote_entity",
+    "resolve_or_promote_extracted_person",
+    "resolve_or_promote_extracted_org",
+    "upsert_derived_alias",
+    "upsert_extracted_edge",
   ];
   for (const f of fns) {
     await sql.unsafe(`drop function if exists ${f} cascade`);

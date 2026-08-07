@@ -1,7 +1,9 @@
-import { mkdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { z } from "zod";
-import { insertInboxItem } from "../../db/repo";
+import { withDurableRuntimeDbTransaction } from "../../db/client";
+import { ensureInboxItemIdentity, rejectRetryableInboxItem } from "../../db/repo";
+import { atomicWritePrivate } from "../../util/atomic-file";
 import { now } from "../../util/clock";
 import { config } from "../../util/config";
 import { envelope } from "../envelope";
@@ -17,17 +19,28 @@ export const captureTool: ToolDef = {
   },
   handler: async (params, ctx) => {
     const inboxDir = join(config.dataDir, "inbox");
-    await mkdir(inboxDir, { recursive: true });
     const ts = now().toISOString().replace(/[:.]/g, "-");
     const name = `capture-${ts}-${Math.random().toString(36).slice(2, 8)}.md`;
     const path = join(inboxDir, name);
     const body = params.hint ? `<!-- hint: ${params.hint} -->\n${params.text}` : params.text;
-    await Bun.write(path, body);
-    const { id } = await insertInboxItem({
-      rawPath: path,
-      mime: "text/markdown",
-      createdBy: ctx.actor,
-    });
-    return envelope({ inbox_item_id: id, path }, [{ type: "inbox_item", id }]);
+    const { id } = await withDurableRuntimeDbTransaction(() =>
+      ensureInboxItemIdentity({
+        rawPath: path,
+        mime: "text/markdown",
+        contentHash: createHash("sha256").update(body).digest("hex"),
+        createdBy: ctx.actor,
+      }),
+    );
+    // Publish only after the identity row commits. The watcher observes atomic rename, so it can
+    // never win a file-visible/row-missing race or lose the requesting actor's provenance.
+    try {
+      await atomicWritePrivate(path, body);
+    } catch (error) {
+      await withDurableRuntimeDbTransaction(() =>
+        rejectRetryableInboxItem(id, "capture source publication failed"),
+      ).catch(() => {});
+      throw error;
+    }
+    return envelope({ inbox_item_id: id }, [{ type: "inbox_item", id }]);
   },
 };

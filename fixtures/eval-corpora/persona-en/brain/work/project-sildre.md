@@ -19,7 +19,7 @@ firmware, I own the DSP blocks.
 
 - Prototype review: passed 18 February 2026.
 - Wet test with 6 nodes off Munkholmen: completed 7 May 2026, two nodes had connector
-  corrosion issues (fixed with new Subconn connectors).
+  corrosion issues (fixed with new Bluefin wet-mate connectors).
 - Full 36-node field deployment deadline: 22 August 2026.
 - Final report to the Research Council: March 2027.
 

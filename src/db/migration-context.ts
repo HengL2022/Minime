@@ -1,5 +1,6 @@
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
+import type { DbPool } from "./client";
 
 export type MigrationContext =
   | { kind: "install" }
@@ -167,13 +168,16 @@ async function databaseName(): Promise<string> {
 }
 
 export async function inspectSchemaPosture(): Promise<SchemaPosture> {
-  const expected = await checkedOutMigrationNames();
   const { adminSql } = await import("./client");
+  return inspectSchemaPostureWithExecutor(adminSql);
+}
+
+export async function inspectSchemaPostureWithExecutor(executor: DbPool): Promise<SchemaPosture> {
+  const expected = await checkedOutMigrationNames();
+  const { schemaMigrationNames } = await import("./repo");
   let applied: string[] = [];
   try {
-    applied = (await adminSql`select name from schema_migrations order by name`).map((row) =>
-      String(row.name),
-    );
+    applied = await schemaMigrationNames(executor);
   } catch (error) {
     if ((error as { code?: string }).code !== "42P01") throw error;
   }
@@ -191,22 +195,31 @@ export async function assertSchemaCurrent(): Promise<void> {
 export async function migrate(context: MigrationContext): Promise<string[]> {
   const name = await databaseName();
   assertMigrationContextForDatabase(context, name);
-  const expected = await checkedOutMigrationNames();
   const { adminSql } = await import("./client");
-  await adminSql`create table if not exists schema_migrations (
-    name text primary key, applied_at timestamptz not null default now()
-  )`;
-  const applied = new Set(
-    (await adminSql`select name from schema_migrations`).map((row) => String(row.name)),
-  );
+  return migrateWithExecutor(context, adminSql);
+}
+
+export async function migrateWithExecutor(
+  context: MigrationContext,
+  executor: DbPool,
+): Promise<string[]> {
+  const { connectedAdminDatabaseName } = await import("./repo");
+  const connectedName = await connectedAdminDatabaseName(executor);
+  assertMigrationContextForDatabase(context, connectedName);
+  return applyMigrations(executor);
+}
+
+async function applyMigrations(executor: DbPool): Promise<string[]> {
+  const expected = await checkedOutMigrationNames();
+  const { applyCheckedOutMigration, ensureSchemaMigrationLedger, schemaMigrationNames } =
+    await import("./repo");
+  await ensureSchemaMigrationLedger(executor);
+  const applied = new Set(await schemaMigrationNames(executor));
   const ran: string[] = [];
   for (const file of expected) {
     if (applied.has(file)) continue;
     const body = await Bun.file(join(MIGRATIONS_DIR, file)).text();
-    await adminSql.begin(async (tx) => {
-      await tx.unsafe(body);
-      await tx`insert into schema_migrations (name) values (${file})`;
-    });
+    await applyCheckedOutMigration(executor, file, body);
     ran.push(file);
   }
   return ran;

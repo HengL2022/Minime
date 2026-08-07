@@ -5,10 +5,10 @@
 > and owner veto checkpoints are superseded by `docs/DEVELOPMENT.md`. Resume W5–W9 as ordinary
 > outcome-sized work only after the active release-closure list is complete.
 
-Historical source: `~/Downloads/minime-improvement-plan.md` (owner-reviewed proposal, 2026-07-18), grounded
-against main @ `2c49cb2` by four read-only reconnaissance passes (provider layer, dream/extract/
-review-queue, DB/infra/conventions, search/ingest/eval). This document was the shared contract for
-workstreams W1–W9; it is now roadmap reference only.
+Historical source: an owner-reviewed proposal from 2026-07-18, grounded against main @ `2c49cb2`
+by four read-only reconnaissance passes (provider layer, dream/extract/review-queue,
+DB/infra/conventions, search/ingest/eval). This document was the shared contract for workstreams
+W1–W9; it is now roadmap reference only.
 
 > Historical instruction: the original program dispatched a fresh executor per task card through
 > Superpowers. That model is inactive; use the multi-agent rules in `docs/DEVELOPMENT.md`.
@@ -162,8 +162,8 @@ BLEU/ROUGE answer-level metrics. Rationale stands as written there; revisit trig
 ```markdown
 ## 2026-07-18 — Adopted the 2026-07 improvement program (W1–W9)
 
-- **Context:** External repo review + WeKnora v0.6.0 comparative study produced
-  ~/Downloads/minime-improvement-plan.md. Reconnaissance against main@2c49cb2 grounded it.
+- **Context:** External repo review + WeKnora v0.6.0 comparative study produced an owner-reviewed
+  improvement proposal. Reconnaissance against main@2c49cb2 grounded it.
 - **Decision:** Execute W3→W1→W4+W2 (phase 1), W5→W6 (2), W8 (3), W7 (4), W9 (last) per
   .claude/plans/improve-2026-07-program.md; orchestrator Fable 5, executors + first-pass
   review Sonnet 5, critical review invariant-reviewer (Fable). Rejected adoptions recorded:

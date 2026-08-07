@@ -23,12 +23,13 @@ git clone https://github.com/HengL2022/Minime minime && cd minime && bash script
 | `--with-demo` | Load the fictional demo dataset (off by default — this is a personal database) |
 | `--no-ollama` | Skip the LLM stack → degraded mode (see below) |
 | `--skip-verify` | Skip the post-install verification suite |
-| `--native` | Use native Postgres even when Docker is available |
+| `--native` | Select native Postgres on first install even when Docker is available |
 | `--dry-run` | Print what would happen; only read-only detection runs |
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `MINIME_PG_PORT` | 5432 | Host port for Postgres (use when 5432 is taken) |
+| `MINIME_PG_BACKEND` | auto-detect once | First-install choice (`native` or `docker`); installer persists it in `.env` |
+| `MINIME_PG_PORT` | 5432 | First-install host port (1–65535); installer persists it in `.env` |
 | `MINIME_PULL_TIMEOUT` | 2400 | Seconds before a model pull degrades instead of blocking |
 | `MINIME_PULL_MODELS` | both models | Override which Ollama models to pull |
 | `OLLAMA_URL` | http://localhost:11434 | Existing Ollama server to use |
@@ -37,6 +38,14 @@ OLLAMA_URL is loopback-only. Minime validates it before every CLI/install/up act
 directly without proxy environment or DNS for localhost, and never follows redirects.
 HTTPS/base-path endpoints are treated as existing local proxies; Minime will not launch a
 different plain ollama serve for them. Remote inference uses an explicit cloud provider.
+
+Postgres backend, port, and the exact owner `DATABASE_URL` are one persisted lifecycle identity.
+Install, `make up`, and `make down` reuse it; reruns do not switch merely because Docker later
+appears or disappears. Invalid, remote, split, or ambiguous legacy state fails before database
+actions and never prints credentials. Before first bootstrap, the installer records the exact
+identity with an internal `MINIME_PG_INSTALL_PENDING=1` marker and clears it only after both
+databases, extensions, role ownership, and exact credentials pass. If interrupted, rerun the
+installer; daily start, update, migrate, and serve deliberately refuse pending state.
 
 ## Reading the output
 
@@ -97,15 +106,20 @@ different vector spaces). After changing `EMBED_PROVIDER`/`*_EMBED_MODEL`, run
 rejected loudly, never stored).
 
 Privacy contract: cloud providers receive content up to `CLOUD_MAX_TIER` (default 2; tier-0
-financial/health content **never** leaves the box on any path). Every cloud call writes an
-audited `events` row (`egress:embed` / `egress:classify` — counts, never contents), visible
-via `bun run src/cli.ts audit`. Mixed setups work (e.g. classify via Anthropic, embed via
-local Ollama). Embeddings are pinned to 768 dims by the schema, hence the embed column above.
+financial/health content **never** leaves the box on any path). Every cloud call first commits an
+audited intent row (`egress:embed` / `egress:classify`), then appends a fixed success/failure
+outcome; both contain counts and routing metadata, never contents, and the intent survives a later
+handler rollback. They are visible via `bun run src/cli.ts audit`. Mixed setups work (e.g.
+classify via Anthropic, embed via local Ollama). Embeddings are pinned to 768 dims by the schema,
+hence the embed column above.
 
 **Per-tier routing (W3):** `PROVIDER_ROUTE_TIER1` / `PROVIDER_ROUTE_TIER2` override
 `CLASSIFY_PROVIDER` for content of that tier (embeddings are NOT tier-routable — one vector
 space per index). Routes may only be stricter than `CLOUD_MAX_TIER`; violations fail at
-startup. Classify egress from the tier-routed pipeline call sites carries the resolved
+startup when an explicit per-tier route violates the ceiling. An implicit cloud fallback
+above the ceiling may remain configured so the local daemon can run in degraded/manual-review
+mode; every effective classification job rejects before provider construction, audit, or
+network fetch. Classify egress from the tier-routed pipeline call sites carries the resolved
 `route_tier` (embed and script-driven classify egress carry none). Raw inbox captures (tier
 unknown until classified) route as tier 2.
 
@@ -114,6 +128,11 @@ unknown until classified) route as tier 2.
 The server is stdio: `bun run <ABS_REPO_PATH>/src/cli.ts serve`. The command keeps owner-only
 maintenance in a supervisor and starts the inbox watcher plus MCP transport in a scrubbed
 app-role child; the MCP-reachable process does not receive the owner DB or backup credential.
+The child starts without repository dotenv loading and receives only an explicit runtime-setting
+allowlist plus credentials for providers selected by its active routes; ambient tokens, proxy
+variables, debug flags, and unused provider credentials are not forwarded. Provider names are
+exact lowercase enum values; whitespace, case variants, and unknown values fail closed before the
+child starts.
 Use **absolute paths** outside the repo.
 Backup-only B2/AWS credentials stay in the supervisor. Bedrock uses separate `BEDROCK_AWS_*`
 variables and must be given a Bedrock-scoped IAM principal, never an S3-backup-capable key.
@@ -138,17 +157,32 @@ Service files are not guaranteed removed under that refusal; no path, URL, child
 secret is printed. pg_dump credentials use short-lived mode-0600 libpq service files, never
 database URLs on argv or in PGDATABASE. Before replacement, backup retains a verified private
 `.previous` dump+manifest pair; the new dump and manifest are each fsynced and atomically renamed.
+Recovery commands parse `.env` as inert data in a TypeScript wrapper and pass only an allowlisted
+environment to the maintained shell scripts; caller values take precedence and `.env` is never
+sourced as shell. `make restore-drill` requires a real restic snapshot and labels its source.
 Restore verifies the exact pair, rejects any non-local or wrongly named target before database
-commands, and checks the restored ledger/counts afterward. Output uses fixed content-free
-failures and never prints live or restore connection URLs.
+commands, checks the snapshot ledger/counts, migrates only the scratch database to the checked-out
+ledger, and verifies the current safety posture. `make verify-restore-e2e` proves that path in an
+isolated fictional-data PostgreSQL cluster and local restic repository. Output uses fixed
+content-free failures and never prints live or restore connection URLs.
+Promotion is a separate owner action: it requires idle live/restore databases with no prepared
+transactions, writes a private live safety dump, blocks connections, and performs a guarded
+two-step rename. A failed second rename is compensated back to `minime`; a successful cutover
+retains the prior database as connection-blocked `minime_replaced`. A `compensation_failed`
+result requires owner inspection before retry.
 Changing MINIME_DATA_DIR does not move existing data.
 
 13 tools: `minime_search`, `minime_get_context`, `minime_state`, `minime_query_metric`,
 `minime_capture`, `minime_journal`, `minime_log_decision`, `minime_review_decision`,
 `minime_upsert_task`, `minime_agenda`, `minime_log_interaction`, `minime_review_queue`,
 `minime_unlock`. Numbers come only from `minime_query_metric`; tier-2 reads (journal,
-interactions, email metadata, private decisions) need `minime_unlock`; tier-0
-(transactions, health) is never readable — aggregates only.
+interactions, email metadata, private decisions) need an owner-approved unlock. After the
+agent asks and the owner agrees, `minime_unlock` creates a pending request and returns its ID
+and local approval command. The owner runs
+`bun run src/cli.ts unlock:approve <request-id>` in their own terminal within 10 minutes. Approval is
+time-boxed, loudly audited, bound to the current unguessable MCP connection session, and a
+reconnect is locked again. Tier-0 transactions and health data are never readable — aggregates
+only.
 
 Before using Minime MCP tools, agent harnesses should read
 `agents/skills/RESOLVER.md`, then read the specific skill file it routes to. The resolver is
@@ -160,15 +194,25 @@ decision fields. All tools accept optional `time_zone` (IANA name, e.g.
 `America/Los_Angeles`) when the harness knows the owner's current timezone; Minime stores
 canonical timestamps but interprets "today" and date-only inputs in that timezone and renders
 timestamp outputs with that timezone's offset.
+Calendar import additionally preserves UTC/`TZID`, treats floating and all-day values in the
+configured owner timezone, and rejects invalid calendar values rather than normalizing them.
+Metric day buckets use the MCP call timezone; only the owner-side dream job persists rollups in
+the configured timezone. That cache records its timezone identity, rebuilds atomically when the
+identity changes, and reconciles mutable source windows without overwriting manual values. Dream
+and backup cron expressions are also evaluated in that configured timezone, independent of the
+process timezone.
 
 ## Engineering access (W4)
 
 Engineering sessions — an agent poking at the database directly, not through the MCP tools —
 never connect as the full-rights owner role. Ad-hoc reads use the SELECT-only login role
 `minime_engineer_ro` via the committed `.env.engineering` DSN: `make psql-ro`. The role is
-RLS-gated exactly like any other agent session (tier-2 content stays hidden without an
-unlock; tier-0 tables — `transactions`, `health_samples` — are revoked outright, I3) and
-holds no INSERT/UPDATE/DELETE/TRUNCATE grant anywhere.
+permanently capped at tier 1: it cannot request, inspect, inherit, or replay a tier-2 unlock.
+Tier-2 engineering reads go only through the normal MCP owner-approved session path. Tier-0
+tables — `transactions`, `health_samples` — are revoked outright (I3), and the role holds no
+INSERT/UPDATE/DELETE/TRUNCATE grant anywhere.
+Readable tables are an explicit migration-reviewed allowlist; raw event payloads, review queues,
+edge-validation explanations, unlock rows, and future tables are denied by default.
 
 Three sanctioned write paths during engineering, nothing else:
 
@@ -214,7 +258,8 @@ if a resident `serve` still runs old code. **Never touches `.env*`, `data/`, or 
 — they are gitignored, so `git pull` cannot write them. Same output contract as the
 installer: `[N/7] OK|SKIP|WARN|FAIL` lines, `ERROR:`/`FIX:` on failure, machine-parsable
 `==== MINIME UPDATE SUMMARY ====` block (parse `status:` / `version:`). Exit codes:
-`0` ok, `1` pre-update backup, `2` bad flag, `30` git (dirty tree / diverged / no network), `11` deps,
+`0` ok, `1` pre-update backup, `2` bad flag, `10` Bun pin/install, `11` deps,
+`30` git (dirty tree / diverged / no network),
 `50` migrate, `70` verify.
 
 Refuses to run over local modifications to tracked files (FIX: stash). Existing installs that
@@ -225,6 +270,6 @@ name is compatibility wording, not a WAL/PITR claim). Promotion stays a delibera
 
 ## Uninstall / reset
 
-- Stop: `make down` (Docker) or `brew services stop postgresql@17` / `systemctl stop postgresql@16-main`.
+- Stop: `make down` uses the persisted Docker/native backend and refuses to infer another service.
 - **Destructive**: `docker compose down -v` deletes the database volume. Your captured
   files stay in `data/` either way — that directory is the archive; treat it like one.

@@ -15,7 +15,9 @@ import {
 } from "node:fs";
 import { lstat, open, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { withAdminDbTransaction } from "../src/db/client";
 import { logEvent } from "../src/db/repo";
+import { auditPayload } from "../src/util/audit-payload";
 import { DB_DUMP_DIR, config, ensurePrivateDumpDir } from "../src/util/config";
 import { createLibpqService, registerEphemeralCleanup } from "../src/util/libpq-service";
 import type { LibpqServiceLease } from "../src/util/libpq-service";
@@ -32,6 +34,8 @@ export const REPAIR_MODULE_FAILURE_CODE = "repair_module_failed";
 export const REPAIR_MODULE_FAILURE_MESSAGE = "repair failed (fixed code: repair_module_failed)";
 export const REPAIR_CLEANUP_FAILURE_CODE = "repair_cleanup_failed";
 export const REPAIR_CLEANUP_FAILURE_MESSAGE = "repair failed (fixed code: repair_cleanup_failed)";
+export const REPAIR_AUDIT_FAILURE_CODE = "repair_audit_failed";
+export const REPAIR_AUDIT_FAILURE_MESSAGE = "repair failed (fixed code: repair_audit_failed)";
 export const REPAIR_BACKUP_FAILURE_CODE = "repair_backup_failed";
 export const REPAIR_BACKUP_FAILURE_MESSAGE = "repair failed (fixed code: repair_backup_failed)";
 export const REPAIR_INVALID_SUMMARY_CODE = "repair_invalid_summary";
@@ -325,7 +329,7 @@ async function preImageDump(scriptName: string, dumpDir: string): Promise<string
 
 export const __preImageDumpForTest = preImageDump;
 
-type SafeRepairSummary = { counts: Record<string, number>; ids: string[] };
+type SafeRepairSummary = { counts: { edges_repointed?: number }; ids: string[] };
 
 function safeSummary(value: unknown): SafeRepairSummary | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
@@ -337,10 +341,10 @@ function safeSummary(value: unknown): SafeRepairSummary | undefined {
       Array.isArray(candidate.counts)
     )
       return undefined;
-    const counts: Record<string, number> = {};
+    const counts: { edges_repointed?: number } = {};
     for (const [key, count] of Object.entries(candidate.counts)) {
       if (
-        !/^[a-z][a-z0-9_]*$/.test(key) ||
+        key !== "edges_repointed" ||
         typeof count !== "number" ||
         !Number.isSafeInteger(count) ||
         count < 0
@@ -372,12 +376,27 @@ function safeSummary(value: unknown): SafeRepairSummary | undefined {
 
 export const __safeRepairSummaryForTest = safeSummary;
 
-async function repairFailure(verb: string, code: string, message: string): Promise<number> {
+type RepairAuditInput = Parameters<typeof auditPayload.repair>[0];
+type RepairAuditFailureCode = Extract<RepairAuditInput, { phase: "failed" }>["code"];
+
+function repairScript(verb: string): RepairAuditInput["script"] {
+  return verb === "repair:retype-org-to-person" ? "retype-org-to-person" : "unknown";
+}
+
+async function repairFailure(
+  verb: string,
+  code: RepairAuditFailureCode,
+  message: string,
+): Promise<number> {
   try {
     await logEvent({
       actor: "system:repair",
       verb,
-      payload: { phase: "failed", code, counts: {}, ids: [] },
+      payload: auditPayload.repair({
+        script: repairScript(verb),
+        phase: "failed",
+        code,
+      }),
     });
   } catch {
     /* fixed failure remains the caller contract */
@@ -391,7 +410,8 @@ async function runRepairImpl(
   args: string[],
   opts: { dumpDir?: string } = {},
 ): Promise<number> {
-  const verb = /^[a-z0-9-]+$/.test(scriptName) ? `repair:${scriptName}` : "repair:invalid";
+  const verb =
+    scriptName === "retype-org-to-person" ? "repair:retype-org-to-person" : "repair:unknown";
   if (
     !/^[a-z0-9-]+$/.test(scriptName) ||
     !(await committed(scriptName)) ||
@@ -418,25 +438,43 @@ async function runRepairImpl(
       : repairFailure(verb, REPAIR_BACKUP_FAILURE_CODE, REPAIR_BACKUP_FAILURE_MESSAGE);
   }
   try {
-    const summary = safeSummary(await mod.run(args));
-    if (!summary)
-      return repairFailure(
-        verb,
-        REPAIR_INVALID_SUMMARY_CODE,
-        "repair failed (fixed code: repair_invalid_summary)",
-      );
+    const state: { phase: "module" | "summary" | "audit" } = { phase: "module" };
     try {
-      await logEvent({
-        actor: "system:repair",
-        verb,
-        payload: { phase: "complete", code: "repair_complete", ...summary },
+      await withAdminDbTransaction(async () => {
+        const rawSummary = await mod.run(args);
+        state.phase = "summary";
+        const summary = safeSummary(rawSummary);
+        if (!summary) throw new Error(REPAIR_INVALID_SUMMARY_CODE);
+        state.phase = "audit";
+        if (verb !== "repair:retype-org-to-person") throw new Error(REPAIR_AUDIT_FAILURE_CODE);
+        // The completion event is part of the same owner transaction as the repair. If this
+        // required audit write fails, every mutation is rolled back before repairFailure logs.
+        await logEvent({
+          actor: "system:repair",
+          verb,
+          payload: auditPayload.repair({
+            script: "retype-org-to-person",
+            phase: "complete",
+            code: "repair_complete",
+            counts: summary.counts,
+            ids: summary.ids,
+          }),
+        });
       });
+      return 0;
     } catch {
-      return repairFailure(verb, REPAIR_CLEANUP_FAILURE_CODE, REPAIR_CLEANUP_FAILURE_MESSAGE);
+      if (state.phase === "summary") {
+        return repairFailure(
+          verb,
+          REPAIR_INVALID_SUMMARY_CODE,
+          "repair failed (fixed code: repair_invalid_summary)",
+        );
+      }
+      if (state.phase === "audit") {
+        return repairFailure(verb, REPAIR_AUDIT_FAILURE_CODE, REPAIR_AUDIT_FAILURE_MESSAGE);
+      }
+      return repairFailure(verb, REPAIR_MODULE_FAILURE_CODE, REPAIR_MODULE_FAILURE_MESSAGE);
     }
-    return 0;
-  } catch {
-    return repairFailure(verb, REPAIR_MODULE_FAILURE_CODE, REPAIR_MODULE_FAILURE_MESSAGE);
   } finally {
     repairModuleForTest = undefined;
   }
