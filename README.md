@@ -10,7 +10,7 @@ Original v1 plan: [minime-build-plan.md](minime-build-plan.md)
 ## What's new in this release (August 2026)
 
 This is primarily a trust, durability, and time-correctness release. The public MCP surface remains
-small—13 functions—but the paths behind it are substantially stronger:
+small—14 functions—but the paths behind it are substantially stronger:
 
 - **Owner-approved private reads.** `minime_unlock` now creates a pending request that must be
   approved locally, expires quickly, is bound to one MCP connection, and never opens tier 0.
@@ -153,8 +153,11 @@ the unlock gate). Confirmation-gated install, backs up `~/.claude/settings.json`
 
 ## Agent functions and release changes
 
-No new top-level MCP function name was added in this release; the public set remains the 13
-functions below. Several contracts changed in ways clients should notice:
+One new top-level MCP function was added in this release: `minime_list_metrics`, which lists
+every queryable metric (name, unit, description, rollup) with no SQL exposed, so agents can find
+a valid metric name before calling `minime_query_metric`—the same tool `UNKNOWN_METRIC` errors
+now point to. The public set is now the 14 functions below. Several other contracts changed in
+ways clients should notice:
 
 - `minime_unlock` now returns a pending request and a local approval command instead of unlocking
   immediately.
@@ -172,6 +175,7 @@ The new owner-side entry points are `bun run src/cli.ts unlock:approve <request-
 | `minime_search` | Hybrid-searches readable notes and structured memory with source citations. |
 | `minime_get_context` | Returns one entity plus readable relations, tasks, commitments, and exact provenance. |
 | `minime_state` | Builds a today-oriented snapshot: calendar, tasks, commitments, reviews, anomalies, and queue counts. |
+| `minime_list_metrics` | Lists every queryable metric—name, unit, description, rollup—with no SQL exposed; call before `minime_query_metric` when unsure of a name. |
 | `minime_query_metric` | Computes allowlisted numeric series in the caller's timezone; the only aggregate path to tier-0 data. |
 | `minime_capture` | Durably allocates and publishes an immutable text/Markdown inbox capture. |
 | `minime_journal` | Writes a private journal entry with optional mood and energy. |

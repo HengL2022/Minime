@@ -172,10 +172,13 @@ retains the prior database as connection-blocked `minime_replaced`. A `compensat
 result requires owner inspection before retry.
 Changing MINIME_DATA_DIR does not move existing data.
 
-13 tools: `minime_search`, `minime_get_context`, `minime_state`, `minime_query_metric`,
-`minime_capture`, `minime_journal`, `minime_log_decision`, `minime_review_decision`,
-`minime_upsert_task`, `minime_agenda`, `minime_log_interaction`, `minime_review_queue`,
-`minime_unlock`. Numbers come only from `minime_query_metric`; tier-2 reads (journal,
+14 tools: `minime_search`, `minime_get_context`, `minime_state`, `minime_list_metrics`,
+`minime_query_metric`, `minime_capture`, `minime_journal`, `minime_log_decision`,
+`minime_review_decision`, `minime_upsert_task`, `minime_agenda`, `minime_log_interaction`,
+`minime_review_queue`, `minime_unlock`. `minime_list_metrics` lists every queryable metric
+(name, unit, description, rollup) with no SQL exposed — call it before `minime_query_metric`
+when unsure of a metric name; `UNKNOWN_METRIC` errors point here too. Numbers come only from
+`minime_query_metric`; tier-2 reads (journal,
 interactions, email metadata, private decisions) need an owner-approved unlock. After the
 agent asks and the owner agrees, `minime_unlock` creates a pending request and returns its ID
 and local approval command. The owner runs
