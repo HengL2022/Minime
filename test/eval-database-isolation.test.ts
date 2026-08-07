@@ -131,11 +131,11 @@ const WRAPPER_HARNESS = `
       }
     },
     bootstrapOwnedDatabase: async (appOnly) => {
-      if (process.env.MINIME_APP_DATABASE_URL !== undefined) {
-        throw new Error("bootstrap_live_app_endpoint_not_cleared");
-      }
       if (process.env.DATABASE_URL !== plan.databaseUrl) {
         throw new Error("bootstrap_scratch_database_not_installed");
+      }
+      if (process.env.MINIME_APP_DATABASE_URL !== plan.databaseUrl) {
+        throw new Error("bootstrap_scratch_app_alias_not_installed");
       }
       if (phase === "bootstrap-failure") throw new Error("bootstrap failed");
       if (phase === "bootstrap-signal") {
@@ -554,7 +554,7 @@ describe("database-reset eval isolation", () => {
   );
 
   test(
-    "executable wrapper harness clears live app endpoint and restores it after success, failures, and signals",
+    "executable wrapper harness replaces live app endpoint and restores it after success, failures, and signals",
     async () => {
       const succeeded = runWrapperHarness("success");
       const successExitCode = await succeeded.exited;
@@ -763,7 +763,7 @@ describe("database-reset eval isolation", () => {
       "real SIGTERM child path disposes the generated target",
       "real SIGINT child path disposes the generated target",
       "keep-forensics prints one exact owned target for validated recovery",
-      "executable wrapper harness clears live app endpoint and restores it after success, failures, and signals",
+      "executable wrapper harness replaces live app endpoint and restores it after success, failures, and signals",
       "two simultaneous wrappers serialize cloning and leave distinct targets",
     ]) {
       const start = source.indexOf(`\n    \"${name}\",`);

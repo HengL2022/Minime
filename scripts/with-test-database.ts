@@ -284,10 +284,10 @@ export async function runWithOwnedTestDatabase(
     process.env.DATABASE_URL = handle.plan.databaseUrl;
     // A completed install exports the live runtime-role endpoint. The bootstrap below imports
     // production config after DATABASE_URL has moved to this scratch database, so retaining that
-    // live alias would correctly fail owner/app endpoint validation. Bootstrap is owner-only; let
-    // config fall back to the scratch owner DSN, then childEnvironment installs the minted scratch
-    // app endpoint for app-only workers.
-    Reflect.deleteProperty(process.env, "MINIME_APP_DATABASE_URL");
+    // live alias would correctly fail owner/app endpoint validation. Set the alias explicitly so
+    // repo-dotenv fallback cannot restore the live value; bootstrap is owner-only, and
+    // childEnvironment installs the minted scratch app endpoint for app-only workers.
+    process.env.MINIME_APP_DATABASE_URL = handle.plan.databaseUrl;
     if (command.databaseEnv) process.env[command.databaseEnv] = handle.plan.databaseUrl;
     let result = signalCode ?? 1;
     let primaryError: unknown;
