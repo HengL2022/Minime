@@ -26,7 +26,7 @@ auto-resolve).
      `minime_get_context`, show the two claims side by side with dates, ask which stands.
      The owner's answer is a *new* capture or correction — never edit or delete the old rows
      (append-only history); then resolve.
-   - **stale** — "haven't touched [label] in 200+ days but referenced it this week — still
+   - **stale** — "haven't touched [label] in 180+ days but referenced it this week — still
      true / update / ignore?" A `[above current tier]` label means the row is tier-locked;
      offer an unlock rather than guessing what it is. After the owner agrees, request it with
      `minime_unlock`, give them the returned local approval command, and wait for approval before
