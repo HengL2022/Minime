@@ -233,15 +233,18 @@ describe("owner-approved session unlock", () => {
       () => requestTier2Unlock(5),
       sessionId,
     );
-    const child = Bun.spawn([process.execPath, "run", "src/cli.ts", "unlock:approve", request.id], {
-      cwd: new URL("..", import.meta.url).pathname,
-      env: {
-        ...process.env,
-        OLLAMA_URL: "http://example.test:11434",
+    const child = Bun.spawn(
+      [process.execPath, "--no-env-file", "run", "src/cli.ts", "unlock:approve", request.id],
+      {
+        cwd: new URL("..", import.meta.url).pathname,
+        env: {
+          ...process.env,
+          OLLAMA_URL: "http://example.test:11434",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
       },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    );
     const [code, stdout, stderr] = await Promise.all([
       child.exited,
       new Response(child.stdout).text(),

@@ -2112,6 +2112,23 @@ describe("owned child wrapper contract", () => {
 });
 
 describe("setup cleanup contract", () => {
+  test("preload scrubs installed lifecycle state before importing application config", () => {
+    const source = readFileSync(resolve(repoRoot, "test/setup.ts"), "utf8");
+    const applicationImport = 'import("../src/db/migrate")';
+
+    for (const name of [
+      "MINIME_APP_DATABASE_URL",
+      "MINIME_APP_PASSWORD",
+      "MINIME_PG_BACKEND",
+      "MINIME_PG_PORT",
+      "MINIME_PG_INSTALL_PENDING",
+      "BACKUP_CRON",
+    ]) {
+      expect(source).toContain(`"${name}"`);
+      expect(source.indexOf(`"${name}"`)).toBeLessThan(source.indexOf(applicationImport));
+    }
+  });
+
   test("identical closer registrations remain distinct and independently removable", async () => {
     const { createTestDatabaseCloserRegistry } = await import("./setup");
     const registry = createTestDatabaseCloserRegistry();

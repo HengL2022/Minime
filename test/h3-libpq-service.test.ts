@@ -154,6 +154,7 @@ describe("private libpq service handoff", () => {
     const target = join(root, "target");
     const serviceFile = join(root, "pg_service.conf");
     writeFileSync(target, "foreign target\n", { mode: 0o640 });
+    chmodSync(target, 0o640);
     symlinkSync(target, serviceFile);
     await expect(
       writeLibpqServiceFile("postgres://user:pass@localhost/db", serviceFile),

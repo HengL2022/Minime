@@ -4443,6 +4443,7 @@ Mira keeps a field notebook.
           await atomicWritePrivate(target, bytes);
           if (writes === 1) {
             await writeFile(collisionPath, sentinel, { flag: "wx", mode: 0o640 });
+            await chmod(collisionPath, 0o640);
             collisionBefore = await recoveryFileSnapshot(collisionPath);
           }
         },
@@ -5682,6 +5683,7 @@ Mira keeps a field notebook.
             await removeCompiledNoteRecoveryRecord(listing);
             if (!listing.valid) {
               await writeFile(generationZeroPath, sentinel, { flag: "wx", mode: 0o640 });
+              await chmod(generationZeroPath, 0o640);
               occupiedBefore = await recoveryFileSnapshot(generationZeroPath);
               await writeCompiledNoteRecoveryRecord(valid);
             }

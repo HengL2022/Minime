@@ -105,7 +105,7 @@ describe("migration context targets", () => {
   });
 
   test("missing context is refused before a closed database port is touched", () => {
-    const proc = Bun.spawnSync(["bun", "run", "src/cli.ts", "migrate"], {
+    const proc = Bun.spawnSync(["bun", "--no-env-file", "run", "src/cli.ts", "migrate"], {
       cwd: `${import.meta.dir}/..`,
       env: {
         ...process.env,

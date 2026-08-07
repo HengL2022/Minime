@@ -60,11 +60,20 @@ export function registerTestDatabaseCloser(closer: TestDatabaseCloser): () => vo
 }
 
 const DEFAULT_DATABASE_URL = "postgres://minime:minime@localhost:5432/minime";
-// Never let a harness-provided live runtime endpoint win when this preload retargets the owner
-// database to its private scratch clone. The replacement is installed before importing config
-// (and therefore before src/db/client constructs either pool).
-Reflect.deleteProperty(process.env, "MINIME_APP_DATABASE_URL");
 const sourceDatabaseUrl = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL;
+// Verification can run inside install.sh after it has exported the selected live lifecycle and
+// runtime-role state. Tests own their scratch endpoint and their fixture lifecycle choices, so
+// scrub that installed state before application config is imported or child fixtures inherit it.
+for (const name of [
+  "MINIME_APP_DATABASE_URL",
+  "MINIME_APP_PASSWORD",
+  "MINIME_PG_BACKEND",
+  "MINIME_PG_PORT",
+  "MINIME_PG_INSTALL_PENDING",
+  "BACKUP_CRON",
+] as const) {
+  Reflect.deleteProperty(process.env, name);
+}
 const explicitDatabaseUrl = process.env.MINIME_TEST_DATABASE_URL;
 const runToken = `${process.pid}_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
 const retainedPlan: TestDatabasePlan = planTestDatabase(

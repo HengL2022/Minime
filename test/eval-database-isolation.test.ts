@@ -824,7 +824,7 @@ describe("eval workflow privilege and template contract", () => {
     const wrapper = readFileSync(resolve(repoRoot, "scripts/with-test-database.ts"), "utf8");
     const setup = readFileSync(resolve(repoRoot, "test/setup.ts"), "utf8");
     expect(`${wrapper}\n${setup}`).not.toMatch(/alter\s+role\s+minime_app|password\s+minime_app/i);
-    expect(setup).not.toContain("MINIME_APP_PASSWORD");
+    expect(setup).not.toMatch(/process\.env\.MINIME_APP_PASSWORD\s*=/);
   });
 
   test("app-only cleanup drops the unique role after its scratch database", () => {
