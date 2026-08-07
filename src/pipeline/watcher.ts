@@ -162,6 +162,27 @@ async function verifyOrHealStoredArchive(item: InboxItem, bytes: Uint8Array): Pr
   await publishSnapshot(absolutePath, bytes, item.content_hash);
 }
 
+/**
+ * Best-effort read of a capture's immutable archived text, hash-verified against the inbox
+ * row's own content_hash (W2-2: review-queue read path). Reads ONLY the archive — never
+ * item.raw_path, which is mutable, may have moved/been deleted, and must never cross the MCP
+ * boundary. Returns null (never throws) whenever the bytes cannot be proven authentic: missing
+ * identity, missing file, or a hash mismatch. A caller gating this behind a tier-2 unlock can
+ * therefore fail closed on the text alone, rather than losing an otherwise-good enriched
+ * review-queue item (e.g. its classifier type/confidence) to an unrelated archive fault.
+ */
+export async function readArchivedCapture(item: InboxItem): Promise<string | null> {
+  if (!item.archive_path || !item.content_hash) return null;
+  let bytes: Buffer;
+  try {
+    bytes = await readPrivateFile(item.archive_path);
+  } catch {
+    return null;
+  }
+  if (sha256(bytes) !== item.content_hash) return null;
+  return bytes.toString("utf8");
+}
+
 function firstLineOf(text: string): string {
   return text
     .split("\n")[0]!
@@ -194,7 +215,7 @@ async function publishNoteProjection(projection: NoteProjection): Promise<void> 
   );
 }
 
-function storedClassification(value: unknown): Classification | null {
+export function storedClassification(value: unknown): Classification | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<Classification>;
   if (

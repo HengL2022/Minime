@@ -1,11 +1,14 @@
 import { z } from "zod";
 import {
   type ParentType,
+  allowedTier,
   edgeVisibleAtTier,
+  getInboxItem,
   openReviewItems,
   parentMeta,
   resolveReviewItem,
 } from "../../db/repo";
+import { readArchivedCapture, storedClassification } from "../../pipeline/watcher";
 import { type SourceRef, ToolError, envelope } from "../envelope";
 import type { ToolDef } from "./registry";
 
@@ -19,6 +22,9 @@ const KINDS = [
   "extract_suspect",
 ] as const;
 const HIDDEN = "[above current tier]";
+// Distinct from HIDDEN: the tier check passed but the archived bytes could not be proven
+// authentic (missing file, hash mismatch). Never fabricate text in that case.
+const CAPTURE_UNAVAILABLE = "[archive unavailable]";
 const OMITTED_KEYS = new Set(["classifier", "classifier_output", "raw_path"]);
 const CONTENT_KEYS = new Set([
   "body",
@@ -140,6 +146,40 @@ async function maskReviewPayload(item: any, actor: string): Promise<any> {
     }
   }
 
+  // inbox_unfiled/duplicate payloads point at the raw capture via inbox_item_id. classify.ts
+  // treats a not-yet-filed capture as tier-2-equivalent ("the most intimate destination it
+  // might land in" — classify.ts:1-3): the capture's inbox_items row itself stays tier 1
+  // (a real tier is only assigned once filed), so this app-layer gate — not a DB tier
+  // predicate — is what keeps its free text behind the same tier-2 unlock as journal/
+  // interaction content (DECISIONS.md 2026-08-08). The classifier's type/confidence GUESS is
+  // metadata ABOUT the capture, not the capture itself, and always crosses so triage can see
+  // what the classifier thought without unlocking anything.
+  if (
+    (item.kind === "inbox_unfiled" || item.kind === "duplicate") &&
+    typeof item.payload?.inbox_item_id === "string"
+  ) {
+    try {
+      const inboxItem = await getInboxItem(item.payload.inbox_item_id);
+      const guess = inboxItem ? storedClassification(inboxItem.classifier_output) : null;
+      if (inboxItem && guess) {
+        const capture: Record<string, unknown> = {
+          type: guess.type,
+          confidence: guess.confidence,
+          reason: HIDDEN,
+          text: HIDDEN,
+        };
+        if ((await allowedTier(actor)) === 2) {
+          const text = await readArchivedCapture(inboxItem);
+          capture.reason = guess.reason ?? "";
+          capture.text = text === null ? CAPTURE_UNAVAILABLE : text.slice(0, 500);
+        }
+        payload = { ...payload, capture };
+      }
+    } catch {
+      // Fail closed: no capture guess is better than a half-resolved or wrong one.
+    }
+  }
+
   return { ...item, payload };
 }
 
@@ -154,7 +194,7 @@ async function maskStaleLabel(item: any, actor: string): Promise<any> {
 export const reviewQueueTool: ToolDef = {
   name: "minime_review_queue",
   description:
-    "List open review-queue items (contradiction | stale | duplicate | decision_review | inbox_unfiled | phantom_person | extract_suspect), or resolve one as 'resolved' | 'dismissed'. The queue is flag-only: resolving never edits the flagged rows themselves.",
+    "List open review-queue items (contradiction | stale | duplicate | decision_review | inbox_unfiled | phantom_person | extract_suspect), or resolve one as 'resolved' | 'dismissed'. inbox_unfiled/duplicate items carry the classifier's type/confidence guess (always visible) under payload.capture; its reason and a ~500-char capture text excerpt require an approved tier-2 unlock (minime_unlock) and read '[above current tier]' until then. The queue is flag-only: resolving never edits the flagged rows themselves.",
   schema: {
     action: z.enum(["list", "resolve"]).default("list"),
     kind: z.enum(KINDS).optional(),
@@ -179,8 +219,15 @@ export const reviewQueueTool: ToolDef = {
       updated_at: i.created_at,
       created_by: "system",
     }));
-    return envelope({ items }, sources, {
-      gaps: items.length === 0 ? ["review queue is empty — nothing to triage"] : undefined,
-    });
+    const gaps: string[] = [];
+    if (items.length === 0) gaps.push("review queue is empty — nothing to triage");
+    if (items.some((i: any) => i.payload?.capture?.text === HIDDEN)) {
+      gaps.push(
+        "capture reason/text are tier 2 — locked; ask the owner first, then call minime_unlock " +
+          "and have them approve the pending request locally, or run `minime review` locally " +
+          "for the unmasked text",
+      );
+    }
+    return envelope({ items }, sources, { gaps });
   },
 };

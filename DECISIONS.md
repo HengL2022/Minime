@@ -2526,3 +2526,58 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   the boundary already documented for `tier_read`/`tier_delete` and already modeled by the test
   harness (`test/support/app-role.ts`), grants no new access, and was applied directly to
   migration 028 rather than a follow-up migration because 028 had not shipped past this branch.
+
+## 2026-08-08 — Unfiled-capture text/reason require a tier-2 unlock; the classifier guess does not
+
+- **Context:** Livability-program task W2-2 makes `minime_review_queue`'s `inbox_unfiled`/
+  `duplicate` items agent-usable: today they carry only an `inbox_item_id` pointer, so an agent
+  triaging the queue cannot see what the capture said or why the classifier hesitated without a
+  separate, undocumented DB probe. `inbox_items.tier` is always `1` at insert (`insertInboxItem`/
+  `ensureInboxItemIdentity`, `db/migrations/025_inbox_capture_identity.sql`) — a raw capture gets
+  its real content tier only once filed into a PARENTS-map table — so, unlike every other kind's
+  payload enrichment in `review-queue.ts` (which re-resolves visibility through a parent row's own
+  DB-level `tier <= app_allowed_tier()` predicate via `parentMeta`), there is no existing DB tier
+  boundary to lean on for the capture's own free text. `classify.ts:1-3` already documents the
+  product's stance on this gap: a not-yet-classified raw capture is treated as tier-2-equivalent
+  for cloud-routing purposes ("the most intimate destination it might land in") because it might
+  turn out to be a journal entry or an interaction.
+- **Decision:** `minime_review_queue` list joins the pointed-at `inbox_items` row (read-only,
+  `getInboxItem`) for `inbox_unfiled`/`duplicate` items and adds `payload.capture`. The
+  classifier's `type`/`confidence` guess (parsed via the existing `storedClassification` guard,
+  now exported from `watcher.ts`) is metadata about the capture, not the capture's content, and is
+  always attached, at any tier — an agent can see what the classifier thought without unlocking
+  anything. The classifier's one-line `reason` and a ≤500-char capture-text excerpt are attached
+  only when `allowedTier(ctx.actor) === 2`; otherwise both read `"[above current tier]"` and the
+  tool response carries an explanatory gap. The text is read from the capture's immutable
+  `archive_path` only (new `readArchivedCapture`, sha256-verified against `content_hash`) — never
+  from the mutable `raw_path`, which also never crosses the MCP boundary (unchanged from the
+  existing `OMITTED_KEYS` convention) — and reading fails closed to `"[archive unavailable]"`
+  rather than throwing or fabricating text when the archive is missing or fails verification, so a
+  data-integrity fault on one item's bytes cannot cost that item's already-resolved
+  type/confidence or any other item in the same list call. None of this changes the raw
+  `review_queue.payload` row stored at flag time (still just `{inbox_item_id}` /
+  `{inbox_item_id, candidate_title, ...}`, verified unchanged by the existing `m4`/`m10` direct-SQL
+  payload assertions) — `capture` is computed fresh on every `list` call, the same pattern already
+  used for `existing_title`/`label`/`canonical_name`/`question` on other kinds. Secondary,
+  no-unlock path: a new `minime review` CLI command (`src/cli.ts`, exported `reviewQueueSummaries`)
+  lists the same two kinds with full, unmasked text for the owner triaging their own inbox
+  locally — this is the owner's own machine, not an agent connection, so the tier-2 ceremony would
+  be pure friction. `src/cli.ts`'s unconditional top-level `main()`/`process.exit()` was gated
+  behind `if (import.meta.main)` so `reviewQueueSummaries` is importable and directly testable
+  (the spec's own acceptance bar) without spawning a subprocess or killing the test process; no
+  other file imports `src/cli.ts` as a module today, so this is a no-op for the CLI's own
+  subprocess-spawning tests. `fixtures/mcp-tools-list-sdk-1.29.json` was regenerated (the tool
+  description now documents the enrichment); the only diff is that one description string.
+- **Why:** The masking rule has to live in the MCP tool layer because, for this one content type,
+  there is no DB-level tier to inherit — making that explicit here (rather than silently gating on
+  `inbox_items.tier`, which would wrongly read as "already tier-1-safe") is what keeps the
+  boundary intentional and auditable rather than accidental. Splitting metadata (always visible)
+  from content (unlock-gated) mirrors the classifier's own reasoning being useful for triage
+  ("why does this need a human look") independent of whether the human is currently unlocked, and
+  matches the risk note's fail-closed requirement without weakening it into "hide everything on
+  any fault."
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W2
+  correction-loop workstream — the plan's own default (tier-2 gate for capture text, consistent
+  with `classify.ts`'s existing treatment) was adopted as specified, not a bespoke per-task
+  approval; the owner's end-of-program review before any publication remains the final gate.

@@ -7,6 +7,8 @@ import {
   type PendingTier2UnlockRequest,
   approveTier2UnlockRequest,
   eventsSince,
+  getInboxItem,
+  openReviewItems,
   pendingTier2UnlockRequests,
 } from "./db/repo";
 import { importCalendar } from "./importers/calendar";
@@ -18,7 +20,7 @@ import { startMcpServer } from "./mcp/server";
 import { dbSnapshot, preUpdateSnapshot } from "./pipeline/backup";
 import { brainSync } from "./pipeline/brain-sync";
 import { dream } from "./pipeline/dream";
-import { startWatcher } from "./pipeline/watcher";
+import { readArchivedCapture, startWatcher, storedClassification } from "./pipeline/watcher";
 import { drainEmbedBacklog } from "./search/index-parent";
 import {
   assertRuntimeChildBoundary,
@@ -45,6 +47,7 @@ const USAGE = `minime <command>
   unlock:approve <request-id>      approve one pending tier-2 request for its MCP connection
   unlock:approve --latest          approve the single pending request (refuses if more than one)
   serve                            MCP server (stdio) + inbox watcher + dream cron
+  review                           list open inbox_unfiled/duplicate items with full text (owner; no unlock needed)
   audit --since <Nd>               show what left the box (events), default 7d
   import:calendar <file.ics>
   import:transactions <file.csv> --profile <bank>
@@ -88,6 +91,66 @@ class AmbiguousLatestUnlockError extends Error {
   constructor(readonly pending: PendingTier2UnlockRequest[]) {
     super("unlock_request_ambiguous");
   }
+}
+
+const CAPTURE_UNAVAILABLE = "[archive unavailable]";
+
+export interface ReviewQueueSummary {
+  id: string;
+  kind: "inbox_unfiled" | "duplicate";
+  inbox_item_id: string | null;
+  type: string | null;
+  confidence: number | null;
+  reason: string;
+  text: string;
+  candidate_title?: string;
+  existing_task_id?: string;
+  existing_title?: string;
+  score?: number;
+}
+
+// Secondary no-unlock read path (W2-2): the owner's own CLI, run locally, needs no tier-2
+// unlock ceremony — unlike the MCP tool (src/mcp/tools/review-queue.ts), which masks reason/
+// text behind minime_unlock because an agent connection may not be the owner. Exported so
+// tests can call it directly instead of spawning a subprocess.
+export async function reviewQueueSummaries(): Promise<ReviewQueueSummary[]> {
+  const out: ReviewQueueSummary[] = [];
+  for (const kind of ["inbox_unfiled", "duplicate"] as const) {
+    for (const item of await openReviewItems(kind)) {
+      const inboxItemId =
+        typeof item.payload?.inbox_item_id === "string" ? item.payload.inbox_item_id : null;
+      const inboxItem = inboxItemId ? await getInboxItem(inboxItemId) : null;
+      const guess = inboxItem ? storedClassification(inboxItem.classifier_output) : null;
+      const text = inboxItem ? await readArchivedCapture(inboxItem) : null;
+      out.push({
+        id: String(item.id),
+        kind,
+        inbox_item_id: inboxItemId,
+        type: guess?.type ?? null,
+        confidence: guess?.confidence ?? null,
+        reason: guess?.reason ?? "",
+        text: text ?? CAPTURE_UNAVAILABLE,
+        ...(kind === "duplicate"
+          ? {
+              candidate_title:
+                typeof item.payload?.candidate_title === "string"
+                  ? item.payload.candidate_title
+                  : undefined,
+              existing_task_id:
+                typeof item.payload?.existing_task_id === "string"
+                  ? item.payload.existing_task_id
+                  : undefined,
+              existing_title:
+                typeof item.payload?.existing_title === "string"
+                  ? item.payload.existing_title
+                  : undefined,
+              score: typeof item.payload?.score === "number" ? item.payload.score : undefined,
+            }
+          : {}),
+      });
+    }
+  }
+  return out;
 }
 
 async function main(): Promise<number> {
@@ -360,6 +423,26 @@ async function main(): Promise<number> {
         await Promise.allSettled([watcher?.close(), server?.close()]);
       }
     }
+    case "review": {
+      const summaries = await reviewQueueSummaries();
+      for (const s of summaries) {
+        const guess = s.type
+          ? `${s.type} (${(s.confidence ?? 0).toFixed(2)})`
+          : "no classifier guess";
+        console.log(`${s.id}  [${s.kind}]  ${guess}`);
+        if (s.reason) console.log(`  reason: ${s.reason}`);
+        if (s.kind === "duplicate") {
+          console.log(`  candidate: ${s.candidate_title ?? ""}`);
+          console.log(
+            `  matches existing task ${s.existing_task_id ?? ""}: ${s.existing_title ?? ""}`,
+          );
+        }
+        console.log(`  text: ${s.text}`);
+        console.log("");
+      }
+      console.log(`-- ${summaries.length} open item(s) awaiting review`);
+      return 0;
+    }
     case "audit": {
       const since = arg("--since") ?? "7d";
       const days = Number(since.match(/^(\d+)d$/)?.[1] ?? 7);
@@ -411,8 +494,13 @@ async function main(): Promise<number> {
   return 1;
 }
 
-const code = await main();
-if (code >= 0) {
-  await closeDb();
-  process.exit(code);
+// Guarded so importing this module for an export (e.g. reviewQueueSummaries, tested
+// function-level rather than via subprocess) never runs the CLI or exits the process;
+// `bun run src/cli.ts <command>` is the only path where this file is the entry point.
+if (import.meta.main) {
+  const code = await main();
+  if (code >= 0) {
+    await closeDb();
+    process.exit(code);
+  }
 }
