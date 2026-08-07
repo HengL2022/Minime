@@ -469,6 +469,36 @@ describe("metric time semantics", () => {
     ]);
   });
 
+  test("mood/energy exclude superseded journal rows from the average (W2-1 028 agg_sql fix)", async () => {
+    const original = await insertJournal({
+      entryMd: "Fictional original same-day self-report.",
+      mood: 1,
+      energy: 1,
+      at: new Date("2026-04-06T09:00:00Z"),
+      source: "test:life-metrics",
+    });
+    const successor = await insertJournal({
+      entryMd: "Fictional corrected same-day self-report.",
+      mood: 5,
+      energy: 5,
+      at: new Date("2026-04-06T09:00:00Z"),
+      source: "test:life-metrics",
+    });
+    // Stamp the backward pointer directly (minime_correct is a later W2 task; this test only
+    // exercises the metric-def fix, not the correction tool).
+    await sql`
+      update journal_entries set superseded_by = ${successor.id}, superseded_at = now()
+      where id = ${original.id}`;
+
+    const moodDay = await queryMetric("mood", "2026-04-06", "2026-04-06", "day", "UTC");
+    // Without the superseded_at filter this would be round(avg(1, 5), 2) = 3; the superseded
+    // original must drop out so only the live successor's value counts.
+    expect(moodDay.data.series).toEqual([{ period_start: "2026-04-06", value: 5 }]);
+
+    const energyDay = await queryMetric("energy", "2026-04-06", "2026-04-06", "day", "UTC");
+    expect(energyDay.data.series).toEqual([{ period_start: "2026-04-06", value: 5 }]);
+  });
+
   test("metric time zone bucketing for a new health_samples metric mirrors the sleep_minutes/steps pattern", async () => {
     await insertHealthSample({
       kind: "hr_resting",

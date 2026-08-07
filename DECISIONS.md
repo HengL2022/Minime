@@ -2477,15 +2477,27 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   other six already have full table UPDATE from 021, which already covers the new columns
   without any further grant. No new RLS policy: the existing `tier_update` policies (007_rls.sql,
   extended per-table in 008/014_decision_interview.sql/021) already gate every UPDATE, including
-  this one, by `app_allowed_tier()`.
+  this one, by `app_allowed_tier()`. This migration also updates the `mood`/`energy`
+  `metric_defs.agg_sql` bodies seeded in 027_life_metrics_seed.sql, adding
+  `and superseded_at is null` to each WHERE clause: `journal_entries` is the one content table in
+  this migration's list whose rows already feed a numeric aggregate, so the column's meaning and
+  the aggregate that reads it move together in the same migration.
 - **Why:** A correction feature needs the old row to survive (audit, recoverability, "what did I
   actually believe on that date") while still being able to name and time its own replacement.
   Splitting the grant to exactly the two stamp columns keeps the six previously write-locked
   tables write-locked for everything else — a future correction tool gets only the narrow
   capability it needs, not a blanket UPDATE that could rewrite journal prose, task titles, or
   decision content directly. This is a product-visible feature on ordinary content rows, not a
-  change to `events`, which remains insert-only and untouched (I8).
+  change to `events`, which remains insert-only and untouched (I8). Left unfixed, the first amend
+  or retract of a mood/energy self-report (once `minime_correct`, W2-4, ships) would silently
+  double-count: the superseded original's value and its successor's value would both fall inside
+  the same `avg()`, corrupting exactly the numeric surface I6 exists to protect. Fixing the
+  aggregate now, rather than waiting for a future task to remember it, means the metric is never
+  observably wrong even for one release.
 - **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
   that authorized this branch's fully autonomous, wave-by-wave execution across the W2
   correction-loop workstream — not a bespoke per-task approval; the owner's end-of-program
-  review before any publication remains the final gate.
+  review before any publication remains the final gate. The `agg_sql` fix above was added during
+  W2-1 review-finding remediation (2026-08-08): a numeric-correctness gap in an aggregate this
+  same migration already governs, not a new privilege or schema-meaning question, so it did not
+  need separate ratification.
