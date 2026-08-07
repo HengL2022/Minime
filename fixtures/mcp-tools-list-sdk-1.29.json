@@ -111,6 +111,28 @@
     }
   },
   {
+    "name": "minime_list_metrics",
+    "description": "List every queryable metric (name, unit, description, week/month rollup). Call this before minime_query_metric when unsure of the metric name; agg SQL is never exposed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
     "name": "minime_query_metric",
     "description": "The ONLY path to quantitative answers (spend, sleep, steps, deep work, journal streak). Returns a numeric series via whitelisted SQL aggregation — never does the model do arithmetic over prose.",
     "inputSchema": {

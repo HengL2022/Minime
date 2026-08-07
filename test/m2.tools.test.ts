@@ -212,6 +212,35 @@ describe("MCP server", () => {
     expect(parsed.data.decision_reviews_due.length).toBeGreaterThan(0); // open decision seeded
   });
 
+  test("minime_list_metrics lists the full catalog and never exposes agg_sql", async () => {
+    const tools = await client.listTools();
+    expect(tools.tools.map((t) => t.name)).toContain("minime_list_metrics");
+
+    const { raw, parsed, isError } = await call("minime_list_metrics", {});
+    expect(isError).toBe(false);
+    expect(parsed.data.metrics).toHaveLength(10); // 6 from 006 + mood/energy/body_mass/hr_resting from 027
+    expect(parsed.data.metrics.map((m: any) => m.name).sort()).toEqual(
+      [
+        "body_mass",
+        "deep_work_minutes",
+        "energy",
+        "hr_resting",
+        "journal_streak",
+        "mood",
+        "sleep_minutes",
+        "spend_by_category",
+        "spend_total",
+        "steps",
+      ].sort(),
+    );
+    for (const m of parsed.data.metrics) {
+      expect(Object.keys(m).sort()).toEqual(["description", "name", "rollup", "unit"]);
+    }
+    expect(parsed.sources).toHaveLength(10);
+    expect(raw).not.toContain("agg_sql");
+    expect(raw).not.toContain("select ");
+  });
+
   test("minime_query_metric returns a series; unknown metric refuses with structured error", async () => {
     const to = new Date().toISOString().slice(0, 10);
     const from = new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10);
@@ -222,6 +251,7 @@ describe("MCP server", () => {
     const bad = await call("minime_query_metric", { name: "no_such_metric", from, to });
     expect(bad.isError).toBe(true);
     expect(bad.parsed.error.code).toBe("UNKNOWN_METRIC");
+    expect(bad.parsed.error.message).toContain("minime_list_metrics");
   });
 
   test("metric days honor caller timezone and rollups use declared sum/last semantics", async () => {

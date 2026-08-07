@@ -2811,6 +2811,14 @@ export async function listMetricDefs(): Promise<
   return db()`select name, unit, agg_sql, rollup from metric_defs order by name` as any;
 }
 
+// Agent-facing metric catalog (I2): name/unit/description/rollup only — agg_sql never crosses
+// the MCP boundary. listMetricDefs() above stays owner/dream-only; do not reuse it here.
+export async function listMetricDefsPublic(): Promise<
+  { name: string; unit: string | null; description: string | null; rollup: MetricRollup }[]
+> {
+  return db()`select name, unit, description, rollup from metric_defs order by name` as any;
+}
+
 // The single door to whitelisted aggregate SQL (incl. tier-0 sources): the timezone-explicit
 // security-definer function in 026. Metric name and timezone are checked before execution.
 export async function runMetricAgg(

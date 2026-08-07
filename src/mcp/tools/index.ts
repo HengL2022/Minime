@@ -4,7 +4,7 @@ import { getContextTool } from "./context";
 import { logDecisionTool, reviewDecisionTool } from "./decisions";
 import { logInteractionTool } from "./interactions";
 import { journalTool } from "./journal";
-import { queryMetricTool } from "./metric";
+import { listMetricsTool, queryMetricTool } from "./metric";
 import type { ToolDef } from "./registry";
 import { reviewQueueTool } from "./review-queue";
 import { searchTool } from "./search";
@@ -16,6 +16,7 @@ export const ALL_TOOLS: ToolDef[] = [
   searchTool,
   getContextTool,
   stateTool,
+  listMetricsTool,
   queryMetricTool,
   captureTool,
   journalTool,

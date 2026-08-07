@@ -2,7 +2,7 @@
 // the configured owner-zone dream job is the sole writer of persisted rollups.
 
 import { z } from "zod";
-import { metricDef, runMetricAgg } from "../../db/repo";
+import { listMetricDefsPublic, metricDef, runMetricAgg } from "../../db/repo";
 import { configuredTimeZone } from "../../util/clock";
 import { isMetricDate, reduceMetricSeries } from "../../util/metric-rollup";
 import { ToolError, envelope } from "../envelope";
@@ -18,7 +18,11 @@ export async function queryMetric(
   timeZone?: string,
 ) {
   const def = await metricDef(name);
-  if (!def) throw new ToolError("UNKNOWN_METRIC", `no metric named '${name}'; see metric_defs`);
+  if (!def)
+    throw new ToolError(
+      "UNKNOWN_METRIC",
+      `no metric named '${name}' — call minime_list_metrics to see what is queryable`,
+    );
   if (!isMetricDate(from) || !isMetricDate(to))
     throw new ToolError("BAD_INPUT", "from/to must be valid YYYY-MM-DD dates");
   if (from > to) throw new ToolError("BAD_INPUT", "from must be on or before to");
@@ -48,4 +52,22 @@ export const queryMetricTool: ToolDef = {
   },
   handler: (params, ctx) =>
     queryMetric(params.name, params.from, params.to, params.granularity ?? "day", ctx.timeZone),
+};
+
+// The metric catalog agents discover before calling minime_query_metric (I2: no agg_sql, no
+// raw SQL — listMetricDefsPublic() is the dedicated no-SQL repo function for this boundary).
+export async function listMetrics() {
+  const metrics = await listMetricDefsPublic();
+  return envelope(
+    { metrics },
+    metrics.map((m) => ({ type: "metric", id: m.name, title: m.description ?? m.name })),
+  );
+}
+
+export const listMetricsTool: ToolDef = {
+  name: "minime_list_metrics",
+  description:
+    "List every queryable metric (name, unit, description, week/month rollup). Call this before minime_query_metric when unsure of the metric name; agg SQL is never exposed.",
+  schema: {},
+  handler: () => listMetrics(),
 };
