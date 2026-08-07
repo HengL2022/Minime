@@ -115,6 +115,7 @@ const WRAPPER_HARNESS = `
   const phase = process.env.WRAPPER_HARNESS_PHASE;
   const source = {
     DATABASE_URL: process.env.DATABASE_URL,
+    MINIME_APP_DATABASE_URL: process.env.MINIME_APP_DATABASE_URL,
     EVAL_DATABASE_URL: process.env.EVAL_DATABASE_URL,
     EVAL_PMB_DATABASE_URL: process.env.EVAL_PMB_DATABASE_URL,
     EVAL_SKILLS_DATABASE_URL: process.env.EVAL_SKILLS_DATABASE_URL,
@@ -130,6 +131,12 @@ const WRAPPER_HARNESS = `
       }
     },
     bootstrapOwnedDatabase: async (appOnly) => {
+      if (process.env.MINIME_APP_DATABASE_URL !== undefined) {
+        throw new Error("bootstrap_live_app_endpoint_not_cleared");
+      }
+      if (process.env.DATABASE_URL !== plan.databaseUrl) {
+        throw new Error("bootstrap_scratch_database_not_installed");
+      }
       if (phase === "bootstrap-failure") throw new Error("bootstrap failed");
       if (phase === "bootstrap-signal") {
         console.error("READY");
@@ -159,6 +166,7 @@ const WRAPPER_HARNESS = `
   };
   const restored = () =>
     process.env.DATABASE_URL === source.DATABASE_URL &&
+    process.env.MINIME_APP_DATABASE_URL === source.MINIME_APP_DATABASE_URL &&
     process.env.EVAL_DATABASE_URL === source.EVAL_DATABASE_URL &&
     process.env.EVAL_PMB_DATABASE_URL === source.EVAL_PMB_DATABASE_URL &&
     process.env.EVAL_SKILLS_DATABASE_URL === source.EVAL_SKILLS_DATABASE_URL;
@@ -182,6 +190,7 @@ function runWrapperHarness(phase: string) {
     env: {
       ...process.env,
       DATABASE_URL: "postgres://minime:minime@localhost:5432/minime",
+      MINIME_APP_DATABASE_URL: "postgres://minime_app:installed-runtime@localhost:5432/minime",
       EVAL_DATABASE_URL: "postgres://source:source@localhost:5432/minime_test_source_eval",
       EVAL_PMB_DATABASE_URL: "postgres://source:source@localhost:5432/minime_test_source_pmb",
       EVAL_SKILLS_DATABASE_URL: "postgres://source:source@localhost:5432/minime_test_source_skills",
@@ -545,8 +554,16 @@ describe("database-reset eval isolation", () => {
   );
 
   test(
-    "executable wrapper harness covers bootstrap/spawn/cleanup failures and signals",
+    "executable wrapper harness clears live app endpoint and restores it after success, failures, and signals",
     async () => {
+      const succeeded = runWrapperHarness("success");
+      const successExitCode = await succeeded.exited;
+      const successStdout = await new Response(succeeded.stdout).text();
+      expect(successExitCode).toBe(0);
+      const successReport = JSON.parse(successStdout.trim().split("\n").at(-1) ?? "{}");
+      expect(successReport.result).toBe(0);
+      expect(successReport.restored).toBe(true);
+
       const failures = [
         ["bootstrap-failure", "bootstrap failed"],
         ["spawn-failure", "spawn failed"],
@@ -746,7 +763,7 @@ describe("database-reset eval isolation", () => {
       "real SIGTERM child path disposes the generated target",
       "real SIGINT child path disposes the generated target",
       "keep-forensics prints one exact owned target for validated recovery",
-      "executable wrapper harness covers bootstrap/spawn/cleanup failures and signals",
+      "executable wrapper harness clears live app endpoint and restores it after success, failures, and signals",
       "two simultaneous wrappers serialize cloning and leave distinct targets",
     ]) {
       const start = source.indexOf(`\n    \"${name}\",`);
