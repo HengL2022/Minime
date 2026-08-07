@@ -404,6 +404,7 @@ printf '%s\n' "$PG_STATE_RULE"`,
     );
     const result = runShell(
       `. "$1"
+docker_backend_port(){ printf '55437\\n'; }
 docker_running_backend_matches_port(){ [ "$1" = 55437 ]; }
 resolve_pg_lifecycle "$2" 0 || exit 9
 TRACE_PATH="$3"
@@ -467,6 +468,7 @@ printf '%s\n' "$PG_STATE_RULE"`,
     );
     const result = runShell(
       `. "$1"
+docker_backend_port(){ printf '55439\\n'; }
 docker_running_backend_matches_port(){ return 1; }
 resolve_pg_lifecycle "$2" 0 || exit 9
 TRACE_PATH="$3"

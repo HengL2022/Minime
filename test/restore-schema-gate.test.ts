@@ -47,7 +47,29 @@ async function prepareScratch(appliedMigrations: readonly string[]): Promise<voi
 
   const scratchSql = postgres(scratchUrl.toString(), { max: 1, onnotice: () => {} });
   try {
-    await scratchSql.unsafe("drop owned by minime cascade");
+    // Fresh installer templates contain extensions only, while older local templates may carry
+    // the full schema. Remove application objects explicitly: Docker's bootstrap superuser is
+    // minime, so DROP OWNED would also target objects PostgreSQL requires.
+    const applicationFunctions = await scratchSql`
+      select pg_catalog.format('%I.%I(%s)', ns.nspname, p.proname,
+               pg_catalog.pg_get_function_identity_arguments(p.oid)) as signature
+      from pg_catalog.pg_proc p
+      join pg_catalog.pg_namespace ns on ns.oid = p.pronamespace
+      where ns.nspname = 'public'
+        and not exists (
+          select 1 from pg_catalog.pg_depend dep
+          join pg_catalog.pg_extension ext on ext.oid = dep.refobjid
+          where dep.classid = 'pg_catalog.pg_proc'::regclass
+            and dep.objid = p.oid and dep.deptype = 'e'
+        )`;
+    const applicationTables = await scratchSql`
+      select tablename from pg_catalog.pg_tables where schemaname = 'public'`;
+    for (const row of applicationTables) {
+      await scratchSql`drop table if exists ${scratchSql(String(row.tablename))} cascade`;
+    }
+    for (const row of applicationFunctions) {
+      await scratchSql.unsafe(`drop function if exists ${String(row.signature)} cascade`);
+    }
     await scratchSql`create table schema_migrations (
       name text primary key, applied_at timestamptz not null default now()
     )`;

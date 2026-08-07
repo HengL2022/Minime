@@ -17,7 +17,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { config } from "../src/util/config";
 import { resetDb, testSql as sql } from "./helpers";
 
@@ -81,9 +81,17 @@ describe("session-capture hook", () => {
   });
 
   test("resolves a relative data override from the repository under a foreign hook cwd", () => {
-    const foreignCwd = mkdtempSync(join(realpathSync(tmpdir()), "minime-hook-cwd-"));
+    const foreignRoot = mkdtempSync(join(realpathSync(tmpdir()), "minime-hook-cwd-"));
     const expected = mkdtempSync(join(realpathSync(tmpdir()), "minime-hook-relative-"));
     const relativeOverride = relative(REPO, expected);
+    const parentSegments = relativeOverride.split(sep).filter((part) => part === "..").length;
+    const foreignCwd = join(
+      foreignRoot,
+      ...Array.from({ length: parentSegments + 1 }, (_, index) => `nested-${index}`),
+    );
+    mkdirSync(foreignCwd, { recursive: true });
+    const cwdRelativeTarget = resolve(foreignCwd, relativeOverride);
+    expect(cwdRelativeTarget).not.toBe(resolve(expected));
     try {
       runHook(
         {
@@ -98,10 +106,10 @@ describe("session-capture hook", () => {
       expect(readdirSync(join(expected, "inbox")).some((name) => name.startsWith("session-"))).toBe(
         true,
       );
-      expect(existsSync(join(foreignCwd, relativeOverride))).toBe(false);
+      expect(existsSync(cwdRelativeTarget)).toBe(false);
     } finally {
       rmSync(expected, { recursive: true, force: true });
-      rmSync(foreignCwd, { recursive: true, force: true });
+      rmSync(foreignRoot, { recursive: true, force: true });
     }
   });
 
