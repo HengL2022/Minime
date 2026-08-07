@@ -468,8 +468,9 @@ describe("tier-2 privacy hardening", () => {
     // 2026-08-08). Both directions must now fail closed: no re-promotion out of tier 0, and no
     // demotion into it (the replaced USING clause is also the implicit WITH CHECK).
     const [page] = await sql`
-      insert into pages (path, title, body_md, tier)
-      values ('probe/zqx-quarantined.md', 'ZQX quarantine probe', 'fictional probe body', 1)
+      insert into pages (path, title, body_md, content_hash, tier, source, created_by)
+      values ('probe/zqx-quarantined.md', 'ZQX quarantine probe', 'fictional probe body',
+              'zqxprobehash0000', 1, 'manual', 'human')
       returning id`;
     const [chunk] = await sql`
       insert into chunks (parent_type, parent_id, ord, text, tier)
