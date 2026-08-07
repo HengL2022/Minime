@@ -5,10 +5,21 @@
 //
 // Anti-laundering (binding cross-check): a pending capture's free text is tier-2-gated exactly
 // like the review-queue read path, regardless of what the classifier guessed (DECISIONS.md
-// 2026-08-08) — so refiling requires an active tier-2 unlock for the calling session. And a
-// "note" tier override can only raise the tier the capture's own stored classifier evidence
-// implies, never lower it — an agent must never be able to file tier-2-gated capture text as a
-// tier-1 note it can then read without unlocking anything.
+// 2026-08-08) — so refiling requires an active tier-2 unlock for the calling session. Beyond
+// that entry gate, the capture's own stored classifier evidence (or an agent-session hint in the
+// text itself) sets a floor that EVERY destination type is checked against, not only note: a
+// "note" tier override can only raise that floor, never lower it, and type=task/decision are
+// rejected outright whenever the floor is 2 — neither `tasks` nor `decisions` has an
+// owner-facing tier-2 pathway through this tool, so there is no lower-tier-but-still-safe
+// override to fall back to; filing at their permanent tier-1 default would launder tier-2-grade
+// text into content any actor can read forever without ever unlocking anything. journal and
+// interaction need no such check: fileRow always files them at tier 2 regardless of any
+// override, so they can never be the laundering channel. The floor is computed from the row's
+// state AT CLAIM TIME (claim.item, from claimPendingInboxItemForRefile's UPDATE ... RETURNING),
+// never from the plain read at the top of this handler — the handler runs inside one ambient
+// READ COMMITTED transaction (executeTool -> withActorDbSession), so a concurrent classifier
+// pass that commits in the gap between that read and the claim is visible to the claim but must
+// not be allowed to leave a stale, weaker evidence value already baked into the floor.
 
 import { z } from "zod";
 import { withDbTransaction } from "../../db/client";
@@ -62,9 +73,10 @@ const SOURCE_TYPE: Record<FiledTable, string> = {
 // unlocking anything (review-queue convention, DECISIONS.md 2026-08-08). journal/interaction are
 // the two types that always file at tier 2 (insertJournal/insertInteraction default tier=2), so a
 // stored guess of either is positive evidence this capture's free text is tier-2-grade — the
-// floor a "note" tier override may never go below. Any other guess (or none yet) carries no such
-// evidence, so the floor stays at the ordinary tier-1 default.
-function noteEvidenceFloor(stored: Classification | null): 1 | 2 {
+// floor every refile destination is checked against (see file header): a "note" tier override may
+// never go below it, and type=task/decision are rejected outright when it's 2. Any other guess
+// (or none yet) carries no such evidence, so the floor stays at the ordinary tier-1 default.
+function evidenceFloor(stored: Classification | null): 1 | 2 {
   return stored?.type === "journal" || stored?.type === "interaction" ? 2 : 1;
 }
 
@@ -85,9 +97,12 @@ export const refileTool: ToolDef = {
     "(meeting|call|message|email|note), question, choice, mood (1-5), and tier (1|2 — honored " +
     "only when type=note, and floored to 2 whenever this capture's own stored classifier guess " +
     "was journal/interaction, so tier-2-grade text can never be filed as a lower-tier note). " +
-    "Rejects a non-pending item, and rejects a match against an existing open task (BAD_INPUT) " +
-    "rather than filing a duplicate. Resolves any open inbox_unfiled/duplicate review-queue " +
-    "items for this capture. Never echoes the capture's text back in its response.",
+    "type=task/decision are rejected (BAD_INPUT) instead of downgraded when that same evidence " +
+    "says tier-2: neither table has a tier-2 representation, so file it as journal, " +
+    "interaction, or note (tier 2) instead. Rejects a non-pending item, and rejects a match " +
+    "against an existing open task (BAD_INPUT) rather than filing a duplicate. Resolves any " +
+    "open inbox_unfiled/duplicate review-queue items for this capture. Never echoes the " +
+    "capture's text back in its response.",
   schema: {
     inbox_item_id: z.string().uuid(),
     type: z.enum(REFILE_TYPE),
@@ -130,22 +145,6 @@ export const refileTool: ToolDef = {
     if (params.question !== undefined) fields.question = params.question;
     if (params.choice !== undefined) fields.choice = params.choice;
     if (params.mood !== undefined) fields.mood = params.mood;
-    if (type === "note") {
-      // Anti-laundering floor: see file header. Always computed (not only when an override is
-      // given) so the ordinary no-override path is protected too.
-      const floor = Math.max(
-        noteEvidenceFloor(storedClassification(item.classifier_output)),
-        noteHintTier(text),
-      ) as 1 | 2;
-      fields.tier = params.tier !== undefined ? Math.max(params.tier, floor) : floor;
-    }
-
-    const classification: Classification = {
-      type,
-      confidence: 1,
-      fields,
-      reason: "owner refile",
-    };
 
     // A tool handler runs inside ONE ambient actor transaction (executeTool -> withActorDbSession)
     // for its whole call, so withDbTransaction here is reentrant, not a separate commit boundary:
@@ -168,6 +167,35 @@ export const refileTool: ToolDef = {
         );
       }
       await assertInboxClaim(item.id, claim.token);
+
+      // Anti-laundering floor + gate (see file header): computed from claim.item, the row
+      // exactly as claimPendingInboxItemForRefile's UPDATE ... RETURNING just observed it — never
+      // from the plain read at the top of this handler, which a concurrent classifier pass could
+      // have raced past. task/decision are rejected outright above the floor; note is floored,
+      // never lowered; journal/interaction always file at tier 2 regardless (no check needed).
+      const floor = Math.max(
+        evidenceFloor(storedClassification(claim.item.classifier_output)),
+        noteHintTier(text),
+      ) as 1 | 2;
+      if (floor === 2 && (type === "task" || type === "decision_note")) {
+        throw new ToolError(
+          "BAD_INPUT",
+          "this capture's own stored evidence indicates tier-2-grade content — file it as " +
+            "journal, interaction, or note (tier 2) instead; task/decision have no tier-2 " +
+            "representation",
+        );
+      }
+      if (type === "note") {
+        fields.tier = params.tier !== undefined ? Math.max(params.tier, floor) : floor;
+      }
+
+      const classification: Classification = {
+        type,
+        confidence: 1,
+        fields,
+        reason: "owner refile",
+      };
+
       const result = await fileRow(classification, text, item.id);
       if (result === "duplicate") {
         throw new ToolError(

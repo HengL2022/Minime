@@ -1,8 +1,10 @@
 // W2-3: minime_refile files a pending inbox capture into a typed row, reusing the watcher's
 // fileRow/claim machinery. Anti-laundering cross-check: refiling requires an active tier-2
 // unlock (a pending capture's text is tier-2-gated exactly like the review-queue read path,
-// DECISIONS.md 2026-08-08), and a note tier override can only raise — never lower — the tier
-// the capture's own stored classifier evidence implies.
+// DECISIONS.md 2026-08-08). Beyond that entry gate, the capture's own stored classifier evidence
+// sets a floor every destination is checked against: a note tier override can only raise — never
+// lower — the tier that evidence implies, and type=task/decision are rejected outright rather
+// than silently filed at their permanent tier-1 default, since neither has a tier-2 pathway.
 
 import { beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, readFile } from "node:fs/promises";
@@ -169,6 +171,97 @@ describe("minime_refile", () => {
     );
     const [page] = await testSql`select tier from pages where id = ${data.filed_id}::uuid`;
     expect(page!.tier).toBe(2); // floored, not the requested 1
+  });
+
+  test("type=task is rejected (not silently filed at tier 1) when the capture's stored evidence says journal/interaction", async () => {
+    const inboxId = await pendingUnfiled(
+      "zqx-refile-task-floor.md",
+      "unclear: ZQX-REFILE-TASKFLOOR fictional reflection about the storm watch",
+    );
+    // Same synthetic evidence as the note-floor test above: the automatic pass guessed
+    // "journal" at too-low confidence to auto-file, so this capture is tier-2-grade even though
+    // nothing has filed it yet. tasks.tier has no tier-2 pathway through this tool, so the only
+    // safe outcome is a rejection, not a downgrade.
+    await testSql`
+      update inbox_items
+      set classifier_output = ${testSql.json({
+        type: "journal",
+        confidence: 0.5,
+        fields: { mood: null },
+        reason: "synthetic test evidence",
+      })}
+      where id = ${inboxId}::uuid`;
+
+    const ctx = sessionToolCtx("agent:refile-task-floor");
+    await requestAndApproveTier2(ctx);
+    const error = expectErr(
+      await refile(ctx, { inbox_item_id: inboxId, type: "task", title: "Storm watch task" }),
+    );
+    expect(error.code).toBe("BAD_INPUT");
+    expect(error.message).toContain("tier-2-grade");
+
+    // Nothing was filed at any tier — the whole point of the floor is that an actor who never
+    // unlocked tier 2 must never be able to read this capture's text via a laundered tier-1 row.
+    expect(await testSql`select id from tasks where derived_from = ${inboxId}`).toHaveLength(0);
+    const [inboxRow] = await testSql`
+      select status, classifier_output from inbox_items where id = ${inboxId}::uuid`;
+    expect(inboxRow!.status).toBe("pending");
+    expect((inboxRow!.classifier_output as any).type).toBe("journal"); // unchanged by the attempt
+  });
+
+  test("type=decision is rejected (not silently filed at tier 1) when the capture's stored evidence says journal/interaction", async () => {
+    const inboxId = await pendingUnfiled(
+      "zqx-refile-decision-floor.md",
+      "unclear: ZQX-REFILE-DECISIONFLOOR fictional reflection about spare hydrophone nodes",
+    );
+    await testSql`
+      update inbox_items
+      set classifier_output = ${testSql.json({
+        type: "interaction",
+        confidence: 0.4,
+        fields: {},
+        reason: "synthetic test evidence",
+      })}
+      where id = ${inboxId}::uuid`;
+
+    const ctx = sessionToolCtx("agent:refile-decision-floor");
+    await requestAndApproveTier2(ctx);
+    const error = expectErr(
+      await refile(ctx, {
+        inbox_item_id: inboxId,
+        type: "decision",
+        question: "Use the spare hydrophone nodes?",
+      }),
+    );
+    expect(error.code).toBe("BAD_INPUT");
+    expect(error.message).toContain("tier-2-grade");
+
+    expect(await testSql`select id from decisions where derived_from = ${inboxId}`).toHaveLength(0);
+    const [inboxRow] = await testSql`select status from inbox_items where id = ${inboxId}::uuid`;
+    expect(inboxRow!.status).toBe("pending");
+  });
+
+  test("type=journal still succeeds when the capture's stored evidence is tier-2, since journal always files at tier 2 anyway", async () => {
+    const inboxId = await pendingUnfiled(
+      "zqx-refile-journal-floor.md",
+      "unclear: ZQX-REFILE-JOURNALFLOOR fictional reflection about the storm watch",
+    );
+    await testSql`
+      update inbox_items
+      set classifier_output = ${testSql.json({
+        type: "journal",
+        confidence: 0.5,
+        fields: { mood: null },
+        reason: "synthetic test evidence",
+      })}
+      where id = ${inboxId}::uuid`;
+
+    const ctx = sessionToolCtx("agent:refile-journal-floor");
+    await requestAndApproveTier2(ctx);
+    const data = expectOk(await refile(ctx, { inbox_item_id: inboxId, type: "journal" }));
+    const [row] = await testSql`
+      select tier from journal_entries where id = ${data.filed_id}::uuid`;
+    expect(row!.tier).toBe(2);
   });
 
   test("a non-pending (already filed) item is rejected", async () => {
