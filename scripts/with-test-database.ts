@@ -174,8 +174,12 @@ function childEnvironment(
     if (databaseEnv) env[databaseEnv] = appUrl.toString();
   } else if (OWNER_SCRATCH_LABELS.has(label)) {
     // Legacy evaluators are scratch-only and need reset/DDL. Their owner DSN is still the
-    // parent-created guarded target, never the source/live database.
+    // parent-created guarded target, never the source/live database. Pin the runtime alias too:
+    // Bun loads the repository .env in a new child, and an installed checkout contains the live
+    // runtime endpoint there. An explicit scratch alias prevents that live value from being
+    // paired with the scratch owner URL before application config validates the endpoints.
     env.DATABASE_URL = plan.databaseUrl;
+    env.MINIME_APP_DATABASE_URL = plan.databaseUrl;
     if (databaseEnv) env[databaseEnv] = plan.databaseUrl;
   } else {
     throw new Error("owned_database_label_policy_invalid");

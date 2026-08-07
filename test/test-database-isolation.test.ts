@@ -1867,6 +1867,7 @@ describe("owned child wrapper contract", () => {
         expect(env.DATABASE_URL).toMatch(/^postgres:\/\//);
         expect(env.DATABASE_URL).toBe(env.EVAL_SKILLS_DATABASE_URL);
         expect(env.DATABASE_URL).toBe(plan.databaseUrl);
+        expect(env.MINIME_APP_DATABASE_URL).toBe(plan.databaseUrl);
         await Promise.resolve();
         trace.push("child:0");
         return 0;
