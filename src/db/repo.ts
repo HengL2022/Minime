@@ -3787,23 +3787,30 @@ export async function timelineRows(
   // `rows` above, so a separate "locked" count would double-count them) or the caller never asked
   // for that kind via `types` (a caller scoped to types:['calendar'] gets no journal/interaction
   // accounting, locked or not).
+  //
+  // The count MUST run through timeline_locked_count() (032_timeline_locked_count.sql), a
+  // SECURITY DEFINER function — never a plain db() SELECT — because db() in the real resident
+  // deployment is always the restricted minime_app role (src/serve.ts pins both DATABASE_URL and
+  // MINIME_APP_DATABASE_URL to it), and journal_entries/interactions carry the standard
+  // tier_read RLS policy `USING (tier >= 1 and tier <= app_allowed_tier())`. Postgres intersects
+  // that policy with a plain query's own WHERE clause, so `select count(*) where tier = 2` under
+  // a genuinely locked session (app_allowed_tier() = 1) would be narrowed to
+  // `tier <= 1 AND tier = 2` — never satisfiable — and silently return 0 no matter how many
+  // tier-2 rows exist in range (review finding, 2026-08-08: verified against a live restricted
+  // role, not just inferred). timeline_locked_count() runs as the migration owner, so it is not
+  // subject to the caller's own RLS, and — like metric_agg() — returns only a bare integer,
+  // never row content. See test/timeline-restricted-role.test.ts for the regression coverage
+  // through the real restricted role that this bug had no test for.
   const needsLockedCounts = allowed < 2;
   let journalLocked = 0;
   let interactionLocked = 0;
   if (needsLockedCounts && want("journal")) {
-    const [row] = await db()`
-      select count(*)::int as n from journal_entries
-      where tier = 2
-        and (at at time zone ${tz})::date between ${from}::date and ${to}::date
-        and superseded_at is null`;
+    const [row] = await db()`select timeline_locked_count('journal', ${from}, ${to}, ${tz}) as n`;
     journalLocked = Number(row?.n ?? 0);
   }
   if (needsLockedCounts && want("interaction")) {
-    const [row] = await db()`
-      select count(*)::int as n from interactions
-      where tier = 2
-        and (occurred_at at time zone ${tz})::date between ${from}::date and ${to}::date
-        and superseded_at is null`;
+    const [row] =
+      await db()`select timeline_locked_count('interaction', ${from}, ${to}, ${tz}) as n`;
     interactionLocked = Number(row?.n ?? 0);
   }
 

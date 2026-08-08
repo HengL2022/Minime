@@ -213,6 +213,7 @@ async function configureBoundary(target: postgres.Sql, roleName: string): Promis
     "app_allowed_tier()",
     "app_request_tier2_unlock(smallint)",
     "metric_agg(text, date, date, text)",
+    "timeline_locked_count(text, date, date, text)",
     "cjk_fold(text)",
     "exact_active_org_exists(text)",
     "person_has_nonworking_relation(uuid)",

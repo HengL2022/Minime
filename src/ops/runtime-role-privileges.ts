@@ -38,6 +38,7 @@ export const RUNTIME_ROLE_APPLICATION_FUNCTIONS = Object.freeze([
   "app_allowed_tier()",
   "app_request_tier2_unlock(smallint)",
   "metric_agg(text,date,date,text)",
+  "timeline_locked_count(text,date,date,text)",
   "cjk_fold(text)",
   "exact_active_org_exists(text)",
   "person_has_nonworking_relation(uuid)",
