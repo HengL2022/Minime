@@ -1,6 +1,12 @@
 import { join } from "node:path";
 import { Cron } from "croner";
 import { withAdminDbScope } from "./db/client";
+import {
+  type MaintenanceLockHandle,
+  lastEventAt,
+  releaseMaintenanceLock,
+  tryAcquireMaintenanceLock,
+} from "./db/repo";
 import { dbSnapshot } from "./pipeline/backup";
 import { dream } from "./pipeline/dream";
 import { REPO_ROOT, config, parseProviderEnvironment } from "./util/config";
@@ -217,12 +223,103 @@ type MaintenanceCronFactory = (
 const createMaintenanceCron: MaintenanceCronFactory = (pattern, options, callback) =>
   new Cron(pattern, options, callback);
 
+// Every resident `serve` runs this scheduler; only the process holding the maintenance advisory
+// lock (repo.tryAcquireMaintenanceLock) actually runs dream/backup. A process that loses the
+// lock retries takeover on this cadence, so a killed owner hands off within one interval with
+// zero configuration (docs/DEVELOPMENT.md's "coordinate multiple MCP processes" backlog item).
+const MAINTENANCE_RETRY_CRON = "*/5 * * * *";
+// A catch-up dream run fires after a short random delay so that if several processes were all
+// waiting on a takeover (e.g. after a shared outage), they do not all hit the database at once.
+const DREAM_CATCH_UP_MIN_DELAY_MS = 30_000;
+const DREAM_CATCH_UP_MAX_DELAY_MS = 90_000;
+
+// The remaining scheduler pieces below take their state as explicit parameters (crons to append
+// to, runDream/run to invoke) instead of closing over startOwnerMaintenanceSchedule's locals --
+// everything here is read-only with respect to that state except appending to `crons`. Only
+// attemptTakeover (which must mutate `lock` and stop `retry`) stays a closure inside it.
+
+// Catch-up (W3-5): immediately after winning the lock, ask when dream last finished. If the
+// schedule's next fire after that instant has already passed -- or dream has never once run on a
+// database that otherwise has history -- run it once, shortly, instead of waiting for tonight's
+// cron. dream() always writes its dream:summary event as the last step even when individual
+// steps fail (pipeline/dream.ts), so this can never loop.
+//
+// Deliberately NOT withAdminDbScope: adminSql is a single-connection pool that dream() itself
+// holds exclusively for its whole run, and the lock holds one runtime connection for the
+// scheduler's entire lifetime. events SELECT is already granted to the restricted runtime role
+// (db/migrations/007_rls.sql), so the plain runtime pool (5 connections) is both sufficient and
+// starvation-free here.
+async function scheduleDreamCatchUp(
+  createCron: MaintenanceCronFactory,
+  crons: MaintenanceCron[],
+  runDream: () => void,
+): Promise<void> {
+  const lastDreamAt = await lastEventAt("dream:summary");
+  let needsCatchUp: boolean;
+  if (lastDreamAt) {
+    const scheduledAfterLastDream = new Cron(config.dreamCron, {
+      timezone: config.tz,
+    }).nextRun(lastDreamAt);
+    needsCatchUp =
+      scheduledAfterLastDream !== null && scheduledAfterLastDream.getTime() <= Date.now();
+  } else {
+    // No dream has ever run. On a brand-new install that is simply tonight's first-ever
+    // schedule, not a miss. On a database with other history, dream was never scheduled or kept
+    // failing to start, so catch up now rather than waiting for tonight.
+    needsCatchUp = (await lastEventAt()) !== null;
+  }
+  if (!needsCatchUp) return;
+  const delayMs =
+    DREAM_CATCH_UP_MIN_DELAY_MS +
+    Math.floor(Math.random() * (DREAM_CATCH_UP_MAX_DELAY_MS - DREAM_CATCH_UP_MIN_DELAY_MS));
+  const fireAt = new Date(Date.now() + delayMs);
+  const catchUp = createCron(fireAt.toISOString(), { timezone: config.tz }, runDream);
+  crons.push(catchUp);
+  console.error(
+    `[minime] dream catch-up scheduled: ${fireAt.toISOString()} (last run: ${
+      lastDreamAt ? lastDreamAt.toISOString() : "never"
+    })`,
+  );
+}
+
+async function beginOwnedMaintenance(
+  createCron: MaintenanceCronFactory,
+  crons: MaintenanceCron[],
+  run: (label: string, work: () => Promise<unknown>) => void,
+  runDream: () => void,
+): Promise<void> {
+  const nightly = createCron(config.dreamCron, { timezone: config.tz }, runDream);
+  crons.push(nightly);
+  console.error(
+    `[minime] dream scheduled: ${config.dreamCron} (next: ${nightly.nextRun()?.toISOString()})`,
+  );
+
+  if (config.backupCron && config.resticRepository && config.resticPasswordFile) {
+    const snapshot = createCron(config.backupCron, { timezone: config.tz }, () =>
+      run("db snapshot", dbSnapshot),
+    );
+    crons.push(snapshot);
+    console.error(
+      `[minime] db snapshot scheduled: ${config.backupCron} (next: ${snapshot.nextRun()?.toISOString()})`,
+    );
+  } else {
+    console.error(
+      "[minime] db snapshot disabled (set BACKUP_CRON, RESTIC_REPOSITORY, and RESTIC_PASSWORD_FILE to enable)",
+    );
+  }
+
+  await scheduleDreamCatchUp(createCron, crons, runDream);
+}
+
 /** Trusted maintenance scheduler. The MCP child never receives restic or owner DB credentials. */
-export function startOwnerMaintenanceSchedule(
+export async function startOwnerMaintenanceSchedule(
   createCron: MaintenanceCronFactory = createMaintenanceCron,
-): OwnerMaintenanceSchedule {
+): Promise<OwnerMaintenanceSchedule> {
   const crons: MaintenanceCron[] = [];
   const active = new Set<Promise<unknown>>();
+  let lock: MaintenanceLockHandle | null = null;
+  let retry: MaintenanceCron | undefined;
+
   const run = (label: string, work: () => Promise<unknown>) => {
     const task = work()
       .then((result) => {
@@ -245,34 +342,45 @@ export function startOwnerMaintenanceSchedule(
     void task.finally(() => active.delete(task));
   };
 
-  const nightly = createCron(config.dreamCron, { timezone: config.tz }, () =>
-    run("dream", () => withAdminDbScope(() => dream())),
-  );
-  crons.push(nightly);
-  console.error(
-    `[minime] dream scheduled: ${config.dreamCron} (next: ${nightly.nextRun()?.toISOString()})`,
-  );
+  const runDream = () => run("dream", () => withAdminDbScope(() => dream()));
 
-  if (config.backupCron && config.resticRepository && config.resticPasswordFile) {
-    const snapshot = createCron(config.backupCron, { timezone: config.tz }, () =>
-      run("db snapshot", dbSnapshot),
-    );
-    crons.push(snapshot);
-    console.error(
-      `[minime] db snapshot scheduled: ${config.backupCron} (next: ${snapshot.nextRun()?.toISOString()})`,
-    );
+  const attemptTakeover = async (): Promise<void> => {
+    // Also the runtime pool, not admin scope -- see scheduleDreamCatchUp above.
+    const handle = await tryAcquireMaintenanceLock();
+    if (!handle) return;
+    lock = handle;
+    retry?.stop();
+    await beginOwnedMaintenance(createCron, crons, run, runDream);
+  };
+
+  const initialLock = await tryAcquireMaintenanceLock();
+  if (initialLock) {
+    lock = initialLock;
+    await beginOwnedMaintenance(createCron, crons, run, runDream);
   } else {
-    console.error(
-      "[minime] db snapshot disabled (set BACKUP_CRON, RESTIC_REPOSITORY, and RESTIC_PASSWORD_FILE to enable)",
+    console.error("[minime] maintenance owned by another process");
+    retry = createCron(MAINTENANCE_RETRY_CRON, { timezone: config.tz }, () =>
+      run("maintenance takeover", attemptTakeover),
     );
+    crons.push(retry);
   }
 
   let closing: Promise<void> | undefined;
   return {
     close() {
       closing ??= (async () => {
+        retry?.stop();
+        // Let any in-flight takeover finish first -- it may still be about to register the
+        // dream/backup/catch-up crons a successful takeover creates, and those must be stopped
+        // too, not leaked past close().
+        await Promise.allSettled([...active]);
         for (const cron of crons) cron.stop();
         await Promise.allSettled([...active]);
+        if (lock) {
+          const handle = lock;
+          lock = null;
+          await releaseMaintenanceLock(handle);
+        }
       })();
       return closing;
     },

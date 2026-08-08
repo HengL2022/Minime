@@ -377,7 +377,7 @@ async function main(): Promise<number> {
         }
         throw error;
       }
-      const schedule = startOwnerMaintenanceSchedule();
+      const schedule = await startOwnerMaintenanceSchedule();
       try {
         const child = spawnRuntimeChild(config.runtimeDatabaseUrl);
         return await superviseRuntimeChild(child);

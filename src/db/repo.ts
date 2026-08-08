@@ -27,8 +27,10 @@ import { type RecurFreq, nextDue } from "../util/recurrence";
 import {
   type DbExecutor,
   type DbPool,
+  type DbReservation,
   db,
   hasDbTransaction,
+  reserveDb,
   withDbTransaction,
   withDurableRuntimeDbTransaction,
   withReservedDb,
@@ -538,6 +540,19 @@ export async function logEgressOutcome(input: {
 export async function eventsSince(since: Date): Promise<any[]> {
   return db()`select id, at, actor, verb, entity_type, entity_id, payload
              from events where at >= ${since} order by at desc`;
+}
+
+// Latest `at` for one verb, or across every verb when omitted. The maintenance scheduler (W3-5)
+// uses the verb form to ask "when did dream last finish" and the verb-less form to ask "has this
+// database seen any activity at all" — the freshness signal that keeps a brand-new install from
+// immediately catching up a dream that was never scheduled, while still catching up an older
+// database where dream never ran.
+export async function lastEventAt(verb?: string): Promise<Date | null> {
+  const rows = verb
+    ? await db()`select max(at) as at from events where verb = ${verb}`
+    : await db()`select max(at) as at from events`;
+  const at = rows[0]?.at;
+  return at ? new Date(at) : null;
 }
 
 // ---------------------------------------------------------------- chunks & search
@@ -2692,6 +2707,42 @@ export async function withCompiledNoteTargetLease<T>(
     db()`hashtextextended('minime:compiled-note:' || ${targetKey}, 0)`,
     work,
   );
+}
+
+// Single-maintenance-owner coordination (W3-5): every resident `serve` calls
+// tryAcquireMaintenanceLock() before scheduling dream/backup; only the winner runs them. Unlike
+// withCompiledNotesLease's pg_advisory_lock (blocks until free, held only for one `work()` call),
+// this is pg_try_advisory_lock (returns immediately) on a dedicated reserved connection the
+// caller keeps for as long as it owns maintenance. The lock is released explicitly via
+// releaseMaintenanceLock(), or automatically by Postgres if the holding connection/process dies —
+// so a crashed owner cannot deadlock a survivor's takeover retry.
+const MAINTENANCE_LOCK_KEY = [1296649541, 2] as const;
+
+export interface MaintenanceLockHandle {
+  readonly reservation: DbReservation;
+}
+
+/** Non-blocking: resolves a handle when the caller becomes the maintenance owner, else null. */
+export async function tryAcquireMaintenanceLock(): Promise<MaintenanceLockHandle | null> {
+  const reservation = await reserveDb();
+  const [row] = (await reservation.executor`
+    select pg_try_advisory_lock(${MAINTENANCE_LOCK_KEY[0]}, ${MAINTENANCE_LOCK_KEY[1]}) as locked
+  `) as { locked: boolean }[];
+  if (!row?.locked) {
+    await reservation.release();
+    return null;
+  }
+  return { reservation };
+}
+
+/** Release a handle from tryAcquireMaintenanceLock() and return its connection to the pool. */
+export async function releaseMaintenanceLock(handle: MaintenanceLockHandle): Promise<void> {
+  try {
+    await handle.reservation.executor`
+      select pg_advisory_unlock(${MAINTENANCE_LOCK_KEY[0]}, ${MAINTENANCE_LOCK_KEY[1]})`;
+  } finally {
+    await handle.reservation.release();
+  }
 }
 
 export async function listActivePages(actor?: AccessActor): Promise<any[]> {

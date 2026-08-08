@@ -419,7 +419,7 @@ describe("resident serve authority split", () => {
       resticPasswordFile: config.resticPasswordFile,
     };
     const registrations: Array<{ pattern: string; timezone: string }> = [];
-    let schedule: ReturnType<typeof startOwnerMaintenanceSchedule> | undefined;
+    let schedule: Awaited<ReturnType<typeof startOwnerMaintenanceSchedule>> | undefined;
     try {
       process.env.TZ = "Etc/UTC";
       config.tz = "Asia/Singapore";
@@ -428,13 +428,17 @@ describe("resident serve authority split", () => {
       config.resticRepository = "test:repository";
       config.resticPasswordFile = "/test/restic-password";
 
-      schedule = startOwnerMaintenanceSchedule((pattern, options) => {
+      schedule = await startOwnerMaintenanceSchedule((pattern, options) => {
         registrations.push({ pattern, timezone: options.timezone });
         return { nextRun: () => null, stop: () => {} };
       });
 
       expect(process.env.TZ).toBe("Etc/UTC");
-      expect(registrations).toEqual([
+      // Dream/backup are always registered first, in this order (see test/maintenance-lock.test.ts
+      // for dedicated coverage). A 3rd dream catch-up registration may also appear here depending
+      // on whether some other file already wrote a dream:summary event to this shared test
+      // database, so only the first two (deterministic, order-independent) are asserted exactly.
+      expect(registrations.slice(0, 2)).toEqual([
         { pattern: "1 2 * * *", timezone: "Asia/Singapore" },
         { pattern: "3 4 * * *", timezone: "Asia/Singapore" },
       ]);

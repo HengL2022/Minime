@@ -2867,3 +2867,72 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   already exercised earlier in this file for W2-3's anti-laundering evidence-floor fix (see the
   `minime_refile` entry above). The owner's end-of-program review before any publication remains
   the final gate.
+
+## 2026-08-07 — Single maintenance owner: advisory lock in serve + dream missed-run catch-up
+
+- **Context:** Livability-program task W3-5. Before this task, every resident `serve` process
+  unconditionally created its own nightly dream cron and 15-minute backup cron
+  (`startOwnerMaintenanceSchedule`, `src/serve.ts`) — the docs/DEVELOPMENT.md backlog explicitly
+  named this a gap: "coordinate multiple MCP processes so one process owns watcher/dream/backup
+  work with clean takeover." Two concurrent `serve` processes against the same database (e.g. an
+  MCP-host-spawned session alongside a resident owner service) meant duplicate dream runs and
+  duplicate backup snapshots, with no signal to either process that the other existed.
+- **Decision:** Every `serve` process now calls `repo.tryAcquireMaintenanceLock()` — a
+  non-blocking `pg_try_advisory_lock` on a fixed two-int key `(1296649541, 2)`, distinct from
+  `withCompiledNotesLease`'s `(1296649541, 1)` — before creating any cron. The winner's behavior
+  is unchanged (same dream/backup crons, same log lines). A loser logs `"[minime] maintenance
+  owned by another process"` and schedules only a takeover-retry cron (every 5 minutes,
+  `repo.tryAcquireMaintenanceLock()` again); on success it starts the full schedule exactly as the
+  original winner would have. The lock is a session-scoped Postgres advisory lock held on a
+  dedicated reserved connection for the scheduler's lifetime, released explicitly via
+  `repo.releaseMaintenanceLock()` in `close()` or automatically by Postgres if the holding
+  connection/process dies — so a crashed owner cannot deadlock the survivor's takeover. This
+  implements "maintenance OFF unless it wins the lock" with zero configuration; an MCP-host-spawned
+  `serve` simply loses to a resident owner service without needing to know it exists.
+  Watcher/inbox coordination is explicitly **not** addressed here (inbox claims are already
+  fenced via `claimInboxItem`; multi-watcher coordination stays on the DEVELOPMENT.md backlog).
+  Catch-up: immediately after winning the lock (initially or via takeover), the winner reads
+  `repo.lastEventAt('dream:summary')` and asks croner where the dream cron's next fire after that
+  instant would have been. If that instant already passed — or dream has never once run on a
+  database that has any other event at all (`repo.lastEventAt()` with no verb, the "non-fresh"
+  signal) — it runs one `dream()` after a random 30-90s delay through the existing `run()`
+  wrapper, so a failure surfaces exactly like a normal scheduled failure. `dream()` always writes
+  its `dream:summary` event as the last step even when individual steps fail
+  (`pipeline/dream.ts`), so catch-up cannot loop.
+- **Also fixed as a direct prerequisite:** writing `test/maintenance-lock.test.ts`'s catch-up
+  cases (which fire a real `dream()` through the real `run()` wrapper, per the task's own test
+  spec) surfaced a pre-existing, unconditional deadlock: `dream()` always runs under
+  `withAdminDbScope` (`src/serve.ts`, unchanged by this task), and `adminSql` was a single
+  (`max: 1`) connection pool. `repo.withCompiledNotesLease` (dream step `2b_compile_notes`)
+  reserves one connection from whatever pool is ambient and holds it for its whole callback, and
+  that callback's own nested plain reads — plus a *second*, per-candidate
+  `withCompiledNoteTargetLease` reservation nested inside it — need further connections from the
+  same pool. Under admin scope that pool was `adminSql`, so every admin-scoped `compileNotes` call
+  deadlocked waiting on a connection its own outer reservation was already holding — reproduced
+  even on a fully empty database, so this was not data-dependent and was already live in
+  production on every real nightly `dream()` run, independent of this task's lock/catch-up
+  changes. `src/db/client.ts`'s `adminSql` pool is now `max: 5` (matching `runtimePool`'s
+  headroom; verified against the deepest observed nesting of outer lease + inner target lease +
+  one in-flight query, plus the full H1 compiled-notes regression suite). The maintenance lock and
+  `lastEventAt` reads deliberately do **not** use `withAdminDbScope` — `events` SELECT is already
+  granted to the restricted runtime role (`db/migrations/007_rls.sql`), so they use the
+  5-connection runtime pool instead of adding more permanent load to the admin pool.
+- **Why:** A durable two-int advisory-lock key and the "lose silently, retry, take over cleanly"
+  contract are the kind of recovery-adjacent coordination semantics this file exists to pin down —
+  a future change to the key, the retry cadence, or the catch-up freshness heuristic should be a
+  deliberate, recorded choice, not incidental drift. The freshness heuristic (`lastEventAt()` with
+  no verb as "has this database seen any activity at all") is a specific, recorded design choice:
+  it intentionally does not gate on `onboard:complete` specifically, so a database used only
+  through MCP tools without ever running interactive onboarding is still treated as "non-fresh"
+  and gets caught up. The `adminSql` pool bump is recorded here rather than left as a silent diff
+  because it changes a dependency's connection-count behavior and because the bug it fixes was
+  otherwise going to make this task's own acceptance criterion ("a single dream:summary per night
+  in tests") false in practice — dream never running to completion in production is a correctness
+  regression this task's tests would otherwise have had to paper over instead of catching.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W3 workstream,
+  matching the approval cover already used for the other W3 entries above. The `adminSql` pool-size
+  fix is a conservative, additive change (raising a connection ceiling cannot break code that only
+  ever needed one connection at a time) verified against the full H1 compiled-notes regression
+  suite; it is flagged for a follow-up session to review whether the deeper nested-lease pattern
+  itself (not just the pool ceiling) warrants a more principled fix.
