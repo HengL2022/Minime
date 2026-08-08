@@ -59,13 +59,15 @@ auto-resolve).
    - **phantom_person** — the nightly watchdog flagged a `people` row that looks like it should
      really be an org (payload: `person_id`, a `canonical_name` — masked like any other title if
      locked — and a fixed `suggestion`: "retype to org, or dismiss if this really is a person").
-     Ask the owner which applies. Genuinely a person → dismiss. It's really the org, already on
-     file as its own row → they run the existing repair, `bun run scripts/repair.ts
-     retype-org-to-person --org-id=<id>` (retires the org, folds it into this person row). A
-     duplicate of a person already on file → they run `bun run scripts/repair.ts merge-person
-     --from=<this-person-id> --into=<the-real-person-id>` (this also auto-resolves the queue
-     item — no separate `resolve` call needed). Both repairs are owner-run only: surface the
-     command, never execute it yourself.
+     Ask the owner which applies. Genuinely a person → dismiss. A duplicate of a person already
+     on file → they run `bun run scripts/repair.ts merge-person --from=<this-person-id>
+     --into=<the-real-person-id>` (owner-run only, surface the command, never execute it
+     yourself; this also auto-resolves the queue item — no separate `resolve` call needed). It's
+     really the org, already on file as its own row → there is no sanctioned repair for that
+     direction yet: `retype-org-to-person` looks like a fit but runs the opposite way, always
+     retiring the *org* side and keeping or creating the *person* — pointed at this case it would
+     retire the correct org and entrench the wrong person no matter whose id is passed. Tell the
+     owner there's no safe automated fix today and leave the item open rather than guess.
 3. Resolve each handled item: `minime_review_queue` action `resolve`, status `resolved`
    (handled) or `dismissed` (owner says ignore) — skip this when `minime_refile` or a person
    merge already resolved it for you. Confirm with IDs, one line each.
