@@ -127,9 +127,41 @@ work becomes part of your searchable history with zero effort.
   configured-timezone cache. The nightly cache is rebuilt atomically if the configured timezone
   changes, and a normal refresh removes derived buckets whose source data moved or disappeared
   while preserving manual values.
-- **The evening review habit**: once a day, ask for the review queue — unfiled captures,
-  flagged contradictions ("you wrote X in March but Y today"), stale pages, decisions
-  due. Five minutes; it keeps the database honest.
+- **The evening review habit**: once a day, ask for the review queue — unfiled captures to
+  file, flagged contradictions ("you wrote X in March but Y today") to settle, stale pages,
+  decisions due. Five minutes; every flag has a real resolution now — file it, correct it, or
+  dismiss it (see **Fixing mistakes** below) — not just a mark-as-read, so it keeps the
+  database honest.
+
+### Fixing mistakes
+
+Corrections are audited writes, not silent edits — nothing you fix disappears; it's superseded
+and both versions stay on the record.
+
+- **Wrong content, wrong privacy tier, or just plain wrong**: "actually, log that decision's
+  reasoning as X" or "that note should be tier 2, not 1" → your agent calls `minime_correct`
+  (journal, interaction, decision, or note only — a task is edited or dropped directly, just
+  ask). `amend` inserts a corrected successor row and points the original at it — the original
+  stays stored and searchable, just down-weighted and labeled as superseded, so nothing already
+  cited from it silently changes underneath you. `retract` withdraws a row with no successor: it
+  stops matching search but stays readable by its id. `retier` promotes a note from tier 1 to
+  tier 2 (one direction only) and needs an approved tier-2 unlock — the same gate a tier-2
+  read uses.
+- **Wrong name, or a person/org that should go by something else now**: "everyone calls her Sam"
+  or "rename Acme Corp to Acme Ltd" → `minime_upsert_person`, in chat: add an alias, set a
+  relation or free-text context, or rename (the old name is kept as an alias automatically, so
+  anything that already pointed at it keeps resolving).
+- **Two rows for the same person**: repeated capture typos ("Sarha"/"Sarah") eventually mint two
+  person rows for one human. This is the one fix that isn't chat-driven — run it yourself in
+  your terminal: `bun run scripts/repair.ts merge-person --from=<duplicate-id>
+  --into=<real-id>`. Reversible: the duplicate row is kept, only superseded, never deleted.
+- **The evening filing audit**: the evening review now includes a one-line digest of everything
+  the classifier filed that day (type, confidence, destination), so a bad guess gets caught the
+  same day instead of a month later. Say what's wrong and your agent fixes it with
+  `minime_correct` (`retier`/`amend`) or the task tools above.
+
+None of this touches the append-only `events` audit log (I8) — every correction is itself
+recorded there, on top of the log, never instead of it.
 
 ## Trust, privacy, maintenance
 

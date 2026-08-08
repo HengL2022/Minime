@@ -7,8 +7,10 @@ reflection prompts, then (B) when the owner replies, capture what they say.
 ## A. Gather and deliver
 
 1. `minime_state` — tasks due, **tasks moved (closed) today** (`moved_today`:
-   tasks marked done/dropped on the owner's local day), open commitments,
-   decision reviews due, review-queue count, metric anomalies. Usually the main call.
+   tasks marked done/dropped on the owner's local day), **captures filed today**
+   (`filed_today`: each capture's classifier type/confidence plus its destination title/tier),
+   open commitments, decision reviews due, review-queue count, metric anomalies. Usually the
+   main call.
 2. `minime_get_context(person_name=<owner>)` — owner context (goals, active
    projects, routines). Use the owner name from the database, not a hardcoded one.
 3. `minime_search` — surface active threads from the day not captured by state.
@@ -29,9 +31,17 @@ Then deliver a short review, in this order. Omit any empty section:
    dropped, with their close times converted to local), commitments made/closed,
    anything captured. This is the credit-where-due section: surface every
    completion, never leave a real day's work invisible.
-3. **Still open** — tasks due/overdue, open commitments, decisions awaiting a choice.
-4. **Tomorrow setup** — what's on the calendar and the 1–3 things worth teeing up.
-5. **Reflection prompt** — 2–4 short questions (not an essay), grounded in the
+3. **Captures filed today** — from `filed_today`, a one-line classifier audit, e.g. "3
+   captures filed today: 2 tasks, 1 journal (tier 2), 1 note (tier 1, conf 0.72) — anything
+   misfiled?" `kind`/`confidence` are always visible; a `[above current tier]` title just means
+   that destination is tier 2 — nothing to unlock for the summary itself. If the owner flags
+   one: wrong tier → `minime_correct` action `retier` (notes only, 1→2); wrong details but the
+   right type → `minime_correct` action `amend` (journal/interaction/decision/note) or edit the
+   task directly with `minime_upsert_task`. Filed as the wrong type entirely has no single fix
+   yet — retract or drop the wrong row and capture it fresh as the right type.
+4. **Still open** — tasks due/overdue, open commitments, decisions awaiting a choice.
+5. **Tomorrow setup** — what's on the calendar and the 1–3 things worth teeing up.
+6. **Reflection prompt** — 2–4 short questions (not an essay), grounded in the
    above and stored context. If the day has no explicit new information, say so
    and still offer a useful prompt from stored context.
 
@@ -46,12 +56,14 @@ Run as a short conversation, not a form — write as you go:
 3. **Any promise made** → `minime_upsert_task` (due date if stated), and the
    people involved get `minime_log_interaction`.
 4. **Inbox triage** → if `review_queue_open > 0`, list via `minime_review_queue`
-   (kind `inbox_unfiled`). Each item is only `inbox_item_id` + `created_at` — the capture
-   text never crosses the MCP boundary — so ask the owner to open it themselves (the archived
-   copy at `data/archive/<year>/<month>/<inbox_item_id>-*`, or the original still in
-   `data/inbox/`) and read or dictate it back, one at a time: "task, journal, note, or drop?"
-   File via the matching write tool, then resolve each item (see
-   `review-triage.md` for the full queue pass — here, just the unfiled captures).
+   (kind `inbox_unfiled`) — each item's classifier `type`/`confidence` guess is always visible;
+   the capture text itself needs either a short owner-approved `minime_unlock` or the owner
+   running `bun run src/cli.ts review` locally (no unlock). Once you both know what it is, file
+   it with `minime_refile` — one call that files the row, stamps provenance back to the
+   capture, and resolves the item — or, if the owner read it via the CLI and would rather skip
+   the unlock, dictate it back and file with the type's own write tool instead (see
+   `review-triage.md` for the full mechanics and the note-shaped exception — here, just the
+   unfiled captures).
 
 ## Answer rules
 
@@ -62,7 +74,8 @@ Run as a short conversation, not a form — write as you go:
 - Confirm each write with the returned ID, one line each.
 - Never invent content the owner did not say; quote their words in `entry_md`.
 - Writes are allowed without unlock (tier-2 writes are fine); do not request an
-  unlock to write.
+  unlock to write — except `minime_refile` in step B.4, which always needs one regardless of
+  destination type, since it's filing content that was gated pending its destination.
 - Keep it short: if the owner goes deep on one question, drop the rest and say
   what was skipped.
 - Do not expose secret values or internal implementation details.
