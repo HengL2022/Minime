@@ -2644,3 +2644,52 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   correction-loop workstream, which explicitly includes review-finding remediation passes on
   already-approved task work; this is a correctness/privacy fix within W2-6's existing scope, not
   a product-shape change.
+
+## 2026-08-08 — minime_refile interface and its anti-laundering evidence-floor policy
+
+- **Context:** Livability-program task W2-3 added `minime_refile`, the owner's manual-filing path
+  for a pending inbox capture (`status=pending`, whether left by the automatic classifier at
+  too-low confidence or a duplicate match) into one of five typed destinations — closing the
+  triage dead end the W1-2 net-surface entry (MCP door row, `docs/SUBSYSTEMS.md`) already names.
+  The tool reuses the watcher's own `fileRow`/claim machinery
+  (`claimPendingInboxItemForRefile`, `src/db/repo.ts`) rather than a parallel filing path, so a
+  manually-filed row goes through the same date-guardrail, dedup, and person/org-resolution logic
+  the automatic pipeline uses. Despite shipping across commits 5dafa0c..ab5db95, neither the
+  tool's public interface nor its anti-laundering policy had a dedicated entry — this backfills
+  both, found as an open review finding (task W2-3F) during 2026-08-08 remediation.
+- **Decision:** (1) **Interface**: `minime_refile(inbox_item_id, type, ...overrides)`, where
+  `type` is one of `task | journal | note | interaction | decision` and the overrides are
+  per-type fields (`title`, `due`, `person_name`, `kind`, `question`, `choice`, `mood`, and
+  `tier` — the last honored only when `type=note`). The call requires an approved tier-2 unlock
+  (`minime_unlock`) up front, rejects a non-pending item and a duplicate-task match with
+  `BAD_INPUT`, resolves any open `inbox_unfiled`/`duplicate` review-queue rows for the capture on
+  success, and never echoes the capture's own text back in its response. (2) **Anti-laundering
+  policy**: beyond the entry-gate unlock, every refile computes a floor —
+  `max(evidenceFloor(stored classifier guess), noteHintTier(capture text))` — from the capture's
+  OWN evidence, read at claim time (`claim.item`, never the pre-claim snapshot, so a concurrent
+  classifier pass landing in the gap is not missed). `journal`/`interaction` are unconditionally
+  tier 2 (`insertJournal`/`insertInteraction` default `tier=2` regardless of any override), so
+  those two destinations need no floor check of their own. A `type=note` refile is floored, never
+  lowered: `fields.tier = max(params.tier ?? floor, floor)`. `type=task`/`type=decision` are
+  REJECTED outright (`BAD_INPUT`) whenever the floor is 2, rather than silently filed at their
+  permanent tier-1 default — neither table has any tier-2 pathway through this tool, so there is
+  no lower-tier-but-still-safe fallback to downgrade into.
+- **Why:** A capture's free text is tier-2-gated before it is filed (2026-08-08, unfiled-capture
+  entry above) precisely because it might turn out to be journal/interaction-grade; a manual
+  filing path that let a caller pick a permanently-unlocked destination type would reopen exactly
+  that laundering channel the read-side gate closes. journal/interaction cannot be the channel
+  (tier 2 unconditionally), so the risk concentrates on task/decision (no tier-2 representation at
+  all) and note (tier is caller-choosable) — rejecting task/decision outright, rather than
+  downgrading, is the only sound response once the evidence says tier-2, since neither table can
+  represent "tier-2 but stored here." Applying that SAME evidence floor to task/decision, not a
+  narrower guard, was a fix made during 2026-08-08 W2-3 review-finding remediation: the
+  first-landed version only guarded `type=note`, so a capture whose stored evidence already said
+  journal/interaction could be refiled verbatim into tasks/decisions — the exact laundering path
+  this mechanism exists to close.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W2
+  correction-loop workstream — the interface and its anti-laundering default were adopted as
+  planned, not a bespoke per-task approval. The reject-vs-floor policy shape described in (2) was
+  designed during 2026-08-08 W2-3 review-finding remediation, within that same ratification's
+  explicit cover for review-finding remediation on already-approved task work; the owner's
+  end-of-program review before any publication remains the final gate.

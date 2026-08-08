@@ -365,6 +365,57 @@ describe("minime_refile", () => {
     expect(inboxRow!.status).toBe("pending");
   });
 
+  test("a note tier override is floored by the capture's own agent-session hint marker, with no stored classifier evidence at all", async () => {
+    const text =
+      "unclear: ZQX-REFILE-HINTFLOOR fictional agent session outcome\n" +
+      "<!-- hint: agent work session -->\nverbatim fictional session prose about the storm watch";
+    const inboxId = await pendingUnfiled("zqx-refile-hintfloor.md", text);
+    // Unlike the stored-evidence floor tests above, this capture was never classified at all —
+    // classifier_output is NULL, so evidenceFloor(null) is the ordinary tier-1 default. The floor
+    // must still land at 2 because noteHintTier(text) reads the capture's OWN archived bytes for
+    // the literal agent-session marker, independent of any stored classifier guess. Direct-SQL
+    // test scaffolding (test/helpers.ts convention), not an application write path.
+    await testSql`update inbox_items set classifier_output = null where id = ${inboxId}::uuid`;
+
+    const ctx = sessionToolCtx("agent:refile-hintfloor");
+    await requestAndApproveTier2(ctx);
+    const data = expectOk(
+      await refile(ctx, {
+        inbox_item_id: inboxId,
+        type: "note",
+        title: "Storm watch hint-floor note",
+        tier: 1, // requested below the floor
+      }),
+    );
+    const [page] = await testSql`select tier from pages where id = ${data.filed_id}::uuid`;
+    expect(page!.tier).toBe(2); // floored by the text's own hint marker, not stored evidence
+  });
+
+  test("type=task is rejected from the capture's own agent-session hint marker alone, with no stored classifier evidence", async () => {
+    const text =
+      "unclear: ZQX-REFILE-HINTTASKFLOOR fictional agent session outcome\n" +
+      "<!-- hint: agent work session -->\nverbatim fictional session prose about the storm watch";
+    const inboxId = await pendingUnfiled("zqx-refile-hinttaskfloor.md", text);
+    await testSql`update inbox_items set classifier_output = null where id = ${inboxId}::uuid`;
+
+    const ctx = sessionToolCtx("agent:refile-hinttaskfloor");
+    await requestAndApproveTier2(ctx);
+    const error = expectErr(
+      await refile(ctx, { inbox_item_id: inboxId, type: "task", title: "Hint-floor task" }),
+    );
+    expect(error.code).toBe("BAD_INPUT");
+    expect(error.message).toContain("tier-2-grade");
+
+    // Same anti-laundering outcome as the stored-evidence case: nothing filed at any tier, and
+    // the reject path fired purely from the text's own hint marker (classifier_output stayed
+    // NULL throughout — there was never any stored evidence to fall back on).
+    expect(await testSql`select id from tasks where derived_from = ${inboxId}`).toHaveLength(0);
+    const [inboxRow] = await testSql`
+      select status, classifier_output from inbox_items where id = ${inboxId}::uuid`;
+    expect(inboxRow!.status).toBe("pending");
+    expect(inboxRow!.classifier_output).toBeNull();
+  });
+
   test("type=journal still succeeds when the capture's stored evidence is tier-2, since journal always files at tier 2 anyway", async () => {
     const inboxId = await pendingUnfiled(
       "zqx-refile-journal-floor.md",
