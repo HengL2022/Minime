@@ -2992,3 +2992,62 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
 - **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
   that authorized this branch's fully autonomous, wave-by-wave execution across the W3 workstream,
   matching the approval cover already used for the other W3 entries above.
+
+## 2026-08-09 — W3-8: sanitized local ops log amends the H3 content-free-diagnostics contract
+
+- **Context:** H3 (2026-07-23) made backup/repair diagnostics fully content-free: audit events
+  and console/CLI output carry only fixed sentinel strings, never a path, URL, child process
+  output, or secret. That is the right default, but it also means a real, recurring backup
+  failure (a locked restic repository, a full disk, a bad restic password, an unreachable
+  Postgres) looks identical to the owner as any other failure — `minime doctor`/`ops_health`
+  (W3-7) can say a night failed, but not why, and the owner has no local way to tell "the disk is
+  full" from "the restic password file rotted" without re-running the command by hand and reading
+  raw output themselves.
+- **Decision:** Amends H3 to add one narrow, owner-only exception, ratified explicitly for this
+  task (see Approved by) rather than folded into the program's blanket wave approval, per this
+  task's own risk flag ("weakens a recorded privacy posture"). Audit events and console/CLI
+  output are unchanged in shape and stay exactly as content-free as H3 required. A new local file,
+  `data/logs/ops.log`, is the one addition: mode 0600 in a mode-0700 `data/logs/` directory (the
+  same directory the launchd/systemd service templates already redirect `serve`'s own
+  stdout/stderr into, `scripts/install-service.sh`), created/verified with the same symlink-safe
+  `preflightPrivateRoot`/`assertNoSymlinkComponents` conventions `atomic-file.ts` uses for
+  `data/inbox`, and rotated to `ops.log.1` (single generation, lazily checked before each append)
+  once the current file is at/over ~1MB. New `src/ops/ops-log.ts` is the whole surface:
+  `classifyStderrLine(line)` is a fixed, closed regex table — restic "repository is already
+  locked" → `repo_locked`; "no space left on device" → `disk_full`; "unable to open config
+  file"/"wrong password" → `repo_auth`; "connection refused" → `pg_unreachable`; anything else,
+  always, → `unclassified` — and never returns, retains, or logs the line it was given, matched or
+  not. `appendOpsLine({step, code?, errorClass?, detail?})` writes one line (ISO timestamp, fixed
+  step identifier, `exit=<code>` when a process exit code applies, `class=<errorClass or detail>`)
+  and is best-effort: every call site awaits it with `.catch(() => {})` so a logging failure can
+  never interrupt the operation it was trying to record. Three `appendOpsLine` call sites populate
+  it, all with fixed, code-level identifiers only: `backup.ts`'s shared command runner now pipes
+  stderr instead of discarding it (`stdout` is still ignored), bounded to the first 4KB and always
+  drained to completion so a verbose child can never deadlock the runner on a full, unread pipe; on a
+  nonzero exit from the dependency probe, `restic backup`, `restic forget`, or `pg_dump`, the
+  first line of that bounded buffer is classified and appended alongside the exit code (the other
+  `BACKUP_DETAIL` failure modes — data-root rejection, dump staging/cleanup, connection handoff,
+  manifest — have no child process/stderr to classify and are deliberately left unwired, a
+  conservative scope decision, not an oversight). Every `BACKUP_DETAIL` sentinel gains a fixed
+  suffix, `" — see data/logs/ops.log"`, added uniformly at the constant's definition (this is the
+  only change to those strings; the ad hoc "not configured"/"in flight" strings elsewhere in
+  `backup.ts` are untouched, and `dreamSummary`'s audit payload shape and its `DREAM_STEPS`
+  key-only filtering, W3-7, are unchanged). `dream.ts`'s per-step catch (now factored into an
+  exported `runDreamStep` for direct testability) and `serve.ts`'s cron-level catch both append one
+  line naming the fixed step/cron label and `error.constructor.name` only — never `error.message`,
+  which may carry private prose (dream.ts's existing comment on this, predating W3-8). Non-`Error`
+  throws fall back to `typeof error` (`"string"`, `"object"`, …), never the thrown value itself.
+- **Why:** A sanitized, allowlist-only local file that only the owner's own filesystem account can
+  read is a materially different exposure than loosening the audited/console-visible surface H3
+  locked down — it is never sent anywhere, never audited, never reachable by an agent (I2), and
+  every field written to it is drawn from a fixed, closed, code-level vocabulary (a regex table's
+  named classes, a process exit code, or a JS constructor name), never free text, matching the
+  same "fixed sentinel, never raw output" discipline H3 itself established for the audited
+  surfaces. The adversarial requirement (a crafted stderr line containing a fake secret or private
+  path must classify to `unclassified` and leave zero substring of itself in the file) is the
+  actual test of that boundary, not just the happy-path classification table.
+- **Approved by:** human owner, explicit ratification of this specific amendment (2026-08-07,
+  decision 8 of the livability-program owner review) — called out for dedicated sign-off distinct
+  from the blanket wave-execution approval used for the other W3 entries, because this task's own
+  risk field flagged it as weakening a previously recorded privacy posture (H3) and required
+  invariant review before merge.

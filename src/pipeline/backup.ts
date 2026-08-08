@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { lstat, open, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { appendOpsLine, classifyStderrLine } from "../ops/ops-log";
 import { preservePreviousSnapshotPair, publishSnapshotManifest } from "../ops/snapshot-manifest";
 import { ensurePrivateDataRoot } from "../util/atomic-file";
 import { DB_DUMP_DIR, config, ensurePrivateDumpDir } from "../util/config";
@@ -23,7 +24,12 @@ let inFlight = false;
 let probeHook: (() => Promise<void>) | undefined;
 
 export type BackupCommandFailure = "spawn_failed" | "exit_nonzero";
-export type BackupCommandResult = { ok: true } | { ok: false; failure: BackupCommandFailure };
+// code/stderrHead are populated on the real Bun.spawn path (a bounded, first-4KB capture --
+// see readBoundedStderr) so a failure can be sanitized into the local ops log; both are
+// optional so an injected __setCommandRunnerForTest runner may omit them entirely.
+export type BackupCommandResult =
+  | { ok: true }
+  | { ok: false; failure: BackupCommandFailure; code?: number; stderrHead?: string };
 export type BackupCommandRunner = (
   cmd: string[],
   env?: Record<string, string>,
@@ -34,17 +40,23 @@ export type PreUpdateSnapshotOutcome =
   | { kind: "unconfigured" }
   | { kind: "failed" };
 
+// W3-8: every sentinel below gains this fixed suffix, pointing the owner at the local
+// mode-0600 ops log (src/ops/ops-log.ts) that now carries a sanitized, allowlist-only
+// classification for command-driven failures (dependency/restic/pg_dump). The suffix is
+// added uniformly to this map only -- the ad hoc "not configured"/"in flight" strings
+// elsewhere in this file are untouched, and the audit event shape (dreamSummary) is unchanged.
+const OPS_LOG_HINT = " — see data/logs/ops.log";
 const BACKUP_DETAIL = {
-  dataRoot: "backup failed (data_root)",
-  dependency: "backup failed (dependency_unavailable)",
-  connection: "backup failed (pg_connection_handoff)",
-  connectionCleanup: "backup failed (connection_cleanup)",
-  staging: "backup failed (dump_staging)",
-  manifest: "backup failed (snapshot_manifest)",
-  pgDump: "backup failed (pg_dump_command)",
-  cleanup: "backup failed (dump_cleanup)",
-  resticBackup: "backup failed (restic_backup)",
-  resticRetention: "backup failed (restic_retention)",
+  dataRoot: `backup failed (data_root)${OPS_LOG_HINT}`,
+  dependency: `backup failed (dependency_unavailable)${OPS_LOG_HINT}`,
+  connection: `backup failed (pg_connection_handoff)${OPS_LOG_HINT}`,
+  connectionCleanup: `backup failed (connection_cleanup)${OPS_LOG_HINT}`,
+  staging: `backup failed (dump_staging)${OPS_LOG_HINT}`,
+  manifest: `backup failed (snapshot_manifest)${OPS_LOG_HINT}`,
+  pgDump: `backup failed (pg_dump_command)${OPS_LOG_HINT}`,
+  cleanup: `backup failed (dump_cleanup)${OPS_LOG_HINT}`,
+  resticBackup: `backup failed (restic_backup)${OPS_LOG_HINT}`,
+  resticRetention: `backup failed (restic_retention)${OPS_LOG_HINT}`,
 } as const;
 
 let commandRunnerForTest: BackupCommandRunner | undefined;
@@ -177,6 +189,39 @@ export function __setManifestWriterForTest(
   manifestWriterForTest = fn;
 }
 
+const STDERR_CAP_BYTES = 4_096;
+
+// Bounded stderr capture (W3-8): only the first STDERR_CAP_BYTES are kept, but the stream is
+// always read to completion so a verbose child can never block on a full, unread pipe. Never
+// throws -- a read error just yields whatever was captured before it, and classification
+// degrades to "unclassified" rather than losing the caller's own result.
+async function readBoundedStderr(
+  stream: ReadableStream<Uint8Array> | null,
+  capBytes: number,
+): Promise<string> {
+  if (!stream) return "";
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let kept = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && kept < capBytes) {
+        const remaining = capBytes - kept;
+        const slice = value.length > remaining ? value.subarray(0, remaining) : value;
+        chunks.push(slice);
+        kept += slice.length;
+      }
+    }
+  } catch {
+    /* best-effort capture; a partial or unreadable buffer still classifies safely */
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8");
+}
+
 async function run(cmd: string[], env?: Record<string, string>): Promise<BackupCommandResult> {
   if (commandRunnerForTest) {
     try {
@@ -189,12 +234,27 @@ async function run(cmd: string[], env?: Record<string, string>): Promise<BackupC
     const proc = Bun.spawn(cmd, {
       env: { ...process.env, ...env },
       stdout: "ignore",
-      stderr: "ignore",
+      stderr: "pipe",
     });
-    return (await proc.exited) === 0 ? { ok: true } : { ok: false, failure: "exit_nonzero" };
+    // Drain concurrently with awaiting exit, not after -- an unread stderr pipe can otherwise
+    // fill and deadlock the child before it ever exits.
+    const stderrPromise = readBoundedStderr(proc.stderr, STDERR_CAP_BYTES);
+    const code = await proc.exited;
+    const stderrHead = await stderrPromise;
+    return code === 0 ? { ok: true } : { ok: false, failure: "exit_nonzero", code, stderrHead };
   } catch {
     return { ok: false, failure: "spawn_failed" };
   }
+}
+
+// Sanitizes a failed command's captured stderr (first line only, allowlist-only -- see
+// classifyStderrLine) into the local ops log. Best-effort: logging never throws into the
+// caller, and is skipped entirely when the runner didn't fail (nothing to classify).
+async function logCommandFailure(step: string, result: BackupCommandResult): Promise<void> {
+  if (result.ok) return;
+  const firstLine = (result.stderrHead ?? "").split(/\r?\n/)[0] ?? "";
+  const detail = classifyStderrLine(firstLine);
+  await appendOpsLine({ step, code: result.code, detail }).catch(() => {});
 }
 
 function resticEnv(): Record<string, string> {
@@ -336,6 +396,7 @@ async function pgDump(): Promise<{ ok: boolean; dumpDir: string; detail: string 
   } catch {
     dump = { ok: false, failure: "spawn_failed" };
   }
+  if (!dump.ok) await logCommandFailure("pg_dump_command", dump);
   let serviceDisposeFailed = false;
   try {
     if (serviceDisposeForTest) await serviceDisposeForTest(service);
@@ -413,7 +474,10 @@ async function runBackup(tag: "dream" | "db-snap"): Promise<{ ran: boolean; deta
       }
     }
     const which = await run(["sh", "-c", "command -v restic && command -v pg_dump"]);
-    if (!which.ok) return { ran: false, detail: BACKUP_DETAIL.dependency };
+    if (!which.ok) {
+      await logCommandFailure("dependency_unavailable", which);
+      return { ran: false, detail: BACKUP_DETAIL.dependency };
+    }
     try {
       await preservePreviousSnapshotPair(resolve(dumpDirForTest ?? DB_DUMP_DIR));
     } catch {
@@ -434,7 +498,10 @@ async function runBackup(tag: "dream" | "db-snap"): Promise<{ ran: boolean; deta
         ? ["restic", "backup", "--tag", "dream", config.dataDir, dumped.dumpDir]
         : ["restic", "backup", "--tag", "db-snap", dumped.dumpDir];
     const bk = await run(backupArgs, env);
-    if (!bk.ok) return { ran: false, detail: BACKUP_DETAIL.resticBackup };
+    if (!bk.ok) {
+      await logCommandFailure("restic_backup", bk);
+      return { ran: false, detail: BACKUP_DETAIL.resticBackup };
+    }
     const retained =
       tag === "dream"
         ? await run(
@@ -471,7 +538,10 @@ async function runBackup(tag: "dream" | "db-snap"): Promise<{ ran: boolean; deta
             ],
             env,
           );
-    if (!retained.ok) return { ran: false, detail: BACKUP_DETAIL.resticRetention };
+    if (!retained.ok) {
+      await logCommandFailure("restic_retention", retained);
+      return { ran: false, detail: BACKUP_DETAIL.resticRetention };
+    }
     return {
       ran: true,
       detail: tag === "dream" ? "backup + prune complete" : "db snapshot + prune complete",

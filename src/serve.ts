@@ -10,6 +10,7 @@ import {
   releaseMaintenanceLock,
   tryAcquireMaintenanceLock,
 } from "./db/repo";
+import { appendOpsLine } from "./ops/ops-log";
 import { dbSnapshot } from "./pipeline/backup";
 import { dream } from "./pipeline/dream";
 import { REPO_ROOT, config, parseProviderEnvironment } from "./util/config";
@@ -361,10 +362,16 @@ export async function startOwnerMaintenanceSchedule(
           console.error(`[minime] ${label} skipped: ${String(result.detail)}`);
         }
       })
-      .catch((error) => {
+      .catch(async (error) => {
         console.error(
           `[minime] ${label} failed: ${error instanceof Error ? error.message : error}`,
         );
+        // Same sanitization discipline as dream.ts's runDreamStep: the fixed cron label and
+        // the exception's own constructor name only, never error.message, into the local
+        // owner-only ops log. Best-effort -- a logging failure here must never throw back
+        // into this cron's own error path.
+        const errorClass = error instanceof Error ? error.constructor.name : typeof error;
+        await appendOpsLine({ step: label, errorClass }).catch(() => {});
       });
     active.add(task);
     void task.finally(() => active.delete(task));

@@ -273,7 +273,13 @@ or a distributed rollback across Postgres, files, model providers, or indexes.
   database clients receive credentials through short-lived private libpq service files rather
   than argv. Before replacing `minime.sql`, backup retains and verifies a private `.previous`
   dump+manifest pair; each new file is fsynced and atomically renamed. Backup/repair diagnostics
-  never include child output or connection fragments. Restore drills bind every connection to
+  never include child output or connection fragments in audit events or console/CLI output. A
+  separate local, owner-only sanitized log at `data/logs/ops.log` (mode 0600 in a mode-0700
+  directory, rotated to `ops.log.1` at ~1MB) records one line per backup command, dream-step, or
+  cron failure: a fixed step identifier, an exit code when there is one, and a classification
+  drawn from a fixed allowlist (for example `repo_locked`, `disk_full`, `pg_unreachable`,
+  `repo_auth`, or `unclassified` for anything that does not match) — never raw child stderr, a
+  path, or an exception message. Restore drills bind every connection to
   the fixed local source/admin/scratch database names, then install and attempt cleanup on
   every normal, failure, and signal exit and succeed normally; a persistent OS/trusted-rm
   refusal returns fixed content-free `cleanup_failed` and may leave only a validated private

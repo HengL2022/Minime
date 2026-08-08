@@ -70,7 +70,7 @@ describe("data archive boundary", () => {
       config.dataDir = join(linkedParent, "minime-data");
       await expect(backup()).resolves.toEqual({
         ran: false,
-        detail: "backup failed (data_root)",
+        detail: "backup failed (data_root) — see data/logs/ops.log",
       });
       expect(lstatSync(outside).mode & 0o777).toBe(beforeMode);
       expect(readdirSync(outside)).toEqual(beforeEntries);
@@ -269,7 +269,10 @@ describe("snapshot manifest admission", () => {
       return { ok: true };
     });
     const result = await dbSnapshot();
-    expect(result).toEqual({ ran: false, detail: "backup failed (snapshot_manifest)" });
+    expect(result).toEqual({
+      ran: false,
+      detail: "backup failed (snapshot_manifest) — see data/logs/ops.log",
+    });
     expect(resticCalls).toEqual([]);
   });
 
@@ -299,7 +302,7 @@ describe("snapshot manifest admission", () => {
 
     await expect(dbSnapshot()).resolves.toEqual({
       ran: false,
-      detail: "backup failed (snapshot_manifest)",
+      detail: "backup failed (snapshot_manifest) — see data/logs/ops.log",
     });
     const previousDump = readFileSync(join(root, PREVIOUS_SNAPSHOT_DUMP_BASENAME), "utf8");
     const previousManifest = await readSnapshotManifest(

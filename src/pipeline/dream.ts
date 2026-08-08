@@ -20,6 +20,7 @@ import {
   staleRecentlyFlagged,
   upsertMetricValue,
 } from "../db/repo";
+import { appendOpsLine } from "../ops/ops-log";
 import { drainEmbedBacklog } from "../search/index-parent";
 import { auditPayload } from "../util/audit-payload";
 import { configuredTimeZone, todayStr } from "../util/clock";
@@ -236,17 +237,31 @@ export { backup };
 
 // -- orchestration -----------------------------------------------------------
 
+// One dream step, best-effort: a thrown exception is recorded as the literal "failed" in the
+// in-memory summary (printed by the owner CLI and reduced into the dream:summary audit event --
+// auditPayload.dreamSummary filters by DREAM_STEPS key, never by this value) and, separately,
+// as one sanitized line in the local owner-only ops log (data/logs/ops.log). Provider/SQL/
+// filesystem exceptions may contain private prose or paths, so only the exception's own
+// constructor name -- never error.message -- ever leaves this catch. Exported so tests can
+// drive it directly without running the full dream() pipeline. appendOpsLine is itself
+// best-effort (`.catch(() => {})`): a logging failure here must never stop the remaining steps.
+export async function runDreamStep(
+  summary: Record<string, unknown>,
+  name: string,
+  fn: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    summary[name] = await fn();
+  } catch (error) {
+    summary[name] = "failed";
+    const errorClass = error instanceof Error ? error.constructor.name : typeof error;
+    await appendOpsLine({ step: name, errorClass }).catch(() => {});
+  }
+}
+
 export async function dream(): Promise<Record<string, unknown>> {
   const summary: Record<string, unknown> = {};
-  const step = async (name: string, fn: () => Promise<unknown>) => {
-    try {
-      summary[name] = await fn();
-    } catch {
-      // The summary is printed by the owner CLI as well as reduced into an audit event.
-      // Provider/SQL/filesystem exceptions may contain private prose or paths.
-      summary[name] = "failed";
-    }
-  };
+  const step = (name: string, fn: () => Promise<unknown>) => runDreamStep(summary, name, fn);
 
   await step("1_embed_backlog", () => drainEmbedBacklog());
   await step("2_entity_link", () => entityLinkPass());
