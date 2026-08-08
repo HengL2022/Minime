@@ -17,6 +17,7 @@ import { resetDb, testSql } from "./helpers";
 import { requestAndApproveTier2, sessionToolCtx } from "./support/unlock";
 
 const HIDDEN = "[above current tier]";
+const RETRACTED = "[retracted]";
 const inboxDir = join(config.dataDir, "inbox");
 
 beforeAll(async () => {
@@ -100,6 +101,47 @@ describe("minime_state: filed_today digest", () => {
     const journalEntry = filedToday.find((f) => f.id === journal.inboxId);
     expect(journalEntry.title).toBe(journalText);
     expect(journalEntry.tier).toBe(2);
+  });
+
+  test("a same-day filing whose destination was retracted reads [retracted] with its real tier, not the tier-hidden sentinel (W2-8 review finding)", async () => {
+    // Long-form text, no task/interaction/journal/decision cue -> heuristicClassify files it as
+    // type=note (kind), which watcher.fileRow routes to `pages` at tier 1 (noteHintTier's
+    // ordinary-text default) — the same "tier-1 pages row" shape the review finding reproduced.
+    const noteText =
+      "Reference notes about the fictional ZQX-FILED-DIGEST-RETRACT archival project: tape " +
+      "rotation schedule and storage bin labeling plan for the annex.";
+    const note = await fileCapture("zqx-filed-digest-retract.md", noteText);
+    expect(note.filedTable).toBe("pages");
+
+    const ctx = sessionToolCtx("agent:filed-digest-retract");
+    const retractResult = await invokeTool(
+      toolByName("minime_correct"),
+      { type: "note", action: "retract", id: note.filedId },
+      ctx,
+    );
+    if (!retractResult.ok) {
+      throw new Error(
+        `minime_correct retract failed: ${retractResult.error.code} ${retractResult.error.message}`,
+      );
+    }
+
+    const env = await state(ctx);
+    const filedToday = (env.data as any).filed_today as any[];
+    const noteEntry = filedToday.find((f) => f.id === note.inboxId);
+    // parentMeta excludes retracted rows for every caller regardless of tier, so a naive miss
+    // check would render this identically to a genuine tier-2 gate (HIDDEN, tier null) even
+    // though the page is tier 1 and fully readable by id (minime_get_context) — exactly the
+    // ambiguity review-queue.ts's visibleTitle already resolves for the sibling case.
+    expect(noteEntry).toMatchObject({
+      type: "page",
+      filed_table: "pages",
+      filed_id: note.filedId,
+      kind: "note",
+      confidence: 0.75,
+      title: RETRACTED,
+      tier: 1,
+    });
+    expect(noteEntry.title).not.toBe(HIDDEN);
   });
 
   test("a capture filed near the UTC boundary lands on the caller's local calendar day, not UTC's", async () => {

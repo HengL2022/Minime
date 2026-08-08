@@ -3017,6 +3017,16 @@ const FILED_TABLE_PARENT_TYPE: Record<string, ParentType> = {
 // Mirrors review-queue.ts's HIDDEN sentinel. Duplicated rather than imported: repo.ts must not
 // depend on src/mcp/tools (layering), and stateSnapshot is the one place that needs it here.
 const FILING_HIDDEN_TITLE = "[above current tier]";
+// Mirrors review-queue.ts's RETRACTED sentinel, for the identical reason it exists there:
+// parentMeta excludes retracted rows (superseded_at set, superseded_by null) for EVERY caller
+// regardless of tier (see the comment on parentMeta above), so a parentMeta miss alone can't tell
+// "above current tier" apart from "withdrawn via minime_correct retract". Collapsing both into
+// FILING_HIDDEN_TITLE would tell the owner a same-day filing still needs a tier-2 unlock when it
+// has already been corrected and needs nothing — defeating the point of the evening classifier
+// audit (W2-8's stated purpose). resolveFiledToday re-checks every parentMeta miss through getRow
+// (tier bound only, no retraction filter) to tell the two apart, exactly as review-queue.ts's
+// visibleTitle does for the sibling case.
+const FILING_RETRACTED_TITLE = "[retracted]";
 
 export interface FiledTodayEntry {
   id: string; // inbox_items.id (the capture)
@@ -3025,8 +3035,15 @@ export interface FiledTodayEntry {
   filed_id: string;
   kind: string | null; // classifier_output->>'type' — the classifier's own guess, unmasked (tier 1: inbox_items is always tier 1)
   confidence: number | null;
-  title: string; // resolved through parentMeta at the caller's tier; FILING_HIDDEN_TITLE when the destination row isn't visible
-  tier: number | null; // the destination row's actual tier, only when visible — never guessed or revealed for a masked row
+  // Resolved through parentMeta at the caller's tier. FILING_HIDDEN_TITLE when the destination
+  // row is genuinely above the caller's tier; FILING_RETRACTED_TITLE when the row is visible but
+  // was withdrawn via minime_correct (retract) — see resolveFiledToday for how the two misses are
+  // told apart.
+  title: string;
+  // The destination row's actual tier — populated whenever the row is visible to the caller,
+  // including a retracted-but-visible row (retraction is not a tier fact); null only when the row
+  // is genuinely above the caller's current tier.
+  tier: number | null;
 }
 
 interface FiledTodayRow {
@@ -3042,9 +3059,14 @@ interface FiledTodayRow {
  * parentMeta every other title lookup uses — never from classifier_output (which is unmasked
  * inbox metadata and may describe tier-2-grade content the caller cannot see). A filing whose
  * destination is above the caller's tier keeps kind/confidence/filed_table (all inbox_items
- * metadata, always tier 1) but its title reads FILING_HIDDEN_TITLE and tier is null — the
- * masking convention review-queue.ts's visibleTitle established, reused here rather than
- * reimplemented differently.
+ * metadata, always tier 1) but its title reads FILING_HIDDEN_TITLE and tier is null.
+ *
+ * parentMeta also excludes retracted rows (superseded_at set, superseded_by null) for every
+ * caller, tier notwithstanding, so a parentMeta miss by itself is ambiguous between "above tier"
+ * and "retracted". Every miss is re-checked through getRow — same tier bound, no retraction
+ * filter, exactly as review-queue.ts's visibleTitle does — so a getRow hit proves tier was never
+ * the issue and reports FILING_RETRACTED_TITLE with the row's real tier instead of a false
+ * FILING_HIDDEN_TITLE that would send the owner toward an unneeded tier-2 unlock.
  */
 async function resolveFiledToday(
   rows: FiledTodayRow[],
@@ -3064,9 +3086,22 @@ async function resolveFiledToday(
       meta.set(`${type}:${id}`, m);
     }
   }
+  // Second pass: only for parentMeta misses, ask getRow (tier bound only) whether the row is
+  // actually visible. A hit here is a retracted-but-visible row; a miss on both is genuinely
+  // above tier (or the id is stale/missing) — unchanged from before this distinction existed.
+  const retractedTier = new Map<string, number>(); // "type:id" -> real tier
+  for (const [type, ids] of idsByType) {
+    for (const id of ids) {
+      if (meta.has(`${type}:${id}`)) continue;
+      const row = await getRow(type, id, actor);
+      if (row) retractedTier.set(`${type}:${id}`, Number(row.tier));
+    }
+  }
   return rows.map((r) => {
     const type = r.filed_table ? (FILED_TABLE_PARENT_TYPE[r.filed_table] ?? null) : null;
-    const hit = type && r.filed_id ? meta.get(`${type}:${r.filed_id}`) : undefined;
+    const key = type && r.filed_id ? `${type}:${r.filed_id}` : null;
+    const hit = key ? meta.get(key) : undefined;
+    const retracted = hit || !key ? undefined : retractedTier.get(key);
     return {
       id: r.id,
       type,
@@ -3074,8 +3109,12 @@ async function resolveFiledToday(
       filed_id: r.filed_id ?? "",
       kind: r.kind,
       confidence: r.confidence,
-      title: hit ? hit.title : FILING_HIDDEN_TITLE,
-      tier: hit ? Number(hit.tier) : null,
+      title: hit
+        ? hit.title
+        : retracted !== undefined
+          ? FILING_RETRACTED_TITLE
+          : FILING_HIDDEN_TITLE,
+      tier: hit ? Number(hit.tier) : (retracted ?? null),
     };
   });
 }

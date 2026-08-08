@@ -14,7 +14,8 @@ export const stateTool: ToolDef = {
       ...s.tasks_due.map((t: any) => ({ type: "task", id: t.id, title: t.title })),
       ...s.moved_today.map((t: any) => ({ type: "task", id: t.id, title: t.title })),
       // title rides as-is: stateSnapshot already resolved it through tier-filtered parentMeta,
-      // masking to "[above current tier]" when the destination row isn't visible (repo.ts).
+      // masking to "[above current tier]" when the destination row isn't visible, or
+      // "[retracted]" when it's visible but was withdrawn via minime_correct (repo.ts).
       ...s.filed_today.map((f: any) => ({
         type: f.type ?? f.filed_table,
         id: f.filed_id,
