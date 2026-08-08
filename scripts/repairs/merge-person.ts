@@ -21,7 +21,9 @@ const mod: RepairModule = {
     if (!fromId || !intoId || !UUID.test(fromId) || !UUID.test(intoId)) {
       throw new Error("usage: --from=<uuid> --into=<uuid>");
     }
-    const res = await mergePersonIntoPerson(fromId, intoId);
+    // mergePersonIntoPerson normalizes internally too (repo.ts) — lowercase here as well so this
+    // script's own summary/ids never carry a pasted-in uppercase spelling past this boundary.
+    const res = await mergePersonIntoPerson(fromId.toLowerCase(), intoId.toLowerCase());
     // read-back verification is the summary: counts and ids only
     return {
       counts: {

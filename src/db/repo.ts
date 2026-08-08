@@ -1187,9 +1187,29 @@ export async function retypeOrgToPerson(
 // namespace rule, same edge-repoint/de-dupe logic. Differences: both rows already exist (no
 // find-or-create), and the source row is never retired — it is superseded via the generic W2-1
 // superseded_by/superseded_at columns (028_correction_supersede.sql), shared with minime_correct.
+const MERGE_PERSON_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Postgres compares `uuid`-typed values case-insensitively; every id comparison below this point
+// is a plain JS string operation instead (`===`, and the phantom_person auto-resolve's text match
+// against `payload ->> 'person_id'`), so a caller-supplied uppercase spelling of the same id must
+// be normalized to lowercase HERE, before anything else runs — and a string that isn't a UUID at
+// all must be rejected rather than silently reaching a `where id = ...` clause. Skipping this let
+// an uppercase --from equal to a lowercase --into slip past the self-merge guard below while the
+// SQL underneath still resolved both to the very same row: FOR UPDATE locked that one row twice,
+// its own aliases were moved onto itself and then deleted by the same-row DELETE, and
+// supersedeRow stamped it superseded by itself — vanishing the only copy of the person from
+// every superseded_at-filtered resolver with nothing left absorbing its data (improve/W2-7F,
+// fixing a landed W2-7 review finding). Fixing this in JS also means the auto-resolve match below
+// needs no SQL-side cast: `fromId` is lowercase by the time it reaches that query, matching the
+// lowercase `person_id` values the system itself always writes into review_queue payloads.
+function normalizedMergePersonId(id: string): string {
+  if (!MERGE_PERSON_ID_RE.test(id)) throw new Error(`invalid person id: ${id}`);
+  return id.toLowerCase();
+}
+
 export async function mergePersonIntoPerson(
-  fromId: string,
-  intoId: string,
+  fromIdRaw: string,
+  intoIdRaw: string,
 ): Promise<{
   fromId: string;
   intoId: string;
@@ -1197,6 +1217,8 @@ export async function mergePersonIntoPerson(
   interactionsRepointed: number;
   edgesRepointed: number;
 }> {
+  const fromId = normalizedMergePersonId(fromIdRaw);
+  const intoId = normalizedMergePersonId(intoIdRaw);
   if (fromId === intoId) throw new Error("cannot merge a person into itself");
   return withDbTransaction(async (tx) => {
     // Lock both rows FOR UPDATE in a fixed (lexicographic id) order, independent of which is

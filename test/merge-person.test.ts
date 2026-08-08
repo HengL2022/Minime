@@ -11,13 +11,17 @@ import { join } from "node:path";
 import { __safeRepairSummaryForTest, runRepair } from "../scripts/repair";
 import mergePersonRepairModule from "../scripts/repairs/merge-person";
 import {
+  ensureOrg,
   ensurePerson,
   entitiesNamedIn,
   getRow,
   insertReviewItem,
   mergePersonIntoPerson,
+  peopleByFirstName,
+  phantomPersonCandidates,
   resolvePerson,
 } from "../src/db/repo";
+import { phantomPersonScan } from "../src/pipeline/dream";
 import { resetDb, testSql as sql } from "./helpers";
 
 describe("mergePersonIntoPerson", () => {
@@ -190,6 +194,27 @@ describe("mergePersonIntoPerson", () => {
     expect(item!.resolved_at).not.toBeNull();
   });
 
+  test("W2-7F: uppercase --from id still auto-resolves its own open phantom_person item", async () => {
+    const { id: fromId } = await ensurePerson("Flagged Person Upper", "system:extract");
+    const { id: intoId } = await ensurePerson("Real Person Upper", "human");
+    const { id: reviewId } = await insertReviewItem("phantom_person", {
+      person_id: fromId,
+      canonical_name: "Flagged Person Upper",
+      reason: "person shares a name with an existing organisation",
+      suggestion: "retype to org, or dismiss if this really is a person",
+    });
+
+    // A real (non-self) merge naming the source by an uppercase spelling of its own id must
+    // still succeed normally, and its normalized-lowercase form must still match the lowercase
+    // person_id the system itself wrote into the review_queue payload.
+    const res = await mergePersonIntoPerson(fromId.toUpperCase(), intoId);
+
+    expect(res.fromId).toBe(fromId); // normalized back to the lowercase Postgres produced
+    const [item] = await sql`select status, resolved_at from review_queue where id = ${reviewId}`;
+    expect(item!.status).toBe("resolved");
+    expect(item!.resolved_at).not.toBeNull();
+  });
+
   test("does not touch an unrelated open phantom_person item", async () => {
     const { id: fromId } = await ensurePerson("Merged Away", "human");
     const { id: intoId } = await ensurePerson("Survivor", "human");
@@ -210,6 +235,46 @@ describe("mergePersonIntoPerson", () => {
   test("refuses to merge a person into itself", async () => {
     const { id } = await ensurePerson("Solo Person", "human");
     await expect(mergePersonIntoPerson(id, id)).rejects.toThrow(/itself/);
+  });
+
+  test("W2-7F HIGH regression: an uppercase spelling of the same id refuses as self-merge, not silent corruption", async () => {
+    // The landed W2-7 bug: `fromId === intoId` is a case-sensitive JS compare, but every SQL
+    // statement below it binds these strings to a `uuid` column, which Postgres compares
+    // case-insensitively. An uppercase --from equal to a lowercase --into (or vice versa) used
+    // to slip past this guard entirely — no exception — while the transaction beneath it still
+    // resolved both "different" ids to the exact same row: FOR UPDATE locked it twice, its own
+    // aliases were moved onto itself and then deleted by the same-row DELETE, and supersedeRow
+    // stamped it superseded by itself. This test proves refusal AND that a refused attempt
+    // leaves the row completely untouched — the corruption never even starts.
+    const { id } = await ensurePerson("Case Sensitive Person", "human");
+    await sql`insert into person_aliases (person_id, alias, tier, source, created_by)
+      values (${id}, 'CSP', 1, 'manual', 'human')`;
+
+    await expect(mergePersonIntoPerson(id.toUpperCase(), id)).rejects.toThrow(/itself/);
+    await expect(mergePersonIntoPerson(id, id.toUpperCase())).rejects.toThrow(/itself/);
+    await expect(mergePersonIntoPerson(id.toUpperCase(), id.toUpperCase())).rejects.toThrow(
+      /itself/,
+    );
+
+    // Refusal is total: the row was never touched by any of the three rejected attempts above.
+    const [row] = await sql`
+      select superseded_at, superseded_by, supersedes_id, canonical_name
+      from people where id = ${id}`;
+    expect(row!.superseded_at).toBeNull();
+    expect(row!.superseded_by).toBeNull();
+    expect(row!.supersedes_id).toBeNull();
+    expect(row!.canonical_name).toBe("Case Sensitive Person");
+    // ensurePerson also seeds a canonical-name alias row, so 2 rows are expected here — the
+    // point is that both survive untouched, not wiped by a self-collision insert-then-delete.
+    const aliases = await sql`select alias from person_aliases where person_id = ${id}`;
+    expect(aliases.map((r) => r.alias).sort()).toEqual(["CSP", "Case Sensitive Person"].sort());
+    expect((await resolvePerson("Case Sensitive Person"))?.id).toBe(id); // still resolvable
+  });
+
+  test("W2-7F: rejects a non-UUID-shaped id with a clear error before touching the DB", async () => {
+    const { id } = await ensurePerson("Valid Person", "human");
+    await expect(mergePersonIntoPerson("not-a-uuid", id)).rejects.toThrow(/invalid person id/);
+    await expect(mergePersonIntoPerson(id, "not-a-uuid")).rejects.toThrow(/invalid person id/);
   });
 
   test("rejects unknown person ids on either side", async () => {
@@ -263,6 +328,59 @@ describe("mergePersonIntoPerson", () => {
     await expect(mergePersonIntoPerson(secondSource, firstSource)).rejects.toThrow(
       /already-merged/,
     );
+  });
+
+  test("W2-7F MEDIUM: source becomes invisible to peopleByFirstName after merge (3rd resolver path)", async () => {
+    const { id: fromId } = await ensurePerson("Priya Fragmented", "human");
+    const { id: intoId } = await ensurePerson("Priya Raghunathan", "human");
+
+    await mergePersonIntoPerson(fromId, intoId);
+
+    const hits = await peopleByFirstName("priya");
+    expect(hits.map((r) => r.id)).toEqual([intoId]);
+    expect(hits.some((r) => r.id === fromId)).toBe(false);
+  });
+
+  test("W2-7F MEDIUM: source never resurfaces via phantomPersonCandidates or a dream rescan (4th resolver path)", async () => {
+    // Sets up a genuine phantom-person candidate (shares a name with a real org) so the
+    // "invisible after merge" assertions below are proven against a row that truly WOULD have
+    // been flagged otherwise — not a vacuous check against a row that was never a candidate.
+    await ensureOrg("Cobalt Meadow", "system:extract");
+    const { id: fromId } = await ensurePerson("Cobalt Meadow", "human");
+    const { id: intoId } = await ensurePerson("Real Survivor", "human");
+
+    const before = await phantomPersonCandidates();
+    expect(before.some((c) => c.id === fromId && c.name_match)).toBe(true);
+    const firstScanFlagged = await phantomPersonScan();
+    expect(firstScanFlagged).toBe(1);
+    const [openItem] = await sql`
+      select id from review_queue
+      where kind = 'phantom_person' and status = 'open' and payload ->> 'person_id' = ${fromId}`;
+    expect(openItem).toBeTruthy();
+
+    await mergePersonIntoPerson(fromId, intoId);
+
+    // superseded_at is null excludes the husk from phantomPersonCandidates' own CTE.
+    const after = await phantomPersonCandidates();
+    expect(after.some((c) => c.id === fromId)).toBe(false);
+    // The merge's own auto-resolve step (repo.ts step 6) already closed the item opened above.
+    const [resolvedItem] = await sql`select status from review_queue where id = ${openItem!.id}`;
+    expect(resolvedItem!.status).toBe("resolved");
+
+    // A full dream rescan neither reopens the source's own resolved item nor creates a second
+    // one for it — phantomPersonCandidates (checked above) already excludes fromId entirely, so
+    // the scan loop never reaches it. (The survivor may earn its own fresh flag here: it
+    // legitimately inherited the "Cobalt Meadow" alias during the merge, which is correct,
+    // unrelated behavior — not the source resurfacing, which is what this test proves against.)
+    await phantomPersonScan();
+    const totalForSource = await sql`
+      select count(*)::int n from review_queue
+      where kind = 'phantom_person' and payload ->> 'person_id' = ${fromId}`;
+    expect(totalForSource[0]!.n).toBe(1); // exactly the one from before the merge, not a 2nd flag
+    const stillOpenForSource = await sql`
+      select count(*)::int n from review_queue
+      where kind = 'phantom_person' and payload ->> 'person_id' = ${fromId} and status = 'open'`;
+    expect(stillOpenForSource[0]!.n).toBe(0); // and it stayed resolved, not reopened
   });
 });
 
