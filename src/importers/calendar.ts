@@ -39,6 +39,14 @@ export interface VEvent {
   rrule?: string;
   rdate: IcsDateProperty[];
   exdate: IcsDateProperty[];
+  // True when this VEVENT carried a RECURRENCE-ID property -- RFC 5545's marker that this block
+  // is a single-instance override of another VEVENT sharing the same UID (an edited/moved/
+  // cancelled occurrence of a recurring series, exactly what Google/Outlook/Apple emit on export
+  // whenever one instance of a series is changed). This importer does not match an override back
+  // to the specific master instant it replaces, so buildOccurrences degrades it through the same
+  // safe path as an unsupported RRULE rather than silently treating it as an ordinary standalone
+  // event it fully understands.
+  hasRecurrenceId?: boolean;
 }
 
 interface ContentLine {
@@ -190,6 +198,9 @@ export function parseIcs(ics: string): VEvent[] {
     switch (line.name) {
       case "UID":
         current.uid = line.value;
+        break;
+      case "RECURRENCE-ID":
+        current.hasRecurrenceId = true;
         break;
       case "SUMMARY":
         current.summary = line.value.replace(/\\,/g, ",").replace(/\\n/gi, "\n");
@@ -385,6 +396,13 @@ function buildOccurrences(
   windowStart: Date,
   windowEnd: Date,
 ): BuiltOccurrences {
+  // A RECURRENCE-ID override degrades the same way an unsupported RRULE construct does: import
+  // this block's own DTSTART as a single occurrence, flagged via logRruleUnsupported for the
+  // owner's review, rather than silently treating an override we don't fully model as an
+  // ordinary standalone event (see the VEvent.hasRecurrenceId comment).
+  if (event.hasRecurrenceId) {
+    return { occurrences: [{ startsAt: times.startsAt, endsAt: times.endsAt }], unsupported: true };
+  }
   const isRecurring =
     event.rrule !== undefined || event.rdate.length > 0 || event.exdate.length > 0;
   if (!isRecurring) {
@@ -445,6 +463,14 @@ export async function importCalendar(icsText: string): Promise<ImportStats> {
   const stats: ImportStats = { total: 0, inserted: 0, updated: 0, skipped: 0 };
   const importTime = now();
   const windowEnd = recurrenceWindowEnd(importTime);
+  // Occurrences accrue per uid across ALL VEVENT blocks in the file before any pruning happens --
+  // pruning must run once per uid, against the UNION of every block's occurrences, never once
+  // per block. RFC 5545 exports routinely carry multiple VEVENT blocks sharing one UID (a
+  // recurring master plus a RECURRENCE-ID override that Google/Outlook/Apple emit whenever a
+  // single instance of a series is edited, moved, or cancelled). Pruning block-by-block against
+  // only that block's own occurrences let a later block's narrower keep set delete an earlier
+  // block's still-legitimate future occurrences -- the reviewer's reproduced HIGH.
+  const keepInstantsByUid = new Map<string, Date[]>();
   for (const event of parseIcs(icsText)) {
     stats.total++;
     const times = resolveEventTimes(event);
@@ -457,7 +483,11 @@ export async function importCalendar(icsText: string): Promise<ImportStats> {
     const { occurrences, unsupported } = buildOccurrences(event, times, importTime, windowEnd);
     if (unsupported) await logRruleUnsupported(stats.total);
 
-    const keepInstants: Date[] = [];
+    let keepInstants = keepInstantsByUid.get(event.uid);
+    if (!keepInstants) {
+      keepInstants = [];
+      keepInstantsByUid.set(event.uid, keepInstants);
+    }
     for (const occ of occurrences) {
       const inserted = await upsertCalendarEvent({
         uid: event.uid,
@@ -472,12 +502,15 @@ export async function importCalendar(icsText: string): Promise<ImportStats> {
       else stats.updated++;
       keepInstants.push(occ.startsAt);
     }
-    // Prune every uid seen in this file, not only ones with an RRULE this time around: a
-    // previously-recurring event whose export dropped the RRULE (converted to a one-off, same
-    // UID) must also lose its now-stale future occurrences. Always scoped to occurrence_start >=
-    // importTime, so past occurrences are never touched and the whole operation is re-creatable
-    // from any export (see DECISIONS.md).
-    await deleteCalendarOccurrencesNotIn(event.uid, importTime, keepInstants);
+  }
+  // Prune every uid seen in this file, not only ones with an RRULE this time around: a
+  // previously-recurring event whose export dropped the RRULE (converted to a one-off, same
+  // UID) must also lose its now-stale future occurrences. Runs once per uid here -- after every
+  // VEVENT block sharing that uid has contributed to keepInstantsByUid above -- against the
+  // union of all of them. Always scoped to occurrence_start >= importTime, so past occurrences
+  // are never touched and the whole operation is re-creatable from any export (see DECISIONS.md).
+  for (const [uid, keepInstants] of keepInstantsByUid) {
+    await deleteCalendarOccurrencesNotIn(uid, importTime, keepInstants);
   }
   await logEvent({
     actor: "importer:calendar",

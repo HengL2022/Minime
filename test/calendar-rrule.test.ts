@@ -312,6 +312,83 @@ describe("expandOccurrences (pure, src/importers/rrule.ts)", () => {
     expect(result.occurrences.some((o) => o.instant.getTime() >= windowStart.getTime())).toBe(true);
   });
 
+  // W3-2G: monthlyCandidates/yearlyCandidates (rrule.ts) are independently hand-coded
+  // fast-forward paths, separate from dailyCandidates/weeklyCandidates above -- the reviewer
+  // manually probed the exact scenario class that bit DAILY/WEEKLY in round 1 ("pay rent"
+  // monthly, birthday yearly, both started years ago) and confirmed current behavior is correct.
+  // These pin that math so a future change to either function can't silently regress it back to
+  // round 1's bug (an indefinite series with an old DTSTART exhausting `cap` entirely on history
+  // it will never need, before ever reaching anywhere near windowStart).
+
+  test("review fix: an indefinite MONTHLY series (a years-old 'pay rent' reminder) fast-forwards to windowStart, not DTSTART", () => {
+    const windowStart = new Date("2026-08-08T00:00:00.000Z");
+    const windowEnd = new Date("2027-08-08T00:00:00.000Z"); // windowStart + 12 months
+    const result = expandOccurrences(
+      { year: 2020, month: 1, day: 15, hour: 9, minute: 0, second: 0, zone: "UTC" },
+      "FREQ=MONTHLY",
+      [],
+      [],
+      windowStart,
+      windowEnd,
+      500,
+    );
+    expect(result.unsupported).toBe(false);
+    // One per month, Aug 2026 (the 15th, the first day-15 on/after windowStart) through Jul 2027
+    // inclusive -- 12 occurrences, not truncated early and not stranded back near 2020.
+    expect(result.occurrences).toHaveLength(12);
+    expect(result.occurrences[0]!.instant.toISOString()).toBe("2026-08-15T09:00:00.000Z");
+    expect(result.occurrences[11]!.instant.toISOString()).toBe("2027-07-15T09:00:00.000Z");
+    expect(result.occurrences.every((o) => o.instant.getTime() >= windowStart.getTime())).toBe(
+      true,
+    );
+  });
+
+  test("review fix: an indefinite MONTHLY;INTERVAL=3 series (old DTSTART) fast-forwards to the correct quarter", () => {
+    const windowStart = new Date("2026-08-08T00:00:00.000Z");
+    const windowEnd = new Date("2027-08-08T00:00:00.000Z");
+    const result = expandOccurrences(
+      { year: 2019, month: 5, day: 10, hour: 9, minute: 0, second: 0, zone: "UTC" },
+      "FREQ=MONTHLY;INTERVAL=3",
+      [],
+      [],
+      windowStart,
+      windowEnd,
+      500,
+    );
+    expect(result.unsupported).toBe(false);
+    expect(result.occurrences.map((o) => o.instant.toISOString())).toEqual([
+      "2026-08-10T09:00:00.000Z",
+      "2026-11-10T09:00:00.000Z",
+      "2027-02-10T09:00:00.000Z",
+      "2027-05-10T09:00:00.000Z",
+    ]);
+    expect(result.occurrences.every((o) => o.instant.getTime() >= windowStart.getTime())).toBe(
+      true,
+    );
+  });
+
+  test("review fix: an indefinite YEARLY series (a decades-old birthday) fast-forwards to this year's anniversary", () => {
+    const windowStart = new Date("2026-08-08T00:00:00.000Z");
+    const windowEnd = new Date("2027-08-08T00:00:00.000Z");
+    const result = expandOccurrences(
+      { year: 1990, month: 9, day: 20, hour: 9, minute: 0, second: 0, zone: "UTC" },
+      "FREQ=YEARLY",
+      [],
+      [],
+      windowStart,
+      windowEnd,
+      500,
+    );
+    expect(result.unsupported).toBe(false);
+    // A birthday recurs once a year -- a 12-month window finds exactly the next one, not zero
+    // (round 1's bug) and not the whole 36-year back-history (cap exhaustion the other way).
+    expect(result.occurrences).toHaveLength(1);
+    expect(result.occurrences[0]!.instant.toISOString()).toBe("2026-09-20T09:00:00.000Z");
+    expect(result.occurrences.every((o) => o.instant.getTime() >= windowStart.getTime())).toBe(
+      true,
+    );
+  });
+
   test("review fix: a COUNT-bounded series always counts from DTSTART, ignoring windowStart entirely", () => {
     // RFC 5545 COUNT counts occurrences from DTSTART -- the windowStart fast-forward must never
     // apply here, or the Nth occurrence would be computed wrong (or missed as "already over").
@@ -462,6 +539,54 @@ END:VCALENDAR`;
     // stateSnapshot's today/tomorrow window (starts_at >= now-1h, < now+2d) shows this event.
     const state = await stateSnapshot();
     expect(state.calendar.some((row: any) => row.uid === "evt-rrule-old-daily@fixture")).toBe(true);
+  });
+
+  test("review fix: a years-old indefinite MONTHLY event ('pay rent') expands from windowStart through the DB", async () => {
+    // Same scenario class as the DAILY test above, run through monthlyCandidates (rrule.ts)
+    // instead -- a separately hand-coded fast-forward path with its own prior zero test coverage.
+    setNow(new Date("2026-08-10T00:30:00.000Z"));
+    const ics = `BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:evt-rrule-old-monthly@fixture
+DTSTART;TZID=Asia/Singapore:20200115T090000
+DTEND;TZID=Asia/Singapore:20200115T091500
+SUMMARY:Pay rent (rrule)
+RRULE:FREQ=MONTHLY
+END:VEVENT
+END:VCALENDAR`;
+    const stats = await importCalendar(ics);
+    expect(stats.total).toBe(1);
+    expect(stats.inserted).toBe(12);
+
+    const rows = await sql`
+      select occurrence_start from calendar_events
+      where uid = 'evt-rrule-old-monthly@fixture' order by occurrence_start`;
+    expect(rows).toHaveLength(12);
+    // Every stored row is anchored near "now" -- none stranded back near the 2020 DTSTART.
+    expect(rows[0]!.occurrence_start.toISOString()).toBe("2026-08-15T01:00:00.000Z");
+    expect(rows[rows.length - 1]!.occurrence_start.toISOString()).toBe("2027-07-15T01:00:00.000Z");
+  });
+
+  test("review fix: a decades-old indefinite YEARLY event (birthday) expands to this year's anniversary through the DB", async () => {
+    setNow(new Date("2026-08-10T00:30:00.000Z"));
+    const ics = `BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:evt-rrule-old-yearly@fixture
+DTSTART;VALUE=DATE:19900920
+SUMMARY:Birthday (rrule)
+RRULE:FREQ=YEARLY
+END:VEVENT
+END:VCALENDAR`;
+    const stats = await importCalendar(ics);
+    expect(stats.total).toBe(1);
+    expect(stats.inserted).toBe(1); // one 12-month window finds exactly the next anniversary
+
+    const rows = await sql`
+      select starts_at, ends_at from calendar_events
+      where uid = 'evt-rrule-old-yearly@fixture'`;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.starts_at.toISOString()).toBe("2026-09-19T16:00:00.000Z"); // Sep 20 SGT midnight
+    expect(rows[0]!.ends_at.toISOString()).toBe("2026-09-20T16:00:00.000Z");
   });
 
   test("all-day YEARLY (birthday-style) expansion spans local midnights", async () => {
@@ -647,6 +772,70 @@ END:VCALENDAR`);
     const rows = await sql`select occurrence_start from calendar_events where uid = ${uid}`;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.occurrence_start.toISOString()).toBe("2026-01-05T09:00:00.000Z");
+  });
+
+  test("W3-2G review fix: a shared-UID master + RECURRENCE-ID override no longer prunes the master's expansion", async () => {
+    // The reviewer's exact reproduction of the landed W3-2 HIGH: importCalendar's per-VEVENT loop
+    // used to call deleteCalendarOccurrencesNotIn(uid, importTime, keepInstants) once per parsed
+    // VEVENT block, with keepInstants rebuilt fresh per block. RFC 5545 exports routinely carry
+    // MULTIPLE VEVENT blocks sharing one UID -- a recurring master plus a RECURRENCE-ID override
+    // that Google/Outlook/Apple emit whenever one instance of a series is edited/moved. With the
+    // bug, this file's second block (the override, keepInstants=[its own one occurrence]) wrongly
+    // deleted the first block's (the master's) four legitimate future occurrences. The fix unions
+    // keepInstants per uid across every block in the file before pruning once per uid.
+    const uid = "evt-shared-uid@fixture";
+    setNow(new Date("2026-01-01T00:00:00.000Z"));
+    const ics = `BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:${uid}
+DTSTART:20260105T090000Z
+SUMMARY:Weekly team sync
+RRULE:FREQ=WEEKLY;COUNT=4
+END:VEVENT
+BEGIN:VEVENT
+UID:${uid}
+RECURRENCE-ID:20260112T090000Z
+DTSTART:20260112T100000Z
+SUMMARY:Weekly team sync (moved one hour later)
+END:VEVENT
+END:VCALENDAR`;
+
+    const first = await importCalendar(ics);
+    expect(first).toEqual({ total: 2, inserted: 5, updated: 0, skipped: 0 });
+
+    // The master's full WEEKLY;COUNT=4 expansion survives (Jan 5/12/19/26 at 09:00) AND the
+    // override's own occurrence (Jan 12 at 10:00) is also present -- neither block's prune call
+    // deleted the other's rows.
+    const rows = await sql`
+      select occurrence_start from calendar_events where uid = ${uid} order by occurrence_start`;
+    expect(rows.map((r) => r.occurrence_start.toISOString())).toEqual([
+      "2026-01-05T09:00:00.000Z",
+      "2026-01-12T09:00:00.000Z", // master's original instant -- NOT pruned by the override block
+      "2026-01-12T10:00:00.000Z", // override block's own instant
+      "2026-01-19T09:00:00.000Z",
+      "2026-01-26T09:00:00.000Z",
+    ]);
+
+    // The unparsed RECURRENCE-ID override degrades through the existing safe-degradation path
+    // (same audit verb as an unsupported RRULE) rather than being silently treated as understood.
+    const audited = await sql`
+      select payload from events
+      where actor = 'importer:calendar' and verb = 'import:rrule-unsupported'
+        and payload->>'record_number' = '2'`;
+    expect(audited.length).toBeGreaterThan(0);
+    for (const row of audited) {
+      expect(row.payload).toEqual({
+        importer: "calendar",
+        reason: "unsupported_rrule",
+        record_number: 2,
+      });
+    }
+
+    // Re-importing the identical file is idempotent: no new inserts, no rows lost or duplicated.
+    const second = await importCalendar(ics);
+    expect(second).toEqual({ total: 2, inserted: 0, updated: 5, skipped: 0 });
+    const [count] = await sql`select count(*)::int as n from calendar_events where uid = ${uid}`;
+    expect(count!.n).toBe(5);
   });
 });
 
