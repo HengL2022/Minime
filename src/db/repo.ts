@@ -1049,10 +1049,15 @@ export async function retypeOrgToPerson(
     // 1. Resolve within the source identity's privacy namespace. Tier 0 is quarantined:
     // a readable spelling cannot cause this owner repair to merge with a hidden identity,
     // while a tier-0 alias remains a valid privacy-preserving match for tier-0 source data.
+    // superseded_at is null excludes an already-merged-away husk (mergePersonIntoPerson below)
+    // from being reused as a surviving identity — same guard as resolvePerson/entitiesNamedIn/
+    // peopleByFirstName/phantomPersonCandidates, so a retype can never write new tier/relation/
+    // alias/edge data onto a row every resolver path has agreed to hide.
     const [existingPerson] = await tx`
       select p.id from people p
       where ((${orgTier} = 0 and p.tier = 0)
           or (${orgTier} in (1,2) and p.tier in (1,2)))
+        and p.superseded_at is null
         and (
           lower(p.canonical_name) = lower(${name})
           or exists (

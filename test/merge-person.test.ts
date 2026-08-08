@@ -294,12 +294,12 @@ describe("scripts/repairs/merge-person.ts (module)", () => {
   });
 });
 
-// scripts/repair.ts's committed-script gate (DECISIONS.md 2026-07-18 W4) means merge-person
-// cannot complete an end-to-end happy-path run through runRepair until this task's own commit
-// lands (git cat-file -e HEAD:scripts/repairs/merge-person.ts). These tests instead verify the
-// generalized registry itself: the audited verb/script attribution is correct regardless of
-// commit timing (both pre- and post-commit runs land in a "failed" phase here, since no valid
-// --from/--into args are ever passed), and the summary-counts allowlist accepts the new keys.
+// scripts/repair.ts's committed-script gate (DECISIONS.md 2026-07-18 W4) requires
+// scripts/repairs/merge-person.ts to be committed and match HEAD before runRepair will use it —
+// true from this task's own commit onward. The first test below drives a real end-to-end merge
+// through the CLI/audit path (mirrors test/m15.roles.test.ts's "happy path" coverage for the
+// sibling retype-org-to-person repair); the remaining tests probe the registry/allowlist
+// machinery with empty or invalid args, which always lands in a "failed" phase.
 describe("repair.ts registry: merge-person", () => {
   let dumpScratch: string;
   let dumpDir: string;
@@ -310,6 +310,41 @@ describe("repair.ts registry: merge-person", () => {
   });
   afterEach(() => {
     rmSync(dumpScratch, { recursive: true, force: true });
+  });
+
+  test("happy path: runRepair completes a real merge and logs the complete-phase payload", async () => {
+    if (!Bun.which("pg_dump")) return; // environment without client tools
+    // This describe block doesn't reset between tests (its siblings need only the event log
+    // delta); reset explicitly so a same-named person from another test can never be resolved
+    // in place of a fresh one here.
+    await resetDb();
+    const { id: fromId } = await ensurePerson("Sarha Delgado", "human");
+    const { id: intoId } = await ensurePerson("Sarah Delgado", "human");
+    const [prev] = await sql`select coalesce(max(id), 0)::int as max_id from events`;
+
+    const code = await runRepair("merge-person", [`--from=${fromId}`, `--into=${intoId}`], {
+      dumpDir,
+    });
+
+    expect(code).toBe(0);
+    // the module actually ran (not just the CLI plumbing): source is superseded by target.
+    const [husk] = await sql`select superseded_by from people where id = ${fromId}`;
+    expect(husk!.superseded_by).toBe(intoId);
+    const events = await sql`
+      select verb, payload from events where verb like 'repair:%' and id > ${prev!.max_id}
+      order by id`;
+    expect(events.map((e) => e.verb)).toEqual(["repair:merge-person"]);
+    expect(events[0]!.payload).toMatchObject({
+      script: "merge-person",
+      phase: "complete",
+      code: "repair_complete",
+      // own canonical alias moved; no interactions/edges existed to repoint
+      counts: { aliases_moved: 1, interactions_repointed: 0, edges_repointed: 0 },
+    });
+    expect(events[0]!.payload.ids).toEqual([fromId, intoId]);
+    expect(JSON.stringify(events)).not.toContain("Delgado"); // ids/codes only, never row contents
+    const backups = [...new Bun.Glob("repair-merge-person-*.sql").scanSync(dumpDir)];
+    expect(backups.length).toBeGreaterThan(0);
   });
 
   test("merge-person is recognized by the registry (distinct from an unregistered name)", async () => {
