@@ -19,8 +19,17 @@
 // raw dates *before* EXDATE removal, so an EXDATE-heavy window could in principle end with fewer
 // than `cap` final occurrences even though more would fit. Acceptable for an approximate "~500
 // occurrences" safety valve, not a precision guarantee.
+//
+// `windowStart` (the caller's "now") anchors where an INDEFINITE series (no COUNT) starts
+// generating candidates: at or just before windowStart's own cycle, not always at DTSTART.
+// Without this, `cap` raw dates walked forward from a DTSTART years in the past exhausts
+// entirely on history before ever reaching windowStart -- silently dropping every upcoming
+// occurrence of an old, still-active recurring event (e.g. a years-old daily habit or weekday
+// standup). A COUNT-bounded series still walks the exact sequence from DTSTART -- RFC 5545
+// counts occurrences from DTSTART, so skipping ahead would miscount -- which is safe because
+// COUNT already bounds how far that walk goes.
 
-import { localDateTimeToUtc } from "../util/clock";
+import { localDateStr, localDateTimeToUtc } from "../util/clock";
 
 const MAX_CANDIDATES = 3000; // generous ceiling over any realistic <=~12-month window; the
 // caller's windowEnd normally bounds generation well inside this -- it only matters as a hard
@@ -94,6 +103,13 @@ function compareYmd(a: Ymd, b: Ymd): number {
 // Monday-based weekday: 0=MO..6=SU. Date.UTC/getUTCDay is 0=Sunday..6=Saturday.
 function weekdayOf(ymd: Ymd): number {
   return (new Date(Date.UTC(ymd.year, ymd.month - 1, ymd.day)).getUTCDay() + 6) % 7;
+}
+
+// `instant` read as a calendar date in the event's own zone -- matching how DTSTART's own
+// wall-clock fields are local, not UTC, so "today" means the event's local today.
+function ymdFromDate(instant: Date, zone: string): Ymd {
+  const [year, month, day] = localDateStr(instant, zone).split("-").map(Number);
+  return { year: year!, month: month!, day: day! };
 }
 
 // ---------------------------------------------------------------- RRULE grammar
@@ -226,18 +242,32 @@ function parseRrule(raw: string, start: RecurrenceStart): RuleParts | null {
 
 // ---------------------------------------------------------------- FREQ candidate generation
 
-function dailyCandidates(anchor: Ymd, interval: number): Ymd[] {
-  const startEpoch = toEpochDay(anchor);
-  return Array.from({ length: MAX_CANDIDATES }, (_, i) => fromEpochDay(startEpoch + i * interval));
+function dailyCandidates(anchor: Ymd, interval: number, from: Ymd): Ymd[] {
+  const anchorEpoch = toEpochDay(anchor);
+  const fromEpoch = toEpochDay(from);
+  // Fast-forward to the cycle at or immediately before `from` instead of always walking the raw
+  // sequence from DTSTART -- see the module comment on why an old DTSTART otherwise starves
+  // `cap` on history it will never need.
+  const skip = fromEpoch > anchorEpoch ? Math.floor((fromEpoch - anchorEpoch) / interval) : 0;
+  return Array.from({ length: MAX_CANDIDATES }, (_, i) =>
+    fromEpochDay(anchorEpoch + (skip + i) * interval),
+  );
 }
 
-function weeklyCandidates(anchor: Ymd, interval: number, byday: number[] | null): Ymd[] {
+function weeklyCandidates(anchor: Ymd, interval: number, byday: number[] | null, from: Ymd): Ymd[] {
   const days = [...(byday ?? [weekdayOf(anchor)])].sort((a, b) => a - b);
   const startEpoch = toEpochDay(anchor);
   const anchorMonday = startEpoch - weekdayOf(anchor);
+  const cycleDays = interval * 7;
+  // Fast-forward to the interval-aligned week at or immediately before `from`'s own week (same
+  // rationale as dailyCandidates); landing on the whole week (not past its later days) keeps
+  // e.g. "earlier this week" BYDAY occurrences visible rather than only strictly-future ones.
+  const fromMonday = toEpochDay(from) - weekdayOf(from);
+  const weekSkip =
+    fromMonday > anchorMonday ? Math.floor((fromMonday - anchorMonday) / cycleDays) : 0;
   const out: Ymd[] = [];
-  for (let week = 0; week < MAX_CANDIDATES; week++) {
-    const weekMonday = anchorMonday + week * interval * 7;
+  for (let week = weekSkip; week < weekSkip + MAX_CANDIDATES; week++) {
+    const weekMonday = anchorMonday + week * cycleDays;
     for (const wd of days) {
       if (out.length >= MAX_CANDIDATES) return out;
       const epochDay = weekMonday + wd;
@@ -250,10 +280,15 @@ function weeklyCandidates(anchor: Ymd, interval: number, byday: number[] | null)
   return out;
 }
 
-function monthlyCandidates(anchor: Ymd, interval: number): Ymd[] {
+function monthlyCandidates(anchor: Ymd, interval: number, from: Ymd): Ymd[] {
   const anchorMonthIndex = anchor.year * 12 + (anchor.month - 1);
+  const fromMonthIndex = from.year * 12 + (from.month - 1);
+  const skip =
+    fromMonthIndex > anchorMonthIndex
+      ? Math.floor((fromMonthIndex - anchorMonthIndex) / interval)
+      : 0;
   const out: Ymd[] = [];
-  for (let i = 0; i < MAX_CANDIDATES && out.length < MAX_CANDIDATES; i++) {
+  for (let i = skip; i < skip + MAX_CANDIDATES && out.length < MAX_CANDIDATES; i++) {
     const total = anchorMonthIndex + i * interval;
     const year = Math.floor(total / 12);
     const month = (((total % 12) + 12) % 12) + 1;
@@ -264,9 +299,10 @@ function monthlyCandidates(anchor: Ymd, interval: number): Ymd[] {
   return out;
 }
 
-function yearlyCandidates(anchor: Ymd, interval: number): Ymd[] {
+function yearlyCandidates(anchor: Ymd, interval: number, from: Ymd): Ymd[] {
+  const skip = from.year > anchor.year ? Math.floor((from.year - anchor.year) / interval) : 0;
   const out: Ymd[] = [];
-  for (let i = 0; i < MAX_CANDIDATES && out.length < MAX_CANDIDATES; i++) {
+  for (let i = skip; i < skip + MAX_CANDIDATES && out.length < MAX_CANDIDATES; i++) {
     const year = anchor.year + i * interval;
     if (anchor.month === 2 && anchor.day === 29 && !isLeapYear(year)) continue; // skip, don't clamp
     out.push({ year, month: anchor.month, day: anchor.day });
@@ -305,18 +341,23 @@ function applyBounds(
 function generateSeries(
   start: RecurrenceStart,
   rule: RuleParts,
+  windowStart: Date,
   windowEnd: Date,
   cap: number,
 ): RecurrenceDate[] {
   const anchor: Ymd = { year: start.year, month: start.month, day: start.day };
+  // COUNT must be counted exactly from DTSTART per RFC 5545, so a COUNT-bounded rule always
+  // walks the real candidate sequence from the true anchor; only an indefinite (no-COUNT) rule
+  // fast-forwards toward `windowStart` (see the module comment).
+  const from = rule.count === null ? ymdFromDate(windowStart, start.zone) : anchor;
   const candidates =
     rule.freq === "DAILY"
-      ? dailyCandidates(anchor, rule.interval)
+      ? dailyCandidates(anchor, rule.interval, from)
       : rule.freq === "WEEKLY"
-        ? weeklyCandidates(anchor, rule.interval, rule.byday)
+        ? weeklyCandidates(anchor, rule.interval, rule.byday, from)
         : rule.freq === "MONTHLY"
-          ? monthlyCandidates(anchor, rule.interval)
-          : yearlyCandidates(anchor, rule.interval);
+          ? monthlyCandidates(anchor, rule.interval, from)
+          : yearlyCandidates(anchor, rule.interval, from);
   return applyBounds(candidates, start, rule.until, rule.count, windowEnd, cap);
 }
 
@@ -346,12 +387,16 @@ function mergeAndCap(
  * the bare DTSTART. An unsupported RRULE (see module comment) returns exactly [DTSTART] with
  * `unsupported: true` and does NOT apply RDATE/EXDATE -- the caller treats that single instance
  * exactly like an ordinary non-recurring event, never a partially-understood one.
+ *
+ * `windowStart` is the caller's "now" -- see the module comment on why an indefinite series
+ * anchors candidate generation there instead of always at DTSTART.
  */
 export function expandOccurrences(
   start: RecurrenceStart,
   rrule: string | undefined,
   rdates: RecurrenceDate[],
   exdates: RecurrenceDate[],
+  windowStart: Date,
   windowEnd: Date,
   cap: number,
 ): ExpansionResult {
@@ -370,6 +415,6 @@ export function expandOccurrences(
   }
   const rule = parseRrule(rrule, start);
   if (!rule) return { occurrences: [dtstart], unsupported: true };
-  const series = generateSeries(start, rule, windowEnd, cap);
+  const series = generateSeries(start, rule, windowStart, windowEnd, cap);
   return { occurrences: mergeAndCap(series, rdates, exdates, windowEnd, cap), unsupported: false };
 }

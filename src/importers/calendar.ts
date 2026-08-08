@@ -382,6 +382,7 @@ interface BuiltOccurrences {
 function buildOccurrences(
   event: VEvent,
   times: ResolvedEventTimes,
+  windowStart: Date,
   windowEnd: Date,
 ): BuiltOccurrences {
   const isRecurring =
@@ -397,6 +398,7 @@ function buildOccurrences(
     event.rrule,
     toRecurrenceDates(event.rdate),
     toRecurrenceDates(event.exdate),
+    windowStart,
     windowEnd,
     RECURRENCE_CAP,
   );
@@ -452,7 +454,7 @@ export async function importCalendar(icsText: string): Promise<ImportStats> {
       continue;
     }
 
-    const { occurrences, unsupported } = buildOccurrences(event, times, windowEnd);
+    const { occurrences, unsupported } = buildOccurrences(event, times, importTime, windowEnd);
     if (unsupported) await logRruleUnsupported(stats.total);
 
     const keepInstants: Date[] = [];

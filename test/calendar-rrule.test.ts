@@ -39,6 +39,9 @@ import {
 
 const FIXTURES = join(import.meta.dir, "../fixtures");
 const FAR_WINDOW_END = new Date("2040-01-01T00:00:00.000Z"); // must clear the Feb-29 YEARLY test's 2036
+// Before every DTSTART used below, so the windowStart-anchoring fast-forward (rrule.ts) is a
+// no-op and every existing expectation below still walks the exact sequence from DTSTART.
+const FAR_WINDOW_START = new Date("2000-01-01T00:00:00.000Z");
 
 afterEach(() => setNow(null));
 
@@ -118,6 +121,7 @@ describe("expandOccurrences (pure, src/importers/rrule.ts)", () => {
       "FREQ=WEEKLY;BYDAY=MO;COUNT=5",
       [],
       [],
+      FAR_WINDOW_START,
       FAR_WINDOW_END,
       500,
     );
@@ -137,6 +141,7 @@ describe("expandOccurrences (pure, src/importers/rrule.ts)", () => {
       "FREQ=DAILY;COUNT=3",
       [],
       [],
+      FAR_WINDOW_START,
       FAR_WINDOW_END,
       500,
     );
@@ -150,6 +155,7 @@ describe("expandOccurrences (pure, src/importers/rrule.ts)", () => {
       "FREQ=DAILY;UNTIL=20260104T100000Z",
       [],
       [],
+      FAR_WINDOW_START,
       FAR_WINDOW_END,
       500,
     );
@@ -167,6 +173,7 @@ describe("expandOccurrences (pure, src/importers/rrule.ts)", () => {
       "FREQ=DAILY;UNTIL=20260103",
       [],
       [],
+      FAR_WINDOW_START,
       FAR_WINDOW_END,
       500,
     );
@@ -179,6 +186,7 @@ describe("expandOccurrences (pure, src/importers/rrule.ts)", () => {
       "FREQ=DAILY;COUNT=5",
       [rdate("2026-01-10T10:00:00.000Z", 2026, 1, 10)],
       [rdate("2026-01-03T10:00:00.000Z", 2026, 1, 3)],
+      FAR_WINDOW_START,
       FAR_WINDOW_END,
       500,
     );
@@ -197,6 +205,7 @@ describe("expandOccurrences (pure, src/importers/rrule.ts)", () => {
       "FREQ=MONTHLY;COUNT=4",
       [],
       [],
+      FAR_WINDOW_START,
       FAR_WINDOW_END,
       500,
     );
@@ -214,6 +223,7 @@ describe("expandOccurrences (pure, src/importers/rrule.ts)", () => {
       "FREQ=YEARLY;COUNT=3",
       [],
       [],
+      FAR_WINDOW_START,
       FAR_WINDOW_END,
       500,
     );
@@ -226,6 +236,7 @@ describe("expandOccurrences (pure, src/importers/rrule.ts)", () => {
       "FREQ=DAILY",
       [],
       [],
+      FAR_WINDOW_START,
       FAR_WINDOW_END,
       10,
     );
@@ -239,10 +250,97 @@ describe("expandOccurrences (pure, src/importers/rrule.ts)", () => {
       "FREQ=DAILY",
       [],
       [],
+      FAR_WINDOW_START,
       new Date("2026-01-04T00:00:00.000Z"),
       500,
     );
     expect(result.occurrences.map((o) => o.day)).toEqual([1, 2, 3]);
+  });
+
+  test("review fix: an indefinite DAILY series anchors near windowStart, not DTSTART, for an old DTSTART", () => {
+    // DTSTART is 3+ years before windowStart with no COUNT/UNTIL. Before this fix, `cap` raw
+    // dates walked forward from DTSTART exhausted entirely within the past (500 days from
+    // 2023-01-01 never reaches 2026), so no occurrence ever reached windowStart, let alone
+    // windowEnd -- an indefinitely recurring event silently vanished from any "upcoming" view.
+    const windowStart = new Date("2026-08-08T00:00:00.000Z");
+    const windowEnd = new Date("2027-08-08T00:00:00.000Z"); // windowStart + 12 months
+    const result = expandOccurrences(
+      { year: 2023, month: 1, day: 1, hour: 9, minute: 0, second: 0, zone: "UTC" },
+      "FREQ=DAILY",
+      [],
+      [],
+      windowStart,
+      windowEnd,
+      500,
+    );
+    expect(result.unsupported).toBe(false);
+    expect(result.occurrences).toHaveLength(365);
+    // DAILY interval=1 always aligns exactly on windowStart's own calendar day.
+    expect(result.occurrences[0]!.instant.toISOString()).toBe("2026-08-08T09:00:00.000Z");
+    expect(result.occurrences[364]!.instant.toISOString()).toBe("2027-08-07T09:00:00.000Z");
+    expect(result.occurrences.some((o) => o.instant.getTime() >= windowStart.getTime())).toBe(true);
+  });
+
+  test("review fix: an indefinite WEEKLY BYDAY series (a years-old weekday standup) still surfaces this week and beyond", () => {
+    // The review's exact "Mon-Fri weekday standup started 2 years before now" repro. windowStart
+    // is a Wednesday; the fast-forward lands on the START of that week (not strictly after
+    // windowStart), so this week's earlier Mon/Tue instances stay visible too.
+    const windowStart = new Date("2026-08-05T00:00:00.000Z"); // a Wednesday
+    const windowEnd = new Date("2027-08-05T00:00:00.000Z");
+    const result = expandOccurrences(
+      { year: 2024, month: 8, day: 5, hour: 9, minute: 0, second: 0, zone: "UTC" }, // a Monday
+      "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
+      [],
+      [],
+      windowStart,
+      windowEnd,
+      500,
+    );
+    expect(result.unsupported).toBe(false);
+    expect(result.occurrences.slice(0, 7).map((o) => o.instant.toISOString())).toEqual([
+      "2026-08-03T09:00:00.000Z",
+      "2026-08-04T09:00:00.000Z",
+      "2026-08-05T09:00:00.000Z",
+      "2026-08-06T09:00:00.000Z",
+      "2026-08-07T09:00:00.000Z",
+      "2026-08-10T09:00:00.000Z",
+      "2026-08-11T09:00:00.000Z",
+    ]);
+    expect(result.occurrences[result.occurrences.length - 1]!.instant.toISOString()).toBe(
+      "2027-08-04T09:00:00.000Z",
+    );
+    expect(result.occurrences.some((o) => o.instant.getTime() >= windowStart.getTime())).toBe(true);
+  });
+
+  test("review fix: a COUNT-bounded series always counts from DTSTART, ignoring windowStart entirely", () => {
+    // RFC 5545 COUNT counts occurrences from DTSTART -- the windowStart fast-forward must never
+    // apply here, or the Nth occurrence would be computed wrong (or missed as "already over").
+    const start = { year: 2020, month: 1, day: 1, hour: 9, minute: 0, second: 0, zone: "UTC" };
+    const expected = [
+      "2020-01-01T09:00:00.000Z",
+      "2020-01-02T09:00:00.000Z",
+      "2020-01-03T09:00:00.000Z",
+    ];
+    const nearStart = expandOccurrences(
+      start,
+      "FREQ=DAILY;COUNT=3",
+      [],
+      [],
+      FAR_WINDOW_START,
+      FAR_WINDOW_END,
+      500,
+    );
+    const farFuture = expandOccurrences(
+      start,
+      "FREQ=DAILY;COUNT=3",
+      [],
+      [],
+      new Date("2026-08-08T00:00:00.000Z"), // long after this COUNT-bounded series already ended
+      FAR_WINDOW_END,
+      500,
+    );
+    expect(nearStart.occurrences.map((o) => o.instant.toISOString())).toEqual(expected);
+    expect(farFuture.occurrences.map((o) => o.instant.toISOString())).toEqual(expected);
   });
 
   test("no RRULE: RDATE/EXDATE still apply on top of the bare DTSTART", () => {
@@ -251,6 +349,7 @@ describe("expandOccurrences (pure, src/importers/rrule.ts)", () => {
       undefined,
       [rdate("2026-01-05T10:00:00.000Z", 2026, 1, 5)],
       [],
+      FAR_WINDOW_START,
       FAR_WINDOW_END,
       500,
     );
@@ -270,7 +369,15 @@ describe("expandOccurrences (pure, src/importers/rrule.ts)", () => {
     ["empty value", ""],
     ["UNTIL before DTSTART", "FREQ=DAILY;UNTIL=20251231T000000Z"],
   ])("unsupported RRULE part (%s) degrades to [DTSTART] with unsupported:true", (_label, rrule) => {
-    const result = expandOccurrences(utcStart(1), rrule, [], [], FAR_WINDOW_END, 500);
+    const result = expandOccurrences(
+      utcStart(1),
+      rrule,
+      [],
+      [],
+      FAR_WINDOW_START,
+      FAR_WINDOW_END,
+      500,
+    );
     expect(result.unsupported).toBe(true);
     expect(result.occurrences).toHaveLength(1);
     expect(result.occurrences[0]!.instant.toISOString()).toBe("2026-01-01T10:00:00.000Z");
@@ -319,6 +426,39 @@ describe("calendar importer: recurring events", () => {
     // stateSnapshot's today/tomorrow window (starts_at >= now-1h, < now+2d) shows this week's instance.
     const state = await stateSnapshot();
     expect(state.calendar.some((row: any) => row.uid === "evt-rrule-standup@fixture")).toBe(true);
+  });
+
+  test("review fix: a years-old indefinite DAILY event still surfaces in stateSnapshot's today/tomorrow window", async () => {
+    // The review's exact repro shape: DTSTART years before "now", FREQ=DAILY, no COUNT/UNTIL --
+    // a years-old daily habit, exactly what a life database accumulates. Before this fix, `cap`
+    // (500) raw dates walked from DTSTART=2023-01-03 exhausted entirely by ~2024-05, so no
+    // occurrence ever reached anywhere near "now" and this event silently vanished from every
+    // upcoming-events view despite being actively, indefinitely recurring.
+    setNow(new Date("2026-08-10T00:30:00.000Z"));
+    const ics = `BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:evt-rrule-old-daily@fixture
+DTSTART;TZID=Asia/Singapore:20230103T093000
+DTEND;TZID=Asia/Singapore:20230103T094500
+SUMMARY:Long-running daily habit (rrule)
+RRULE:FREQ=DAILY
+END:VEVENT
+END:VCALENDAR`;
+    const stats = await importCalendar(ics);
+    expect(stats.total).toBe(1);
+    expect(stats.inserted).toBe(365);
+
+    const rows = await sql`
+      select occurrence_start from calendar_events
+      where uid = 'evt-rrule-old-daily@fixture' order by occurrence_start`;
+    expect(rows).toHaveLength(365);
+    // Every stored row is anchored near "now" -- none stranded back near the 2023 DTSTART.
+    expect(rows[0]!.occurrence_start.toISOString()).toBe("2026-08-10T01:30:00.000Z");
+    expect(rows[rows.length - 1]!.occurrence_start.toISOString()).toBe("2027-08-09T01:30:00.000Z");
+
+    // stateSnapshot's today/tomorrow window (starts_at >= now-1h, < now+2d) shows this event.
+    const state = await stateSnapshot();
+    expect(state.calendar.some((row: any) => row.uid === "evt-rrule-old-daily@fixture")).toBe(true);
   });
 
   test("all-day YEARLY (birthday-style) expansion spans local midnights", async () => {
