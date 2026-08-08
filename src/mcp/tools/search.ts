@@ -39,6 +39,9 @@ export const searchTool: ToolDef = {
         updated_at: h.updated_at,
         created_by: h.created_by,
         derived: h.derived,
+        // Only stamped when true (spec: agents should cite the successor instead) — keeps the
+        // common unflagged case's source refs unchanged.
+        ...(h.superseded ? { superseded: true as const } : {}),
       })),
       { staleness: stalenessOf(newest), gaps },
     );

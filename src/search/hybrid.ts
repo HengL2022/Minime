@@ -37,6 +37,8 @@ export interface Hit {
   updated_at: Date;
   derived: boolean;
   created_by: string;
+  superseded: boolean;
+  superseded_by?: string;
 }
 
 // RRF dampening constant (Cormack et al. 2009 use 60): large enough that the top several
@@ -62,6 +64,10 @@ const ACCESS_BAND = 0.05;
 const ACCESS_CAP = 5;
 const ACCESS_WINDOW_DAYS = 90;
 const DERIVED_PENALTY = 0.85;
+// A row with a live successor (superseded_by set — 028_correction_supersede.sql) stays rankable
+// but half-weighted so the successor wins ties; a pure multiplier on the flagged row only, so
+// ranking is bit-identical for every unflagged row. tune only against the eval harness.
+const SUPERSEDED_PENALTY = 0.5;
 // Compiled notes (dream-distilled summaries, source='dream:notes') are high-signal derived
 // content — boosted like GBrain's compiled-truth layer instead of penalized. ×1.5 starting
 // value. // eval-calibration pending
@@ -247,7 +253,11 @@ export async function hybridSearch(opts: {
     // both stamps required: an imported/agent-written page can't claim the boost by source alone
     if (COMPILED_SOURCES.has(m.source) && m.created_by === "system:dream") score *= NOTES_BOOST;
     else if (derived && !includeDerived) score *= DERIVED_PENALTY;
-    return [{ c, m, score, derived }];
+    // Retracted rows never reach here — parentMeta already excludes them, so the `!m` meta-miss
+    // branch above drops their chunks first. A superseded row with a successor stays, penalized.
+    const superseded = m.superseded_by !== null;
+    if (superseded) score *= SUPERSEDED_PENALTY;
+    return [{ c, m, score, derived, superseded }];
   });
 
   // dedupe to best chunk per parent
@@ -270,5 +280,7 @@ export async function hybridSearch(opts: {
     updated_at: s.m.updated_at,
     derived: s.derived,
     created_by: s.m.created_by,
+    superseded: s.superseded,
+    ...(s.superseded ? { superseded_by: s.m.superseded_by as string } : {}),
   }));
 }

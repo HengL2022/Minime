@@ -10,6 +10,7 @@ export interface SourceRef {
   updated_at?: Date | string;
   created_by?: string;
   derived?: boolean;
+  superseded?: boolean;
 }
 
 export interface Envelope<T = unknown> {

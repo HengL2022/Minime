@@ -13,6 +13,7 @@ import {
   resolveOrg,
   resolvePerson,
 } from "../../db/repo";
+import { localDateStr } from "../../util/clock";
 import { type SourceRef, ToolError, envelope, stalenessOf } from "../envelope";
 import type { ToolDef } from "./registry";
 
@@ -105,6 +106,19 @@ export const getContextTool: ToolDef = {
         );
     } else {
       throw new ToolError("BAD_INPUT", "provide either type+id or person_name");
+    }
+
+    // getRow/resolvePerson/resolveOrg are deliberately unfiltered on supersession state — the
+    // owner/agent can always inspect a row by id (I5) — so flag it here instead: a superseded
+    // row (successor exists, 028_correction_supersede.sql) points the reader at the current
+    // version; a retracted row (no successor) is labeled withdrawn.
+    if (row.superseded_at) {
+      const on = localDateStr(new Date(row.superseded_at), ctx.timeZone);
+      gaps.push(
+        row.superseded_by
+          ? `this row was superseded on ${on} — read ${type} ${row.superseded_by} for the current version`
+          : `this row was retracted on ${on}`,
+      );
     }
 
     sources.push({
@@ -215,6 +229,7 @@ export const getContextTool: ToolDef = {
           source: row.source,
           created_by: row.created_by,
           derived_from: row.derived_from,
+          superseded_by: row.superseded_by,
         },
       },
       sources,

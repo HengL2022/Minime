@@ -683,6 +683,11 @@ export interface ParentMeta {
   created_by: string;
   derived_from: string | null;
   source: string;
+  // Correction state (028_correction_supersede.sql), uniform across all twelve PARENTS tables.
+  // superseded_by set -> this row has a live successor (down-weighted, not hidden, in hybrid.ts).
+  // superseded_by null -> either live (superseded_at also null) or retracted (excluded below).
+  superseded_by: string | null;
+  superseded_at: Date | null;
 }
 
 export async function parentMeta(
@@ -694,11 +699,19 @@ export async function parentMeta(
   const allowed = await allowedTier(actor);
   const { table, titleCol } = parentTable(type);
   // table/titleCol come from the fixed PARENTS map above, never from user input.
+  // Retracted rows (superseded_at set, superseded_by null) are excluded here so hybridSearch's
+  // existing meta-miss drop (a candidate whose parent has no meta entry is filtered out) removes
+  // them from results even if a chunk somehow survived; retractRow already deletes their chunks
+  // as belt-and-suspenders. A superseded-with-successor row (both columns set) stays in the map
+  // so it remains rankable — hybridSearch down-weights it by SUPERSEDED_PENALTY rather than
+  // hiding it. getRow (below) deliberately does NOT apply this filter: the owner/agent can
+  // always inspect any row, live or not, by id.
   const rows = await db()`
     select id, left(${db()(titleCol)}::text, 120) as title, updated_at, created_by, derived_from,
-           source
+           source, superseded_by, superseded_at
     from ${db()(table)}
-    where id = any(${ids}) and tier >= 1 and tier <= ${allowed}`;
+    where id = any(${ids}) and tier >= 1 and tier <= ${allowed}
+      and not (superseded_at is not null and superseded_by is null)`;
   return new Map(rows.map((r: any) => [r.id as string, r as ParentMeta]));
 }
 
