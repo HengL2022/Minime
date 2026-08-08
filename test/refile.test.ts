@@ -68,12 +68,15 @@ describe("minime_refile", () => {
     expect(data.resolved_review_items).toContain(reviewBefore!.id);
 
     const [journalRow] = await testSql`
-      select entry_md, mood, derived_from, tier, source
+      select entry_md, mood, derived_from, tier, source, created_by
       from journal_entries where id = ${data.filed_id}::uuid`;
     expect(journalRow!.entry_md).toBe(text);
     expect(journalRow!.mood).toBe(4);
     expect(journalRow!.derived_from).toBe(inboxId);
     expect(journalRow!.tier).toBe(2);
+    // I5 provenance: attributed to the real MCP caller (ctx.actor), not fileRow's
+    // "agent:classifier" default — a refile-filed row must not be mis-stamped as automatic.
+    expect(journalRow!.created_by).toBe(ctx.actor);
 
     const [inboxRow] = await testSql`
       select status, filed_table, filed_id from inbox_items where id = ${inboxId}::uuid`;
@@ -117,8 +120,10 @@ describe("minime_refile", () => {
     expect(data.filed_table).toBe("pages");
 
     const [page] = await testSql`
-      select path, tier, body_md from pages where id = ${data.filed_id}::uuid`;
+      select path, tier, body_md, created_by from pages where id = ${data.filed_id}::uuid`;
     expect(page!.tier).toBe(2);
+    // I5 provenance: the real MCP caller, not "agent:classifier".
+    expect(page!.created_by).toBe(ctx.actor);
     const projected = await readFile(join(config.dataDir, "brain", String(page!.path)), "utf8");
     expect(projected).toBe(page!.body_md);
     expect(projected).toContain("ZQX-REFILE-NOTE");
@@ -145,7 +150,7 @@ describe("minime_refile", () => {
     expect(data.resolved_review_items).toContain(reviewBefore!.id);
 
     const [row] = await testSql`
-      select summary, kind, tier, derived_from, person_id, org_id
+      select summary, kind, tier, derived_from, person_id, org_id, created_by
       from interactions where id = ${data.filed_id}::uuid`;
     expect(row!.summary).toBe(text);
     expect(row!.kind).toBe("call");
@@ -153,12 +158,17 @@ describe("minime_refile", () => {
     expect(row!.derived_from).toBe(inboxId);
     expect(row!.org_id).toBeNull();
     expect(row!.person_id).toBeTruthy();
+    // I5 provenance: the real MCP caller, not "agent:classifier".
+    expect(row!.created_by).toBe(ctx.actor);
 
     // "Priya Kestrel" carries no org cue, so fileRow's person/org heuristic must resolve it to a
     // real person row, not a phantom org (the phantom-org bug the heuristic exists to avoid).
     const [person] = await testSql`
-      select canonical_name from people where id = ${row!.person_id}`;
+      select canonical_name, created_by from people where id = ${row!.person_id}`;
     expect(person!.canonical_name).toBe("Priya Kestrel");
+    // The newly-minted person is also attributed to the real caller (fileRow threads `actor`
+    // into ensurePerson, not just the interaction row itself).
+    expect(person!.created_by).toBe(ctx.actor);
 
     const [inboxRow] = await testSql`
       select status, filed_table, filed_id from inbox_items where id = ${inboxId}::uuid`;
@@ -203,13 +213,15 @@ describe("minime_refile", () => {
     expect(data.resolved_review_items).toContain(reviewBefore!.id);
 
     const [row] = await testSql`
-      select question, choice, reasoning, tier, derived_from
+      select question, choice, reasoning, tier, derived_from, created_by
       from decisions where id = ${data.filed_id}::uuid`;
     expect(row!.question).toBe("Replace the spare bilge pump now or at next haul-out?");
     expect(row!.choice).toBe("Replace now");
     expect(row!.reasoning).toBe(text);
     expect(row!.tier).toBe(1); // decisions have no owner-facing tier-2 pathway through this tool
     expect(row!.derived_from).toBe(inboxId);
+    // I5 provenance: the real MCP caller, not "agent:classifier".
+    expect(row!.created_by).toBe(ctx.actor);
 
     const [inboxRow] = await testSql`
       select status, filed_table, filed_id from inbox_items where id = ${inboxId}::uuid`;
@@ -416,12 +428,14 @@ describe("minime_refile", () => {
       }),
     );
     const [task] = await testSql`
-      select due, body, tier, derived_from from tasks where id = ${data.filed_id}::uuid`;
+      select due, body, tier, derived_from, created_by from tasks where id = ${data.filed_id}::uuid`;
     expect(task!.due).toBeNull();
     expect(String(task!.body)).toContain("date guardrail");
     expect(String(task!.body)).toContain("2020-01-01");
     expect(task!.tier).toBe(1);
     expect(task!.derived_from).toBe(inboxId);
+    // I5 provenance: the real MCP caller, not "agent:classifier".
+    expect(task!.created_by).toBe(ctx.actor);
   });
 
   test("a fileRow duplicate result surfaces as BAD_INPUT and rolls back cleanly", async () => {

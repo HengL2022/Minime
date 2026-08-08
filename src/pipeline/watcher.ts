@@ -243,10 +243,18 @@ export function storedClassification(value: unknown): Classification | null {
 // Insert the typed row for a classification. Returns its primary row plus an optional note
 // projection when filed, "duplicate" when it matched an existing open task (the duplicate review
 // item is queued here), or null when unfileable. The caller owns the surrounding transaction.
+// `actor` stamps created_by (and ensureOrg/ensurePerson's creator) on every row this call
+// creates — it defaults to ACTOR for the watcher's own automatic-pipeline callers, but
+// minime_refile (W2-3) passes its ctx.actor so an owner-initiated filing is attributed to the
+// real MCP caller instead of the classifier (I5 provenance; invariant-review 2026-08-08). The
+// bookkeeping events below (inbox:duplicate, inbox:split-decision, inbox:split-done-task,
+// inbox:closed-existing-task) still log actor=ACTOR either way — the wrapping tool:minime_refile
+// and inbox:refiled audit events already record the true actor for a refile-triggered call.
 export async function fileRow(
   c: Classification,
   text: string,
   inboxId: string,
+  actor: string = ACTOR,
 ): Promise<FiledResult | "duplicate" | null> {
   const firstLine = firstLineOf(text);
   switch (c.type) {
@@ -285,7 +293,7 @@ export async function fileRow(
             id: dup.match.id,
             title: dup.match.title,
             status: "done",
-            createdBy: ACTOR,
+            createdBy: actor,
           });
           await indexParent("task", dup.match.id, text, dup.match.title, 1, INDEX_OPTIONS);
           await logEvent({
@@ -338,7 +346,7 @@ export async function fileRow(
           : text,
         due,
         status: done ? "done" : undefined,
-        createdBy: ACTOR,
+        createdBy: actor,
         source: "capture",
         derivedFrom: inboxId,
       });
@@ -351,7 +359,7 @@ export async function fileRow(
           options: [],
           choice: null,
           reasoning: `${text}\n\n[split from task ${id}: decision portion of a compound action+decision capture]`,
-          createdBy: ACTOR,
+          createdBy: actor,
           source: "capture",
           derivedFrom: inboxId,
         });
@@ -370,7 +378,7 @@ export async function fileRow(
       const { id } = await insertJournal({
         entryMd: text,
         mood: typeof c.fields.mood === "number" ? c.fields.mood : null,
-        createdBy: ACTOR,
+        createdBy: actor,
         source: "capture",
         derivedFrom: inboxId,
       });
@@ -394,7 +402,7 @@ export async function fileRow(
       const st = c.fields.subject_type;
       const useOrg = !!existingOrg || st === "org" || (st !== "person" && orgCue(name));
       if (useOrg) {
-        const org = await ensureOrg(name, ACTOR, "capture", {
+        const org = await ensureOrg(name, actor, "capture", {
           tier: 2,
           derivedFrom: inboxId,
         });
@@ -402,14 +410,14 @@ export async function fileRow(
           orgId: org.id,
           kind,
           summary: text,
-          createdBy: ACTOR,
+          createdBy: actor,
           source: "capture",
           derivedFrom: inboxId,
         });
         await indexParent("interaction", id, text, undefined, 2, INDEX_OPTIONS);
         return { primary: ["interactions", id] };
       }
-      const person = await ensurePerson(name, ACTOR, "capture", {
+      const person = await ensurePerson(name, actor, "capture", {
         tier: 2,
         derivedFrom: inboxId,
       });
@@ -417,7 +425,7 @@ export async function fileRow(
         personId: person.id,
         kind,
         summary: text,
-        createdBy: ACTOR,
+        createdBy: actor,
         source: "capture",
         derivedFrom: inboxId,
       });
@@ -430,7 +438,7 @@ export async function fileRow(
         options: Array.isArray(c.fields.options) ? c.fields.options : [],
         choice: typeof c.fields.choice === "string" ? c.fields.choice : null,
         reasoning: text,
-        createdBy: ACTOR,
+        createdBy: actor,
         source: "capture",
         derivedFrom: inboxId,
       });
@@ -447,7 +455,7 @@ export async function fileRow(
           title: doneTitle,
           body: `${text}\n\n[split from decision ${id}: completed-work portion of a mixed capture]`,
           status: "done",
-          createdBy: ACTOR,
+          createdBy: actor,
           source: "capture",
           derivedFrom: inboxId,
         });
@@ -467,10 +475,17 @@ export async function fileRow(
       // captures (SessionEnd hook) carry verbatim prompt/outcome text from arbitrary
       // projects, so they file at tier 2 like journal/interactions — searchable, but
       // reads stay behind the unlock gate (§12; invariant-review 2026-06-12). A caller may
-      // pin an explicit tier via c.fields.tier (minime_refile, W2-3) — e.g. floored above
-      // the hint default by the capture's own prior classifier evidence — otherwise this
-      // falls back to the hint-based default exactly as before.
-      const tier = c.fields.tier === 1 || c.fields.tier === 2 ? c.fields.tier : noteHintTier(text);
+      // pin an explicit tier via c.fields.tier (minime_refile, W2-3), but c.fields is not a
+      // trusted channel by itself: the automatic pipeline passes classify()'s raw parsed JSON
+      // straight through (classify.ts), and a replayed storedClassification is equally
+      // unsanitized, so a stray or prompt-injected "tier" in the model's own JSON output must
+      // never be able to UNDERCUT the text's own hint-based floor (BLOCKER, invariant-review
+      // 2026-08-08). Floor whatever tier the fields carry (or the ordinary tier-1 default when
+      // absent) against noteHintTier(text) so a pin can only ever RAISE the tier — it can raise
+      // an ordinary note to tier 2 (minime_refile's floored override), but can never launder an
+      // agent-session capture down to tier 1.
+      const pinned = c.fields.tier === 1 || c.fields.tier === 2 ? c.fields.tier : 1;
+      const tier = Math.max(pinned, noteHintTier(text)) as 1 | 2;
       const projection = noteProjection(c, text, inboxId);
       const relPath = relative(join(config.dataDir, "brain"), projection.absolutePath);
       const hash = sha256(projection.body);
@@ -479,7 +494,7 @@ export async function fileRow(
         title: c.fields.title || firstLine,
         bodyMd: projection.body,
         contentHash: hash,
-        createdBy: ACTOR,
+        createdBy: actor,
         source: "capture",
         derivedFrom: inboxId,
         tier,
