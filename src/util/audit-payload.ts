@@ -27,6 +27,7 @@ type AuditPayloadKind =
   | "onboardComplete"
   | "personUpsert"
   | "repair"
+  | "resticCheck"
   | "tier2Unlock"
   | "toolAttempt"
   | "toolDisposition"
@@ -85,6 +86,11 @@ function unlockMinutes(value: unknown): number {
 function ratio(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1)
     invalidPayload();
+  return value;
+}
+
+function boolean(value: unknown): boolean {
+  if (typeof value !== "boolean") invalidPayload();
   return value;
 }
 
@@ -490,6 +496,13 @@ function repair(input: RepairInput): AuditPayload {
   });
 }
 
+// W3-9: the weekly `restic check --read-data-subset` audit event. Content-free by construction --
+// ok is the only field, so this can never carry a repository path, restic's own stderr, or any
+// other detail; doctor.ts reads only this verb's timestamp (lastEventAt), never the payload.
+function resticCheck(input: { ok: boolean }): AuditPayload {
+  return construct("resticCheck", { ok: boolean(input.ok) });
+}
+
 function classifierKind(value: unknown): ClassifierKind {
   return fixed(value, ["task", "journal", "interaction", "note", "decision_note", "unknown"]);
 }
@@ -683,6 +696,7 @@ export const auditPayload = Object.freeze({
   onboardComplete,
   personUpsert,
   repair,
+  resticCheck,
   tier2Unlock,
   toolAttempt,
   toolDisposition,
@@ -723,6 +737,7 @@ function expectedPayloadKind(verb: string, payload: AuditPayload): AuditPayloadK
   }
 
   const fixedKinds: Readonly<Record<string, AuditPayloadKind>> = {
+    "backup:restic-check": "resticCheck",
     "correct:amend": "correctAmend",
     "correct:retier": "correctRetier",
     "correct:retract": "correctRetract",

@@ -22,6 +22,7 @@ import {
 } from "../src/db/repo";
 import { runDoctorChecks } from "../src/ops/doctor";
 import { flagPersistentDreamFailure } from "../src/serve";
+import { config } from "../src/util/config";
 import { expectSqlReject, resetDb, testSql as sql } from "./helpers";
 
 beforeEach(async () => {
@@ -31,6 +32,11 @@ beforeEach(async () => {
 async function seedDreamSummary(at: Date, failedSteps: string[]): Promise<void> {
   await sql`insert into events (at, actor, verb, payload) values
     (${at}, 'system:dream', 'dream:summary', ${sql.json({ failed_steps: failedSteps })})`;
+}
+
+async function seedResticCheck(at: Date, ok: boolean): Promise<void> {
+  await sql`insert into events (at, actor, verb, payload) values
+    (${at}, 'system:backup', 'backup:restic-check', ${sql.json({ ok })})`;
 }
 
 const HOUR = 3_600_000;
@@ -187,26 +193,55 @@ describe("minime doctor (src/ops/doctor.ts)", () => {
     lock = await tryAcquireMaintenanceLock();
     expect(lock).not.toBeNull();
     await seedDreamSummary(new Date(), []); // fresh, clean run
+    await seedResticCheck(new Date(), true); // fresh, clean restic check
 
-    await withTempDumpDir(async (dumpDir) => {
-      await writeFile(join(dumpDir, "minime.sql"), "-- fixture dump\n");
-      await writeFile(join(dumpDir, "minime.manifest.json"), "{}");
-      const result = await runDoctorChecks({
-        statfs: HEALTHY_STATFS,
-        fetchOllamaTags: async () => ["nomic-embed-text", "llama3.1:8b"],
-        dumpDir,
+    const original = {
+      resticRepository: config.resticRepository,
+      resticPasswordFile: config.resticPasswordFile,
+    };
+    config.resticRepository = "test:repository";
+    config.resticPasswordFile = "/test/restic-password";
+    try {
+      await withTempDumpDir(async (dumpDir) => {
+        await writeFile(join(dumpDir, "minime.sql"), "-- fixture dump\n");
+        await writeFile(join(dumpDir, "minime.manifest.json"), "{}");
+        const result = await runDoctorChecks({
+          statfs: HEALTHY_STATFS,
+          fetchOllamaTags: async () => ["nomic-embed-text", "llama3.1:8b"],
+          dumpDir,
+        });
+        expect(result.exitCode).toBe(0);
+        expect(result.checks.map((c) => c.status)).toEqual([
+          "PASS",
+          "PASS",
+          "PASS",
+          "PASS",
+          "PASS",
+          "PASS",
+          "PASS",
+          "PASS",
+        ]);
       });
-      expect(result.exitCode).toBe(0);
-      expect(result.checks.map((c) => c.status)).toEqual([
-        "PASS",
-        "PASS",
-        "PASS",
-        "PASS",
-        "PASS",
-        "PASS",
-        "PASS",
-      ]);
+    } finally {
+      config.resticRepository = original.resticRepository;
+      config.resticPasswordFile = original.resticPasswordFile;
+    }
+  });
+
+  test("restic check WARNs (not FAILs) when restic is unconfigured or has never run", async () => {
+    await seedDreamSummary(new Date(), []);
+    const result = await runDoctorChecks({
+      statfs: HEALTHY_STATFS,
+      fetchOllamaTags: async () => [],
+      dumpDir: NO_DUMP_DIR,
     });
+    const resticCheck = result.checks.find((c) => c.name === "restic check");
+    expect(resticCheck).toEqual({
+      name: "restic check",
+      status: "WARN",
+      detail: "restic not configured",
+    });
+    expect(result.exitCode).toBe(0);
   });
 
   test("FAILs (nonzero exit) when dream has never run", async () => {

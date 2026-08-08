@@ -160,6 +160,7 @@ describe("audit payload boundary", () => {
       "onboardComplete",
       "personUpsert",
       "repair",
+      "resticCheck",
       "tier2Unlock",
       "toolAttempt",
       "toolDisposition",
@@ -364,6 +365,31 @@ describe("audit payload boundary", () => {
         code: "repair_module_failed",
         ids: [crypto.randomUUID()],
       }),
+    ).toThrow("invalid_audit_payload");
+  });
+
+  test("resticCheck (W3-9) carries only {ok} and rejects a non-boolean", async () => {
+    const { auditPayload, assertAuditPayloadForVerb } = (await import(
+      "../src/util/audit-payload"
+    )) as any;
+    const payload = auditPayload.resticCheck({
+      ok: true,
+      prose: SENTINEL,
+      path: `/private/${SENTINEL}.log`,
+    });
+    expect(payload).toEqual({ ok: true });
+    expect(JSON.stringify(payload)).not.toContain(SENTINEL);
+    expect(() => assertAuditPayloadForVerb("backup:restic-check", payload)).not.toThrow();
+    expect(() => auditPayload.resticCheck({ ok: "true" })).toThrow("invalid_audit_payload");
+    expect(() =>
+      assertAuditPayloadForVerb(
+        "backup:restic-check",
+        auditPayload.repair({
+          script: "unknown",
+          phase: "failed",
+          code: "repair_module_failed",
+        }),
+      ),
     ).toThrow("invalid_audit_payload");
   });
 });

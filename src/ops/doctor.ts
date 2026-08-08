@@ -13,7 +13,7 @@ import { statfsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { adminSql } from "../db/client";
-import { type OpsHealth, maintenanceLockHeld, opsHealth } from "../db/repo";
+import { type OpsHealth, lastEventAt, maintenanceLockHeld, opsHealth } from "../db/repo";
 import { fetchOllamaTags } from "../llm/ollama-http";
 import { DB_DUMP_DIR, config } from "../util/config";
 import type { OllamaEndpoint } from "../util/ollama-url";
@@ -43,6 +43,9 @@ export interface DoctorProbes {
 
 const DREAM_STALE_HOURS = 48;
 const DUMP_STALE_HOURS = 48;
+// Default cron is weekly (RESTIC_CHECK_CRON, "0 4 * * 0" = every Sunday) -- a bit over 8 days
+// tolerates one late/missed fire before this WARNs.
+const RESTIC_CHECK_STALE_HOURS = 24 * 8;
 const DISK_WARN_FREE_RATIO = 0.1;
 const DISK_FAIL_FREE_RATIO = 0.03;
 
@@ -138,6 +141,29 @@ async function checkDumpFreshness(probes: DoctorProbes, now: Date): Promise<Doct
   return { name: "backup dump", status: "PASS" };
 }
 
+// W3-9: surfaces the age of the weekly `restic check --read-data-subset` pass by reading its
+// audit verb's last timestamp -- this never re-runs restic itself (that stays on serve.ts's
+// cron), so the check is fast and needs no restic binary. Same non-fatal stance as
+// checkDumpFreshness: restic being unconfigured, or the check never having run yet, is common
+// and only ever WARNs.
+async function checkResticCheck(now: Date): Promise<DoctorCheck> {
+  if (!config.resticRepository || !config.resticPasswordFile) {
+    return { name: "restic check", status: "WARN", detail: "restic not configured" };
+  }
+  let at: Date | null;
+  try {
+    at = await lastEventAt("backup:restic-check");
+  } catch {
+    return { name: "restic check", status: "WARN", detail: "status could not be read" };
+  }
+  if (!at) return { name: "restic check", status: "WARN", detail: "has never run" };
+  const hours = hoursSince(at, now);
+  if (hours > RESTIC_CHECK_STALE_HOURS) {
+    return { name: "restic check", status: "WARN", detail: `last run ${Math.floor(hours)}h ago` };
+  }
+  return { name: "restic check", status: "PASS" };
+}
+
 // Absence is common and not itself a fault -- e.g. doctor run standalone with no resident serve
 // -- so this only ever WARNs, never FAILs.
 async function checkMaintenanceOwner(): Promise<DoctorCheck> {
@@ -172,6 +198,7 @@ export async function runDoctorChecks(probes: DoctorProbes = {}): Promise<Doctor
     await checkOllama(probes),
     await checkDream(now),
     await checkDumpFreshness(probes, now),
+    await checkResticCheck(now),
     await checkMaintenanceOwner(),
     checkDiskHeadroom("disk: data/", config.dataDir, probes),
     checkDiskHeadroom("disk: db-dump/", probes.dumpDir ?? DB_DUMP_DIR, probes),

@@ -77,7 +77,11 @@ describe("single maintenance owner (W3-5)", () => {
   test("a second scheduler gets no dream/backup crons while the first holds the lock, and takes over once it closes", async () => {
     const a = fakeCronFactory();
     const scheduleA = track(await startOwnerMaintenanceSchedule(a.factory));
-    expect(a.registrations.map((r) => r.pattern)).toEqual([config.dreamCron, config.backupCron]);
+    expect(a.registrations.map((r) => r.pattern)).toEqual([
+      config.dreamCron,
+      config.backupCron,
+      config.resticCheckCron,
+    ]);
 
     const b = fakeCronFactory();
     const scheduleB = track(await startOwnerMaintenanceSchedule(b.factory));
@@ -95,6 +99,7 @@ describe("single maintenance owner (W3-5)", () => {
       retry.pattern,
       config.dreamCron,
       config.backupCron,
+      config.resticCheckCron,
     ]);
   });
 
@@ -105,7 +110,11 @@ describe("single maintenance owner (W3-5)", () => {
 
     const b = fakeCronFactory();
     const scheduleB = track(await startOwnerMaintenanceSchedule(b.factory));
-    expect(b.registrations.map((r) => r.pattern)).toEqual([config.dreamCron, config.backupCron]);
+    expect(b.registrations.map((r) => r.pattern)).toEqual([
+      config.dreamCron,
+      config.backupCron,
+      config.resticCheckCron,
+    ]);
     await scheduleB.close();
   });
 
@@ -127,12 +136,13 @@ describe("single maintenance owner (W3-5)", () => {
 
     const { factory, registrations } = fakeCronFactory();
     const schedule = track(await startOwnerMaintenanceSchedule(factory));
-    expect(registrations.map((r) => r.pattern).slice(0, 2)).toEqual([
+    expect(registrations.map((r) => r.pattern).slice(0, 3)).toEqual([
       config.dreamCron,
       config.backupCron,
+      config.resticCheckCron,
     ]);
-    expect(registrations.length).toBe(3); // + one dream catch-up run
-    const catchUp = registrations[2]!;
+    expect(registrations.length).toBe(4); // + one dream catch-up run
+    const catchUp = registrations[3]!;
     expect(catchUp.pattern).not.toBe(config.dreamCron);
 
     catchUp.fire();
@@ -148,7 +158,11 @@ describe("single maintenance owner (W3-5)", () => {
 
     const { factory, registrations } = fakeCronFactory();
     const schedule = track(await startOwnerMaintenanceSchedule(factory));
-    expect(registrations.map((r) => r.pattern)).toEqual([config.dreamCron, config.backupCron]);
+    expect(registrations.map((r) => r.pattern)).toEqual([
+      config.dreamCron,
+      config.backupCron,
+      config.resticCheckCron,
+    ]);
     await schedule.close();
 
     const [count] = await sql`select count(*)::int as n from events where verb = 'dream:summary'`;
@@ -159,7 +173,11 @@ describe("single maintenance owner (W3-5)", () => {
     // beforeEach's resetDb() already leaves a fresh, event-free database.
     const { factory, registrations } = fakeCronFactory();
     const schedule = track(await startOwnerMaintenanceSchedule(factory));
-    expect(registrations.map((r) => r.pattern)).toEqual([config.dreamCron, config.backupCron]);
+    expect(registrations.map((r) => r.pattern)).toEqual([
+      config.dreamCron,
+      config.backupCron,
+      config.resticCheckCron,
+    ]);
     await schedule.close();
 
     const [count] = await sql`select count(*)::int as n from events where verb = 'dream:summary'`;

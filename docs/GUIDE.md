@@ -260,6 +260,14 @@ or a distributed rollback across Postgres, files, model providers, or indexes.
   `make restore-pitr TIME="…"` is a compatibility name: it restores the latest logical snapshot at
   or before that time into `minime_restore`, validates and migrates that scratch database, and
   leaves it for inspection. It is not WAL/PITR.
+- **Backup robustness**: every dump attempt first checks the db-dump/ filesystem has headroom —
+  free space at least double the current `minime.sql` (or 256MB when there is no dump yet) — and
+  fails closed with no partial file when it doesn't. Independently, a weekly
+  `restic check --read-data-subset=5%` (`RESTIC_CHECK_CRON`, default Sunday 4am, runs only once
+  `RESTIC_REPOSITORY`/`RESTIC_PASSWORD_FILE` are set) verifies the destination itself is still
+  readable; it does not create a new snapshot. Each attempt logs one content-free
+  `backup:restic-check` event (`minime audit` shows it), and `minime doctor` reports how long ago
+  it last ran.
 - **Restore promotion**: `make promote-restore` is a separate, deliberate owner action. It refuses
   active sessions, prepared transactions, a stale schema, or an existing `minime_replaced`; writes
   a private pre-promotion dump; blocks new connections; then performs the two database renames.
@@ -308,9 +316,10 @@ runs dream/backup. A resident install makes sure something always holds it, and 
 within 5 minutes of the previous owner exiting.
 
 Run `bun run src/cli.ts doctor` any time for a content-free health checklist: Postgres and
-Ollama reachability, when dream last ran and whether it's current, backup dump freshness,
-whether some process currently owns nightly maintenance, and disk headroom for `data/` and
-`db-dump/`. Each line prints `PASS`, `WARN`, or `FAIL`; the command exits nonzero only when
+Ollama reachability, when dream last ran and whether it's current, backup dump freshness, how
+long ago the weekly restic integrity check last ran, whether some process currently owns nightly
+maintenance, and disk headroom for `data/` and `db-dump/`. Each line prints `PASS`, `WARN`, or
+`FAIL`; the command exits nonzero only when
 something is actually broken (Postgres unreachable, dream never run or stale past 48h, or
 critically low disk) — a down Ollama or a missing/stale backup dump prints `WARN` but is not
 itself fatal. No secrets, URLs, or paths appear in its output.

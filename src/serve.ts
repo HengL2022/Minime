@@ -11,7 +11,7 @@ import {
   tryAcquireMaintenanceLock,
 } from "./db/repo";
 import { appendOpsLine } from "./ops/ops-log";
-import { dbSnapshot } from "./pipeline/backup";
+import { dbSnapshot, resticCheck } from "./pipeline/backup";
 import { dream } from "./pipeline/dream";
 import { REPO_ROOT, config, parseProviderEnvironment } from "./util/config";
 import { parseLocalPostgresUrl } from "./util/postgres-url";
@@ -334,6 +334,23 @@ async function beginOwnedMaintenance(
   } else {
     console.error(
       "[minime] db snapshot disabled (set BACKUP_CRON, RESTIC_REPOSITORY, and RESTIC_PASSWORD_FILE to enable)",
+    );
+  }
+
+  // W3-9: weekly repository integrity check. Independent of BACKUP_CRON (it verifies the
+  // repository, it doesn't create a snapshot) but the same restic-configured + lock-winner guard
+  // as the db snapshot cron above.
+  if (config.resticCheckCron && config.resticRepository && config.resticPasswordFile) {
+    const check = createCron(config.resticCheckCron, { timezone: config.tz }, () =>
+      run("restic check", resticCheck),
+    );
+    crons.push(check);
+    console.error(
+      `[minime] restic check scheduled: ${config.resticCheckCron} (next: ${check.nextRun()?.toISOString()})`,
+    );
+  } else {
+    console.error(
+      "[minime] restic check disabled (set RESTIC_REPOSITORY and RESTIC_PASSWORD_FILE to enable)",
     );
   }
 

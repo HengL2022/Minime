@@ -10,12 +10,16 @@ import {
   openSync,
   realpathSync,
   rmSync,
+  statSync,
+  statfsSync,
 } from "node:fs";
 import { lstat, open, rename, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { logEvent } from "../db/repo";
 import { appendOpsLine, classifyStderrLine } from "../ops/ops-log";
 import { preservePreviousSnapshotPair, publishSnapshotManifest } from "../ops/snapshot-manifest";
 import { ensurePrivateDataRoot } from "../util/atomic-file";
+import { auditPayload } from "../util/audit-payload";
 import { DB_DUMP_DIR, config, ensurePrivateDumpDir } from "../util/config";
 import { createLibpqService, registerEphemeralCleanup } from "../util/libpq-service";
 import type { LibpqServiceLease } from "../util/libpq-service";
@@ -57,6 +61,10 @@ const BACKUP_DETAIL = {
   cleanup: `backup failed (dump_cleanup)${OPS_LOG_HINT}`,
   resticBackup: `backup failed (restic_backup)${OPS_LOG_HINT}`,
   resticRetention: `backup failed (restic_retention)${OPS_LOG_HINT}`,
+  // W3-9: disk headroom is checked before any dump temp file is opened (fail-closed) — see
+  // hasDiskHeadroom below. resticCheck is a separate weekly integrity pass, not part of runBackup.
+  diskHeadroom: `backup failed (disk_headroom)${OPS_LOG_HINT}`,
+  resticCheck: `backup failed (restic_check)${OPS_LOG_HINT}`,
 } as const;
 
 let commandRunnerForTest: BackupCommandRunner | undefined;
@@ -70,6 +78,7 @@ let directorySyncForTest:
   | ((directory: Awaited<ReturnType<typeof open>>) => Promise<void>)
   | undefined;
 let manifestWriterForTest: ((dumpDir: string, dumpPath: string) => Promise<void>) | undefined;
+let statfsForTest: ((path: string) => { bavail: number; bsize: number }) | undefined;
 
 type DumpIdentity = { dev: number; ino: number; parent: string };
 
@@ -187,6 +196,11 @@ export function __setManifestWriterForTest(
   fn: ((dumpDir: string, dumpPath: string) => Promise<void>) | undefined,
 ): void {
   manifestWriterForTest = fn;
+}
+export function __setStatfsForTest(
+  fn: ((path: string) => { bavail: number; bsize: number }) | undefined,
+): void {
+  statfsForTest = fn;
 }
 
 const STDERR_CAP_BYTES = 4_096;
@@ -333,6 +347,32 @@ async function discardDumpTemp(
   return false;
 }
 
+// W3-9: 256MB floor when there's no prior dump yet to size against (a fresh install's first
+// dump has nothing local to compare to). Once a dump exists, require double its size -- pg_dump
+// writes a fresh file beside the old one before the atomic rename, so the old file's bytes stay
+// on disk for the whole run.
+const MIN_DUMP_FREE_BYTES = 256 * 1024 * 1024;
+
+// Fail-closed disk headroom preflight: statfs the dump directory and require free space at least
+// double the current minime.sql (when one exists) or the fixed floor, whichever is larger. Runs
+// before any temp file is opened, so a shortfall never leaves a partial dump behind. A statfs
+// failure (missing path, permission, platform quirk) also fails closed -- an unreadable
+// filesystem is never treated as having room.
+function hasDiskHeadroom(dumpDir: string, existingDumpPath: string): boolean {
+  let required = MIN_DUMP_FREE_BYTES;
+  try {
+    required = Math.max(required, statSync(existingDumpPath).size * 2);
+  } catch {
+    /* no prior dump yet (or unreadable) -- the fixed floor still applies */
+  }
+  try {
+    const stats = (statfsForTest ?? statfsSync)(dumpDir);
+    return stats.bavail * stats.bsize >= required;
+  } catch {
+    return false;
+  }
+}
+
 async function pgDump(): Promise<{ ok: boolean; dumpDir: string; detail: string }> {
   const dumpDir = resolve(dumpDirForTest ?? DB_DUMP_DIR);
   const out = join(dumpDir, "minime.sql");
@@ -355,6 +395,10 @@ async function pgDump(): Promise<{ ok: boolean; dumpDir: string; detail: string 
   let unregisterDumpTemp: (() => void) | undefined;
   try {
     await ensurePrivateDumpDir(dumpDir);
+    if (!hasDiskHeadroom(dumpDir, out)) {
+      await appendOpsLine({ step: "disk_headroom", detail: "disk_low" }).catch(() => {});
+      return { ok: false, dumpDir, detail: BACKUP_DETAIL.diskHeadroom };
+    }
     fd = openSync(temp, flags, 0o600);
     tempReserved = true;
     identity = reservedIdentity(fd, temp, dumpDir);
@@ -556,6 +600,32 @@ export async function backup(): Promise<{ ran: boolean; detail: string }> {
 }
 export async function dbSnapshot(): Promise<{ ran: boolean; detail: string }> {
   return runBackup("db-snap");
+}
+
+// W3-9: weekly repository integrity check, independent of runBackup -- it reads a random subset
+// of the already-uploaded repository (--read-data-subset), it does not create a new snapshot, so
+// it never touches the dump directory, the in-flight guard, or the manifest/retention steps
+// above. Always logs one 'backup:restic-check' audit event (content-free: {ok} only) on an actual
+// attempt; a command failure also gets a sanitized ops.log line, same discipline as
+// restic_backup/restic_retention. Deliberately NOT wired into W3-7's ops_failure detector (spec:
+// doctor.ts's own "restic check" line, sourced from this verb's last event, covers staleness).
+export async function resticCheck(): Promise<{ ran: boolean; detail: string }> {
+  if (!config.resticRepository || !config.resticPasswordFile) {
+    return {
+      ran: false,
+      detail: "restic not configured (RESTIC_REPOSITORY / RESTIC_PASSWORD_FILE)",
+    };
+  }
+  const result = await run(["restic", "check", "--read-data-subset=5%"], resticEnv());
+  if (!result.ok) await logCommandFailure("restic_check", result);
+  await logEvent({
+    actor: "system:backup",
+    verb: "backup:restic-check",
+    payload: auditPayload.resticCheck({ ok: result.ok }),
+  });
+  return result.ok
+    ? { ran: true, detail: "restic check complete" }
+    : { ran: false, detail: BACKUP_DETAIL.resticCheck };
 }
 
 export async function preUpdateSnapshot(): Promise<PreUpdateSnapshotOutcome> {

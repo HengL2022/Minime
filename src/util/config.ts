@@ -332,6 +332,10 @@ export const config = {
   dreamCron: env("DREAM_CRON", "0 3 * * *"),
   // frequent logical DB snapshots (db-snap tag); empty string disables the cron
   backupCron: env("BACKUP_CRON", "*/15 * * * *"),
+  // weekly restic repository integrity check (`restic check --read-data-subset=5%`); empty
+  // string disables the cron. Independent of BACKUP_CRON -- this verifies the repository already
+  // at the destination, it does not create a new snapshot.
+  resticCheckCron: env("RESTIC_CHECK_CRON", "0 4 * * 0"),
   dataDir: resolveDataDir(process.env.MINIME_DATA_DIR),
   // Optional LOCAL cross-encoder reranker (llama-server --rerank). Unset = stage disabled.
   // Localhost-only by construction (I1): src/search/rerank.ts refuses non-local hosts.
