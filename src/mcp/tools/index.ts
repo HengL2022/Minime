@@ -1,6 +1,7 @@
 import { agendaTool } from "./agenda";
 import { captureTool } from "./capture";
 import { getContextTool } from "./context";
+import { correctTool } from "./correct";
 import { logDecisionTool, reviewDecisionTool } from "./decisions";
 import { logInteractionTool } from "./interactions";
 import { journalTool } from "./journal";
@@ -28,6 +29,7 @@ export const ALL_TOOLS: ToolDef[] = [
   logInteractionTool,
   reviewQueueTool,
   refileTool,
+  correctTool,
   unlockTool,
 ];
 

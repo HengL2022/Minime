@@ -140,6 +140,9 @@ describe("audit payload boundary", () => {
   test("the constructor surface is closed and validates identifier and code fields", async () => {
     const { auditPayload } = (await import("../src/util/audit-payload")) as any;
     expect(Object.keys(auditPayload).sort()).toEqual([
+      "correctAmend",
+      "correctRetier",
+      "correctRetract",
       "dreamSummary",
       "importMalformed",
       "importSummary",

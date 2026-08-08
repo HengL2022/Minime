@@ -5,6 +5,9 @@ export type AuditPayload = Readonly<Record<string, unknown>> & {
 };
 
 type AuditPayloadKind =
+  | "correctAmend"
+  | "correctRetier"
+  | "correctRetract"
   | "dreamSummary"
   | "importMalformed"
   | "importSummary"
@@ -36,6 +39,9 @@ type AuditProvider = "ollama" | "anthropic" | "openai" | "openrouter" | "bedrock
 type AuditEgressKind = "embed" | "classify";
 type ClassifierKind = "task" | "journal" | "interaction" | "note" | "decision_note" | "unknown";
 type FiledTable = "tasks" | "journal_entries" | "interactions" | "pages" | "decisions";
+// minime_correct's own type vocabulary (W2-4) — "note" not "page", matching ClassifierKind's
+// convention of naming the owner-facing type rather than the raw PARENTS table/ParentType.
+type CorrectType = "journal" | "interaction" | "decision" | "note";
 type RepairCode =
   | "repair_not_committed"
   | "repair_module_failed"
@@ -446,6 +452,63 @@ function classifierKind(value: unknown): ClassifierKind {
   return fixed(value, ["task", "journal", "interaction", "note", "decision_note", "unknown"]);
 }
 
+function correctType(value: unknown): CorrectType {
+  return fixed(value, ["journal", "interaction", "decision", "note"]);
+}
+
+// minime_correct's optional owner-supplied reason (W2-4 spec: "reason goes only into the audit
+// payload allowlist, max 200 chars") — never the row's own content, just why it was corrected.
+function correctionReason(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 200) invalidPayload();
+  return value;
+}
+
+// minime_correct (W2-4): amend inserts a successor row and stamps the original superseded —
+// carries only ids/type/tier, exactly the shape 028's superseded_by/superseded_at columns
+// expose, never the row's own content (entry_md/summary/question/body_md).
+function correctAmend(input: {
+  type: CorrectType;
+  oldId: string;
+  newId: string;
+  tier: 1 | 2;
+  reason?: string;
+}): AuditPayload {
+  return construct("correctAmend", {
+    type: correctType(input.type),
+    old_id: uuid(input.oldId),
+    new_id: uuid(input.newId),
+    tier: routeTier(input.tier),
+    ...(input.reason !== undefined ? { reason: correctionReason(input.reason) } : {}),
+  });
+}
+
+// retract stamps superseded_at with no successor (soft withdrawal) — same id/type/tier shape,
+// minus new_id since nothing is created.
+function correctRetract(input: {
+  type: CorrectType;
+  id: string;
+  tier: 1 | 2;
+  reason?: string;
+}): AuditPayload {
+  return construct("correctRetract", {
+    type: correctType(input.type),
+    id: uuid(input.id),
+    tier: routeTier(input.tier),
+    ...(input.reason !== undefined ? { reason: correctionReason(input.reason) } : {}),
+  });
+}
+
+// retier only ever promotes a note (page) from tier 1 to tier 2 — to_tier is fixed, never a
+// caller-supplied value, so the payload itself proves the up-only invariant it audits.
+function correctRetier(input: { id: string; fromTier: 1 | 2 }): AuditPayload {
+  return construct("correctRetier", {
+    type: "note",
+    id: uuid(input.id),
+    from_tier: routeTier(input.fromTier),
+    to_tier: 2,
+  });
+}
+
 function inboxClosedExistingTask(input: { taskId: string; score: number }): AuditPayload {
   return construct("inboxClosedExistingTask", {
     task_id: uuid(input.taskId),
@@ -531,6 +594,9 @@ function inboxLegacyDuplicate(): AuditPayload {
 }
 
 export const auditPayload = Object.freeze({
+  correctAmend,
+  correctRetier,
+  correctRetract,
   dreamSummary,
   importMalformed,
   importSummary,
@@ -556,6 +622,7 @@ export const auditPayload = Object.freeze({
 const AUDITED_TOOL_NAMES = new Set([
   "minime_agenda",
   "minime_capture",
+  "minime_correct",
   "minime_get_context",
   "minime_journal",
   "minime_list_metrics",
@@ -584,6 +651,9 @@ function expectedPayloadKind(verb: string, payload: AuditPayload): AuditPayloadK
   }
 
   const fixedKinds: Readonly<Record<string, AuditPayloadKind>> = {
+    "correct:amend": "correctAmend",
+    "correct:retier": "correctRetier",
+    "correct:retract": "correctRetract",
     "dream:summary": "dreamSummary",
     "egress:classify": "llmClassifyEgress",
     "egress:classify:outcome": "llmClassifyOutcome",

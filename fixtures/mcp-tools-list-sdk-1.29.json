@@ -750,6 +750,123 @@
     }
   },
   {
+    "name": "minime_correct",
+    "description": "Correct a typed row after the fact: journal | interaction | decision | note (page). action=amend inserts a successor row carrying the patched fields (source='correction', tier preserved from the original, full I5 provenance) and stamps the original superseded_by/superseded_at — the original is never edited or deleted, so both remain readable by id (e.g. minime_get_context) and both are cited as sources. Patchable fields: journal — entry_md, mood, energy, at; interaction — summary, kind, occurred_at; decision — question, choice, reasoning, expected_outcome; note — title, body_md. Any field left out carries over unchanged from the original. action=retract withdraws a row with no successor (stamps superseded_at only) and drops it from search; the row stays readable by id. action=retier promotes a note's tier — and its chunks/edges — from 1 to 2 (to_tier must be 2); up-only, requires an approved tier-2 unlock, and refuses every other type. Every action is bounded by what this session can currently read: a locked session cannot correct a tier-2 row, and no session can ever correct a tier-0 row. task rows are not supported here — use minime_upsert_task to edit or drop a task. Optional reason (<=200 chars) is recorded in the audit trail only, never on the row itself.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "journal",
+            "interaction",
+            "decision",
+            "note"
+          ]
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "amend",
+            "retract",
+            "retier"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "entry_md": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mood": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "energy": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "meeting",
+            "call",
+            "message",
+            "email",
+            "note"
+          ]
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "question": {
+          "type": "string",
+          "minLength": 1
+        },
+        "choice": {
+          "type": "string"
+        },
+        "reasoning": {
+          "type": "string"
+        },
+        "expected_outcome": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "body_md": {
+          "type": "string",
+          "minLength": 1
+        },
+        "to_tier": {
+          "type": "number",
+          "enum": [
+            1,
+            2
+          ]
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "type",
+        "action",
+        "id"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
     "name": "minime_unlock",
     "description": "Request an owner-approved, time-boxed tier-2 read unlock for this MCP connection (journal, interactions, email metadata). Tier 0 is never unlockable.",
     "inputSchema": {

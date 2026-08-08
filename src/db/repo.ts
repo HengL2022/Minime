@@ -1239,6 +1239,9 @@ interface Std {
   createdBy?: string;
   source?: string;
   derivedFrom?: string | null;
+  // Forward pointer stamped on a correction's successor row (minime_correct, W2-4) — the same
+  // supersedes_id column retypeOrgToPerson already uses for its own successor person rows.
+  supersedesId?: string | null;
   tier?: number;
 }
 
@@ -1275,6 +1278,10 @@ export interface UpsertPageInput {
   createdBy?: string;
   source?: string;
   derivedFrom?: string | null;
+  // Forward pointer for a correction's successor page (minime_correct, W2-4); only meaningful on
+  // the insert branch below — a correction successor always mints a fresh path, never upserts an
+  // existing one, so the update branch never sees it.
+  supersedesId?: string | null;
 }
 
 export interface CompiledSourceEvidence {
@@ -1400,9 +1407,11 @@ export async function insertJournal(
   // INSERT ... RETURNING applies the SELECT RLS policy and would therefore return no row.
   const id = crypto.randomUUID();
   await db()`
-    insert into journal_entries (id, at, entry_md, mood, energy, created_by, source, derived_from, tier)
+    insert into journal_entries
+      (id, at, entry_md, mood, energy, created_by, source, derived_from, supersedes_id, tier)
     values (${id}, ${e.at ?? now()}, ${e.entryMd}, ${e.mood ?? null}, ${e.energy ?? null},
-            ${e.createdBy ?? "human"}, ${e.source ?? "manual"}, ${e.derivedFrom ?? null}, ${e.tier ?? 2})`;
+            ${e.createdBy ?? "human"}, ${e.source ?? "manual"}, ${e.derivedFrom ?? null},
+            ${e.supersedesId ?? null}, ${e.tier ?? 2})`;
   return { id };
 }
 
@@ -1431,13 +1440,15 @@ export async function insertDecision(
     await tx`
       insert into decisions (id, question, options, criteria, choice, reasoning, expected_outcome,
                              falsifier, stakes, reversibility, confidence,
-                             decided_at, review_at, created_by, source, derived_from, tier)
+                             decided_at, review_at, created_by, source, derived_from,
+                             supersedes_id, tier)
       values (${decisionId}, ${d.question}, ${db().json(d.options as any)}, ${d.criteria ? db().json(d.criteria as any) : null},
               ${d.choice ?? null}, ${d.reasoning ?? null}, ${d.expectedOutcome ?? null},
               ${d.falsifier ?? null}, ${d.stakes ?? null}, ${d.reversibility ?? null},
               ${d.confidence ?? null},
               ${d.decidedAt ?? (d.choice ? now() : null)}, ${d.reviewAt ?? null},
-              ${d.createdBy ?? "human"}, ${d.source ?? "manual"}, ${d.derivedFrom ?? null}, ${tier})`;
+              ${d.createdBy ?? "human"}, ${d.source ?? "manual"}, ${d.derivedFrom ?? null},
+              ${d.supersedesId ?? null}, ${tier})`;
 
     await insertDecisionTranscriptRows(tx, decisionId, d.transcript ?? [], { ...d, tier });
     branchIds.push(...(await insertDecisionBranchRows(tx, decisionId, { ...d, tier })));
@@ -1665,9 +1676,12 @@ export async function insertInteraction(
   // for the interaction's graph edge and the caller's receipt.
   const id = i.id ?? crypto.randomUUID();
   await db()`
-    insert into interactions (id, person_id, org_id, kind, summary, occurred_at, created_by, source, derived_from, tier)
+    insert into interactions
+      (id, person_id, org_id, kind, summary, occurred_at, created_by, source, derived_from,
+       supersedes_id, tier)
     values (${id}, ${i.personId ?? null}, ${i.orgId ?? null}, ${i.kind}, ${i.summary}, ${at},
-            ${i.createdBy ?? "human"}, ${i.source ?? "manual"}, ${i.derivedFrom ?? null}, ${i.tier ?? 2})`;
+            ${i.createdBy ?? "human"}, ${i.source ?? "manual"}, ${i.derivedFrom ?? null},
+            ${i.supersedesId ?? null}, ${i.tier ?? 2})`;
   if (i.personId) {
     await touchLastContact(i.personId, at);
     await db()`insert into edges
@@ -1840,9 +1854,12 @@ export async function upsertPage(
   if (!existing) {
     const id = crypto.randomUUID();
     await db()`
-      insert into pages (id, path, title, body_md, content_hash, tier, created_by, source, derived_from)
+      insert into pages
+        (id, path, title, body_md, content_hash, tier, created_by, source, derived_from,
+         supersedes_id)
       values (${id}, ${p.path}, ${p.title}, ${p.bodyMd}, ${p.contentHash}, ${incomingTier},
-              ${p.createdBy ?? "human"}, ${p.source ?? "brain-sync"}, ${p.derivedFrom ?? null})`;
+              ${p.createdBy ?? "human"}, ${p.source ?? "brain-sync"}, ${p.derivedFrom ?? null},
+              ${p.supersedesId ?? null})`;
     return { id, changed: true, created: true };
   }
   const existingTier = Number(existing.tier);
@@ -3047,6 +3064,55 @@ export async function getRow(
   const rows =
     await db()`select * from ${db()(table)} where id = ${id} and tier >= 1 and tier <= ${allowed}`;
   return rows[0] ?? null;
+}
+
+// ---------------------------------------------------------------- content correction (minime_correct, W2-4)
+//
+// Migration 028 (correction_supersede) added superseded_by/superseded_at to every PARENTS table
+// and granted minime_app UPDATE on exactly those two columns for the six tables that had no
+// broader UPDATE grant (021_runtime_app_role.sql already covers the other six via full table
+// UPDATE). Every one of those tables' tier_update RLS policies carries the `tier >= 1 and
+// tier <= app_allowed_tier()` bound (028's ALTER POLICY loop), so an UPDATE through either
+// helper below can only ever touch a row the calling session could also SELECT — a locked
+// (tier-1) session's attempt to correct a tier-2 row matches 0 rows, indistinguishable from a
+// missing id, which the caller (correct.ts) turns into the same NOT_FOUND either way. The
+// `superseded_at is null` guard makes both helpers idempotent-safe: a row that is already
+// amended or retracted cannot be re-stamped, protecting its one backward pointer from being
+// overwritten by an unrelated second write (including a concurrent racing correction).
+export class CorrectionTargetNotFoundError extends Error {
+  constructor() {
+    super("correction target not found");
+  }
+}
+
+/** Stamp the OLD row as superseded by NEW once the successor row already exists (I5 backward
+ * pointer; the successor's own forward `supersedes_id` is stamped at insert time). Throws
+ * CorrectionTargetNotFoundError when the row is missing, already superseded, or above the
+ * caller's tier. */
+export async function supersedeRow(type: ParentType, oldId: string, newId: string): Promise<void> {
+  const { table } = parentTable(type);
+  const rows = await db()`
+    update ${db()(table)}
+    set superseded_by = ${newId}, superseded_at = ${now()}
+    where id = ${oldId} and superseded_at is null
+    returning id`;
+  if (rows.length === 0) throw new CorrectionTargetNotFoundError();
+}
+
+/** Retract (soft-withdraw) a row: stamp superseded_at with no successor, and drop its chunks so
+ * it stops matching search. The row itself is never edited or deleted (I5) and stays readable by
+ * id. Throws CorrectionTargetNotFoundError on the same three cases as supersedeRow. */
+export async function retractRow(type: ParentType, id: string): Promise<void> {
+  const { table } = parentTable(type);
+  await withDbTransaction(async (tx) => {
+    const rows = await tx`
+      update ${tx(table)}
+      set superseded_at = ${now()}
+      where id = ${id} and superseded_at is null
+      returning id`;
+    if (rows.length === 0) throw new CorrectionTargetNotFoundError();
+    await tx`delete from chunks where parent_type = ${type} and parent_id = ${id}`;
+  });
 }
 
 export async function edgesAround(
