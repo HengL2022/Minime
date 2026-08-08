@@ -6,6 +6,7 @@ import { logDecisionTool, reviewDecisionTool } from "./decisions";
 import { logInteractionTool } from "./interactions";
 import { journalTool } from "./journal";
 import { listMetricsTool, queryMetricTool } from "./metric";
+import { upsertPersonTool } from "./person";
 import { refileTool } from "./refile";
 import type { ToolDef } from "./registry";
 import { reviewQueueTool } from "./review-queue";
@@ -31,6 +32,7 @@ export const ALL_TOOLS: ToolDef[] = [
   refileTool,
   correctTool,
   unlockTool,
+  upsertPersonTool,
 ];
 
 export function toolByName(name: string): ToolDef {

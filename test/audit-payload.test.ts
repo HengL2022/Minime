@@ -158,6 +158,7 @@ describe("audit payload boundary", () => {
       "llmEgress",
       "llmEgressOutcome",
       "onboardComplete",
+      "personUpsert",
       "repair",
       "tier2Unlock",
       "toolAttempt",

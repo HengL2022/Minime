@@ -894,5 +894,75 @@
     "execution": {
       "taskSupport": "forbidden"
     }
+  },
+  {
+    "name": "minime_upsert_person",
+    "description": "Add an alias, set a person's relation/context, or rename a person or org after the fact. Target by type+id, or person_name (resolved as a person then an org, same tier rules and wording as minime_get_context — a name matching nothing readable at this session's tier is NOT_FOUND). action=add_alias adds an alternate name; the new alias always inherits the target's CURRENT privacy tier, so a tier-2 identity's alias is itself tier 2 and never becomes resolvable at a locked (tier-1) session — it cannot be used to reduce an identity's privacy. action=set_relation / action=set_context set the person's relation label or free-text context (person only — org is BAD_INPUT); each patches only its own field and never blanks the other. action=rename changes the canonical name and ALWAYS preserves the old name as an alias first, so anything that already referred to the old name keeps resolving. Adding an alias string already owned by a different visible person/org is refused (BAD_INPUT) — full identity merges are not supported by this tool.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "person",
+            "org"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "person_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "add_alias",
+            "set_relation",
+            "set_context",
+            "rename"
+          ]
+        },
+        "alias": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "relation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "context": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
   }
 ]

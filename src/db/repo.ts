@@ -871,15 +871,20 @@ export async function ensureExtractedPerson(
   return { id: row.id as string, created: row.created as boolean };
 }
 
-// Owner-relation + free-text context (onboarding interview); never blanks existing values.
+// Owner-relation + free-text context (onboarding interview, and minime_upsert_person's
+// set_relation/set_context actions); coalesce means a null argument leaves that column
+// unchanged rather than blanking it, so each action can patch just its own field. Returns the
+// updated-row count so a caller resolving by a tier-filtered id upstream (minime_upsert_person)
+// can turn a 0-row result into NOT_FOUND instead of silently no-op'ing.
 export async function setPersonDetails(
   id: string,
   relation: string | null,
   context: string | null,
-): Promise<void> {
-  await db()`update people set relation = coalesce(${relation}, relation),
+): Promise<number> {
+  const rows = await db()`update people set relation = coalesce(${relation}, relation),
                               context = coalesce(${context}, context)
-            where id = ${id}`;
+            where id = ${id} returning id`;
+  return rows.length;
 }
 
 export async function setDecisionOutcome(
@@ -915,9 +920,12 @@ export async function setPersonRelationIfNull(personId: string, relation: string
   await db()`select set_person_relation_if_null(${personId}::uuid, ${relation})`;
 }
 
-// Extraction may upgrade "Tomasz" to "Tomasz Wójcik" once the fuller form is seen.
-export async function setPersonCanonicalName(personId: string, name: string): Promise<void> {
-  await db()`update people set canonical_name = ${name} where id = ${personId}`;
+// Extraction may upgrade "Tomasz" to "Tomasz Wójcik" once the fuller form is seen; also used by
+// minime_upsert_person's rename action. Returns the updated-row count (see setPersonDetails).
+export async function setPersonCanonicalName(personId: string, name: string): Promise<number> {
+  const rows = await db()`update people set canonical_name = ${name}
+    where id = ${personId} returning id`;
+  return rows.length;
 }
 
 export async function peopleByFirstName(first: string): Promise<{ id: string }[]> {
@@ -988,8 +996,13 @@ export async function addOrgAlias(
   )`;
 }
 
-export async function setOrgCanonicalName(orgId: string, name: string): Promise<void> {
-  await db()`update orgs set canonical_name = ${name} where id = ${orgId}`;
+// Used by minime_upsert_person's rename action. Returns the updated-row count (see
+// setPersonDetails) — orgs carry a real RLS tier_update policy (008_orgs.sql), so this can
+// genuinely match 0 rows when the caller's tier has dropped below the row's since it resolved.
+export async function setOrgCanonicalName(orgId: string, name: string): Promise<number> {
+  const rows = await db()`update orgs set canonical_name = ${name}
+    where id = ${orgId} returning id`;
+  return rows.length;
 }
 
 export async function allOrgsWithAliases(): Promise<{ id: string; names: string[] }[]> {

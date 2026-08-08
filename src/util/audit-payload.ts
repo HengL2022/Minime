@@ -25,6 +25,7 @@ type AuditPayloadKind =
   | "llmEmbedEgress"
   | "llmEmbedOutcome"
   | "onboardComplete"
+  | "personUpsert"
   | "repair"
   | "tier2Unlock"
   | "toolAttempt"
@@ -42,6 +43,9 @@ type FiledTable = "tasks" | "journal_entries" | "interactions" | "pages" | "deci
 // minime_correct's own type vocabulary (W2-4) — "note" not "page", matching ClassifierKind's
 // convention of naming the owner-facing type rather than the raw PARENTS table/ParentType.
 type CorrectType = "journal" | "interaction" | "decision" | "note";
+// minime_upsert_person (W2-6).
+type PersonUpsertEntityType = "person" | "org";
+type PersonUpsertAction = "add_alias" | "set_relation" | "set_context" | "rename";
 type RepairCode =
   | "repair_not_committed"
   | "repair_module_failed"
@@ -512,6 +516,30 @@ function correctRetier(input: { id: string; fromTier: 1 | 2; reason?: string }):
   });
 }
 
+function personUpsertEntityType(value: unknown): PersonUpsertEntityType {
+  return fixed(value, ["person", "org"]);
+}
+
+function personUpsertAction(value: unknown): PersonUpsertAction {
+  return fixed(value, ["add_alias", "set_relation", "set_context", "rename"]);
+}
+
+// minime_upsert_person (W2-6): alias/relation/context/rename mutations on a person or org.
+// Carries only the target's type/id and which action ran — never the alias text, relation
+// label, context prose, or new name, all of which are content (mirrors correctAmend/
+// correctRetract's id-only shape above).
+function personUpsert(input: {
+  entityType: PersonUpsertEntityType;
+  entityId: string;
+  action: PersonUpsertAction;
+}): AuditPayload {
+  return construct("personUpsert", {
+    entity_type: personUpsertEntityType(input.entityType),
+    entity_id: uuid(input.entityId),
+    action: personUpsertAction(input.action),
+  });
+}
+
 function inboxClosedExistingTask(input: { taskId: string; score: number }): AuditPayload {
   return construct("inboxClosedExistingTask", {
     task_id: uuid(input.taskId),
@@ -615,6 +643,7 @@ export const auditPayload = Object.freeze({
   llmEgress,
   llmEgressOutcome,
   onboardComplete,
+  personUpsert,
   repair,
   tier2Unlock,
   toolAttempt,
@@ -638,6 +667,7 @@ const AUDITED_TOOL_NAMES = new Set([
   "minime_search",
   "minime_state",
   "minime_unlock",
+  "minime_upsert_person",
   "minime_upsert_task",
   "unknown",
 ]);
@@ -673,6 +703,7 @@ function expectedPayloadKind(verb: string, payload: AuditPayload): AuditPayloadK
     "inbox:split-done-task": "inboxSplitDoneTask",
     "inbox:unfiled": "inboxUnfiled",
     "onboard:complete": "onboardComplete",
+    "person:upsert": "personUpsert",
     "unlock:tier2:approved": "tier2Unlock",
     "unlock:tier2:requested": "tier2Unlock",
   };
