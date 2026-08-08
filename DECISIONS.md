@@ -3039,13 +3039,21 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   throws fall back to `typeof error` (`"string"`, `"object"`, …), never the thrown value itself.
 - **Why:** A sanitized, allowlist-only local file that only the owner's own filesystem account can
   read is a materially different exposure than loosening the audited/console-visible surface H3
-  locked down — it is never sent anywhere, never audited, never reachable by an agent (I2), and
-  every field written to it is drawn from a fixed, closed, code-level vocabulary (a regex table's
-  named classes, a process exit code, or a JS constructor name), never free text, matching the
-  same "fixed sentinel, never raw output" discipline H3 itself established for the audited
-  surfaces. The adversarial requirement (a crafted stderr line containing a fake secret or private
-  path must classify to `unclassified` and leave zero substring of itself in the file) is the
-  actual test of that boundary, not just the happy-path classification table.
+  locked down — it is never audited and never reachable by an agent (I2). It is not, however,
+  isolated from backup: `data/logs/` sits inside `config.dataDir`, and the nightly dream step 7
+  backup command (`restic backup --tag dream … config.dataDir …`, `src/pipeline/backup.ts`) covers
+  that whole tree with no exclusion for `data/logs`, so `ops.log` is backed up along with
+  everything else under `data/` — and per the already-ratified 2026-06-11 decision above,
+  `RESTIC_REPOSITORY` may point at a cloud object store, so on that configuration this file's
+  content does leave the machine, inside the same client-side-encrypted blob as the rest of
+  `data/`. What makes that acceptable is content, not isolation: every field written to it is drawn
+  from a fixed, closed, code-level vocabulary (a regex table's named classes, a process exit code,
+  or a JS constructor name), never free text, matching the same "fixed sentinel, never raw output"
+  discipline H3 itself established for the audited surfaces — so there is nothing sensitive in the
+  file even when it does travel inside an encrypted backup. The adversarial requirement (a crafted
+  stderr line containing a fake secret or private path must classify to `unclassified` and leave
+  zero substring of itself in the file) is the actual test of that boundary, not just the
+  happy-path classification table.
 - **Approved by:** human owner, explicit ratification of this specific amendment (2026-08-07,
   decision 8 of the livability-program owner review) — called out for dedicated sign-off distinct
   from the blanket wave-execution approval used for the other W3 entries, because this task's own
