@@ -80,11 +80,11 @@ describe("classifyStderrLine (fixed allowlist)", () => {
   });
 
   test("adversarial: a fake secret/path never matches the allowlist, and is never itself returned", () => {
-    const sentinel = "sk-FAKE-secret-9182 leaked at /Users/heng/private/wills/2026.pdf";
+    const sentinel = "sk-FAKE-secret-9182 leaked at /home/fictional-owner/private/wills/2026.pdf";
     const result = classifyStderrLine(sentinel);
     expect(result).toBe("unclassified");
     expect(result).not.toContain(sentinel);
-    expect(result).not.toContain("/Users/heng/private");
+    expect(result).not.toContain("/home/fictional-owner/private");
   });
 });
 
@@ -224,7 +224,7 @@ describe("backup command failures (backup.ts + ops-log integration)", () => {
     configureRestic();
     isolatedDumpDir();
     __setManifestWriterForTest(async () => {});
-    const sentinel = "sk-FAKE-secret-9182 at /Users/heng/private/wills/2026.pdf";
+    const sentinel = "sk-FAKE-secret-9182 at /home/fictional-owner/private/wills/2026.pdf";
     __setCommandRunnerForTest(async (cmd) => {
       if (cmd[0] === "pg_dump") {
         writeFixtureDump(cmd);
@@ -243,7 +243,7 @@ describe("backup command failures (backup.ts + ops-log integration)", () => {
     expect(content).toContain("restic_backup exit=1 class=unclassified");
     expect(content).not.toContain(sentinel);
     expect(content).not.toContain("sk-FAKE-secret-9182");
-    expect(content).not.toContain("/Users/heng/private");
+    expect(content).not.toContain("/home/fictional-owner/private");
   });
 
   test("a successful backup never writes to the ops log", async () => {
