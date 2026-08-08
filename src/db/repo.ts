@@ -50,23 +50,34 @@ export type ParentType =
   | "org"
   | "commitment";
 
-// parent_type -> table + which column serves as a human title. Fixed map, not user input.
-const PARENTS: Record<ParentType, { table: string; titleCol: string }> = {
-  page: { table: "pages", titleCol: "title" },
-  journal: { table: "journal_entries", titleCol: "entry_md" },
-  interaction: { table: "interactions", titleCol: "summary" },
-  decision: { table: "decisions", titleCol: "question" },
-  decision_branch: { table: "decision_branches", titleCol: "label" },
-  task: { table: "tasks", titleCol: "title" },
-  goal: { table: "goals", titleCol: "statement" },
-  value: { table: "values_items", titleCol: "statement" },
-  principle: { table: "principles", titleCol: "rule" },
-  person: { table: "people", titleCol: "canonical_name" },
-  org: { table: "orgs", titleCol: "canonical_name" },
-  commitment: { table: "commitments", titleCol: "what" },
+// parent_type -> table, title column, and the fixed SQL expression for that type's semantic
+// "event date" (W3-4) — the date a human means by "when did this happen", which is not always
+// updated_at (e.g. a decision's updated_at bumps on any edit, but its event date is when it was
+// decided). dateCol is raw, developer-authored SQL text and NEVER derived from request input;
+// parentMeta below splices it in via db().unsafe(), the same nested-fragment technique
+// db()(identifier) and COMPILED_PARENT_TIER already use to compose fixed SQL text into a
+// parameterized query (postgres.js treats a nested Query/Identifier value as raw SQL text, not
+// a bound parameter — see fragment() in postgres's types.js).
+const PARENTS: Record<ParentType, { table: string; titleCol: string; dateCol: string }> = {
+  page: { table: "pages", titleCol: "title", dateCol: "updated_at" },
+  journal: { table: "journal_entries", titleCol: "entry_md", dateCol: "at" },
+  interaction: { table: "interactions", titleCol: "summary", dateCol: "occurred_at" },
+  decision: {
+    table: "decisions",
+    titleCol: "question",
+    dateCol: "coalesce(decided_at, created_at)",
+  },
+  decision_branch: { table: "decision_branches", titleCol: "label", dateCol: "updated_at" },
+  task: { table: "tasks", titleCol: "title", dateCol: "coalesce(completed_at, updated_at)" },
+  goal: { table: "goals", titleCol: "statement", dateCol: "updated_at" },
+  value: { table: "values_items", titleCol: "statement", dateCol: "updated_at" },
+  principle: { table: "principles", titleCol: "rule", dateCol: "updated_at" },
+  person: { table: "people", titleCol: "canonical_name", dateCol: "updated_at" },
+  org: { table: "orgs", titleCol: "canonical_name", dateCol: "updated_at" },
+  commitment: { table: "commitments", titleCol: "what", dateCol: "updated_at" },
 };
 
-export function parentTable(type: string): { table: string; titleCol: string } {
+export function parentTable(type: string): { table: string; titleCol: string; dateCol: string } {
   const p = PARENTS[type as ParentType];
   if (!p) throw new Error(`unknown parent type: ${type}`);
   return p;
@@ -690,6 +701,10 @@ export interface ParentMeta {
   // superseded_by null -> either live (superseded_at also null) or retracted (excluded below).
   superseded_by: string | null;
   superseded_at: Date | null;
+  // Semantic "event date" for this parent's type (PARENTS[type].dateCol, W3-4) — e.g. a
+  // journal entry's `at`, not its `updated_at`. Only the search date-range filter
+  // (hybrid.ts) reads this; every other consumer of ParentMeta keeps using updated_at.
+  event_at: Date;
 }
 
 export async function parentMeta(
@@ -699,8 +714,8 @@ export async function parentMeta(
 ): Promise<Map<string, ParentMeta>> {
   if (ids.length === 0) return new Map();
   const allowed = await allowedTier(actor);
-  const { table, titleCol } = parentTable(type);
-  // table/titleCol come from the fixed PARENTS map above, never from user input.
+  const { table, titleCol, dateCol } = parentTable(type);
+  // table/titleCol/dateCol come from the fixed PARENTS map above, never from user input.
   // Retracted rows (superseded_at set, superseded_by null) are excluded here so hybridSearch's
   // existing meta-miss drop (a candidate whose parent has no meta entry is filtered out) removes
   // them from results even if a chunk somehow survived; retractRow already deletes their chunks
@@ -710,7 +725,8 @@ export async function parentMeta(
   // always inspect any row, live or not, by id.
   const rows = await db()`
     select id, left(${db()(titleCol)}::text, 120) as title, tier, updated_at, created_by,
-           derived_from, source, superseded_by, superseded_at
+           derived_from, source, superseded_by, superseded_at,
+           (${db().unsafe(dateCol)})::timestamptz as event_at
     from ${db()(table)}
     where id = any(${ids}) and tier >= 1 and tier <= ${allowed}
       and not (superseded_at is not null and superseded_by is null)`;

@@ -113,6 +113,52 @@ describe("intent classifier", () => {
     expect(event.ftsRrfWeight).toBeGreaterThan(1);
     expect(event.titleBoostScale).toBe(1);
   });
+
+  test("W3-4: past-period temporal queries get NO recency boost; recency-cue ones still do", () => {
+    // "last March" / "in June" name a specific bygone window (classified temporal via the
+    // MONTHS regex, not a recency cue) — boosting recency here would bias toward this week's
+    // notes instead of the March/June ones the query actually asked for.
+    expect(classifyIntent("what was I doing last March")).toBe("temporal");
+    expect(intentNudge("what was I doing last March").recencyScale).toBe(1);
+    expect(classifyIntent("what did I spend in June")).toBe("temporal");
+    expect(intentNudge("what did I spend in June").recencyScale).toBe(1);
+
+    // "as of <month>" and explicit "last week/month/year" are past-period cues too.
+    expect(intentNudge("budget as of March").recencyScale).toBe(1);
+    expect(intentNudge("what did I do last week").recencyScale).toBe(1);
+
+    // A genuine recency cue still gets the full boost, matching NUDGES.temporal.recencyScale.
+    const latest = intentNudge("latest status");
+    expect(latest.intent).toBe("temporal");
+    expect(latest.recencyScale).toBeCloseTo(1.6, 5);
+    expect(intentNudge("give me the most recent update").recencyScale).toBeCloseTo(1.6, 5);
+
+    // A recency cue alongside a past-period cue in the same query wins (recency reading is the
+    // stronger, more explicit signal).
+    expect(intentNudge("most recent decision from last year").recencyScale).toBeCloseTo(1.6, 5);
+  });
+
+  test("W3-4 regression: general/entity/event nudges are unaffected by the temporal split", () => {
+    const g = intentNudge("notes on quokka habitat and diet");
+    expect(g).toMatchObject({
+      intent: "general",
+      titleBoostScale: 1,
+      recencyScale: 1,
+      ftsRrfWeight: 1,
+    });
+
+    const entity = intentNudge("Tomasz Wójcik");
+    expect(entity.intent).toBe("entity");
+    expect(entity.titleBoostScale).toBeGreaterThan(1);
+    expect(entity.recencyScale).toBe(1);
+    expect(entity.ftsRrfWeight).toBe(1);
+
+    const event = intentNudge("what happened at the offsite");
+    expect(event.intent).toBe("event");
+    expect(event.ftsRrfWeight).toBeGreaterThan(1);
+    expect(event.recencyScale).toBe(1);
+    expect(event.titleBoostScale).toBe(1);
+  });
 });
 
 describe("scoped search (scopeParentIds)", () => {

@@ -20,7 +20,7 @@ import {
   parentMeta,
   vectorCandidates,
 } from "../db/repo";
-import { now } from "../util/clock";
+import { configuredTimeZone, localDateStr, now } from "../util/clock";
 import { config } from "../util/config";
 import { autocut } from "./autocut";
 import { embedQuery } from "./embed";
@@ -162,13 +162,28 @@ export async function hybridSearch(opts: {
   scopeParentIds?: string[] | null;
   /** cut the result list at the rerank-score cliff (only meaningful with the reranker on) */
   autocut?: boolean;
+  /**
+   * Best-effort inclusive date window (YYYY-MM-DD), matched against each candidate parent's
+   * semantic event date (repo.ts PARENTS[type].dateCol, e.g. a journal entry's `at`, not its
+   * `updated_at`) — see the in-body comment near `dated` for exact semantics and limits.
+   */
+  from?: string | null;
+  to?: string | null;
+  /** IANA time zone for from/to day boundaries; defaults to the owner's configured tz. */
+  timeZone?: string | null;
 }): Promise<Hit[]> {
   const { query } = opts;
   const types = opts.types?.length ? opts.types : null;
   const limit = opts.limit ?? 10;
   const includeDerived = opts.includeDerived ?? false;
   const scope = opts.scopeParentIds?.length ? opts.scopeParentIds : null;
+  const from = opts.from || null;
+  const to = opts.to || null;
   const nudge = intentNudge(query); // zero-LLM; never overrides explicit filters
+  // An explicit date window already pins the result to a period the caller chose — the
+  // recency multiplier's job (guessing which period the caller probably means) is moot once
+  // they've said so directly, temporal-intent guess or not (spec W3-4).
+  if (from || to) nudge.recencyScale = 1.0;
 
   // candidates = top-50 cosine ∪ top-50 fts (each already tier-filtered in repo)
   let vec: Candidate[] = [];
@@ -210,19 +225,42 @@ export async function hybridSearch(opts: {
     }
   }
 
+  // Best-effort date-range filter (spec W3-4). Narrows the ALREADY-fetched top-50/arm
+  // candidate pool (vec/fts above) to parents whose semantic event date — PARENTS[type].dateCol
+  // via meta.event_at, e.g. a journal entry's `at` rather than its `updated_at` — falls within
+  // [from, to] inclusive, compared as local calendar days in the caller's time zone (same
+  // day-boundary semantics minime_timeline uses). This can only NARROW the candidate pool, never
+  // re-query it: a genuinely in-window row that missed the top-50 cosine/FTS cut is simply
+  // absent from `candidates` in the first place — minime_timeline is the exhaustive date read,
+  // this is a ranking convenience layered on top of ordinary search. Applied after the
+  // parentMeta lookup (need event_at) and before any scoring. A candidate with no meta entry
+  // (invisible at this tier) is dropped here too — it would be dropped later anyway (the `!m`
+  // branch below), just sooner, so it never pays for a graph/access-boost lookup either.
+  const windowTz = from || to ? configuredTimeZone(opts.timeZone) : null;
+  const dated =
+    windowTz === null
+      ? candidates
+      : candidates.filter((c) => {
+          const m = meta.get(`${c.parent_type}:${c.parent_id}`);
+          if (!m) return false;
+          const day = localDateStr(new Date(m.event_at), windowTz);
+          return (!from || day >= from) && (!to || day <= to);
+        });
+  if (dated.length === 0) return [];
+
   // graph boost: parent within 1 edge hop of an entity literally named in the query
   const boosted = await oneHopNeighbors(await entitiesNamedIn(query, opts.actor), opts.actor);
 
   // access boost: parents the owner's agents drilled into recently (audit log, ids only)
   const access = await accessCounts(
-    [...new Set(candidates.map((c) => c.parent_id))],
+    [...new Set(dated.map((c) => c.parent_id))],
     ACCESS_WINDOW_DAYS,
     opts.actor,
   );
 
   // RRF score per candidate, then max-normalize so the blend lives on a [0,1] scale.
   const rrfRaw = new Map<string, number>();
-  for (const c of candidates) {
+  for (const c of dated) {
     const vr = vecRank.get(c.id);
     const fr = ftsRank.get(c.id);
     const r =
@@ -233,7 +271,7 @@ export async function hybridSearch(opts: {
   const normRrf = normalize([...rrfRaw.values()]);
   const t = now().getTime();
 
-  const scored = candidates.flatMap((c) => {
+  const scored = dated.flatMap((c) => {
     const m = meta.get(`${c.parent_type}:${c.parent_id}`);
     if (!m) return []; // parent invisible at current tier (or deleted)
 
