@@ -1,7 +1,7 @@
 // Nightly dream job (spec §10), 8 steps in order. Each step is best-effort: a failure is
 // recorded and the remaining steps still run. Flags, never auto-resolves (step 3).
 
-import { withAdminDbScope, withAdminDbTransaction } from "../db/client";
+import { withAdminDbScope, withAdminDbTransaction, withDbTransaction } from "../db/client";
 import {
   chunkPairsSharingPerson,
   clearDreamMetricRefreshWindow,
@@ -9,9 +9,11 @@ import {
   insertReviewItem,
   listMetricDefs,
   logEvent,
+  materializeRecurrence,
   parentsNeedingExtraction,
   phantomPersonCandidates,
   prepareMetricCache,
+  recurringTasksNeedingSuccessor,
   reviewItemExists,
   runMetricAgg,
   staleItems,
@@ -141,6 +143,23 @@ export async function staleScan(): Promise<number> {
   return flagged;
 }
 
+// -- step 5b: recurrence crash-safety net ------------------------------------
+//
+// upsertTask's own done-transition materialization (repo.ts) already mints a recurring task's
+// next instance inside the SAME transaction as the completing update, so this should normally
+// find nothing. It exists for the path that transaction never ran at all — a done recurring
+// task written by some future code that bypasses upsertTask, a restored/replayed row, or any
+// other way status='done' could land without going through the one write path that knows to
+// materialize. Runs before rollups (not lettered after 5 like the other N-vs-Nb steps) so a
+// crash-recovered task's next due date is in place before the night's numbers are read.
+export async function recurrenceBackfill(): Promise<number> {
+  let materialized = 0;
+  for (const task of await recurringTasksNeedingSuccessor()) {
+    if (await withDbTransaction(() => materializeRecurrence(task))) materialized++;
+  }
+  return materialized;
+}
+
 // -- step 5: metric rollups -------------------------------------------------
 
 export async function rollupMetrics(days = 90): Promise<number> {
@@ -252,6 +271,7 @@ export async function dream(): Promise<Record<string, unknown>> {
     return validateEdges();
   });
   await step("4_stale", () => staleScan());
+  await step("5b_recurrence", () => recurrenceBackfill());
   await step("5_rollups", () => rollupMetrics());
   await step("6_decision_reviews", () => enqueueDecisionReviews(todayStr(config.tz)));
   await step("7_backup", () => backup());

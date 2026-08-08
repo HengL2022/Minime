@@ -4,9 +4,13 @@ import { indexParent } from "../../search/index-parent";
 import { ToolError, envelope } from "../envelope";
 import type { ToolDef } from "./registry";
 
+const RECUR_FREQ = ["daily", "weekly", "monthly", "yearly", "none"] as const;
+
 export const upsertTaskTool: ToolDef = {
   name: "minime_upsert_task",
-  description: "Create or update a task (status: inbox|active|waiting|done|dropped).",
+  description:
+    "Create or update a task (status: inbox|active|waiting|done|dropped). A recurring task " +
+    "(recur_freq set) materializes its next instance automatically when marked done.",
   schema: {
     id: z.string().uuid().optional(),
     title: z.string().min(1).optional(),
@@ -22,11 +26,24 @@ export const upsertTaskTool: ToolDef = {
       .nullable()
       .optional(),
     goal_id: z.string().uuid().nullable().optional(),
+    // "none" (not a bare null) clears recurrence — a JSON Schema enum reads more predictably
+    // to callers than a nullable enum, and matches due/goal_id's own keep/clear split: omit
+    // the key to keep, "none" to stop recurring, one of the four names to set/change it. On
+    // create, recur_anchor defaults to `due` when both are given (no separate input for it —
+    // non-goal: no inbox-capture syntax for recurrence, no time-of-day reminders).
+    recur_freq: z.enum(RECUR_FREQ).optional(),
+    recur_interval: z.number().int().min(1).max(365).optional(),
   },
   handler: async (params, ctx) => {
     if (!params.id && !params.title) {
       throw new ToolError("BAD_INPUT", "title is required when creating a task");
     }
+    const recurFreq =
+      params.recur_freq === undefined
+        ? undefined
+        : params.recur_freq === "none"
+          ? null
+          : params.recur_freq;
     let id: string;
     let title: string;
     let body: string | null;
@@ -38,6 +55,8 @@ export const upsertTaskTool: ToolDef = {
         status: params.status ?? null,
         due: params.due,
         goalId: params.goal_id,
+        recurFreq,
+        recurInterval: params.recur_interval,
         createdBy: ctx.actor,
         source: "capture",
       }));

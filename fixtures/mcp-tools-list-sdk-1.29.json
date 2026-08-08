@@ -451,7 +451,7 @@
   },
   {
     "name": "minime_upsert_task",
-    "description": "Create or update a task (status: inbox|active|waiting|done|dropped).",
+    "description": "Create or update a task (status: inbox|active|waiting|done|dropped). A recurring task (recur_freq set) materializes its next instance automatically when marked done.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -497,6 +497,21 @@
               "type": "null"
             }
           ]
+        },
+        "recur_freq": {
+          "type": "string",
+          "enum": [
+            "daily",
+            "weekly",
+            "monthly",
+            "yearly",
+            "none"
+          ]
+        },
+        "recur_interval": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 365
         },
         "time_zone": {
           "type": "string",

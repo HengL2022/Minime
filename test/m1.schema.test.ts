@@ -539,6 +539,7 @@ describe("seed + round-trips", () => {
       "energy",
       "body_mass",
       "hr_resting",
+      "habit_streak",
     ]) {
       expect(defs).toContain(m);
     }

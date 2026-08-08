@@ -2693,3 +2693,57 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   designed during 2026-08-08 W2-3 review-finding remediation, within that same ratification's
   explicit cover for review-finding remediation on already-approved task work; the owner's
   end-of-program review before any publication remains the final gate.
+
+## 2026-08-08 — Task recurrence primitive + habit_streak metric
+
+- **Context:** Livability-program task W3-1: a completed recurring task ("water the plants
+  every week") used to just vanish — the owner had to re-create it by hand every cycle. Migration
+  030 adds `recur_freq`/`recur_interval`/`recur_anchor` columns directly to `tasks` (not a new
+  `task_templates` table — dropping `recur_freq` back to null is the whole "stop recurring"
+  story) and seeds a `habit_streak` metric. The task's own spec text targeted migration 027,
+  already taken by `027_life_metrics_seed.sql`; migration 029 was landed in the interim by an
+  unrelated W2-6 review fix (`029_scope_entity_conflicts_by_tier.sql`), so this shipped as 030,
+  the true next free number as of this migration — noted here since it is a numbering deviation
+  from the task's own spec, not because renumbering itself is a contract decision.
+- **Decision:** (1) **Materialization**: `repo.upsertTask`'s existing done-transition path (the
+  one that already stamps/clears `completed_at`, W1-3) is extended to, on a false→'done'
+  transition for a row with `recur_freq` set and `superseded_at` still null, INSERT one successor
+  task copying title/body/goal_id/tier/recur_freq/recur_interval/recur_anchor verbatim, with
+  `due = nextDue(...)` (new pure util `src/util/recurrence.ts`), `source='recurrence'`,
+  `derived_from=<completed task id>`, `created_by='system:recurrence'` — full I5 provenance, and
+  guarded idempotent (`select 1 from tasks where derived_from=... and source='recurrence'`) so a
+  repeat done-update, or the dream job's new step 5b crash-safety sweep for a done recurring task
+  that somehow bypassed `upsertTask` entirely, can never mint a second successor. `recur_anchor`
+  is copied verbatim rather than re-derived from each successor's own (possibly
+  end-of-month-clamped) due, and defaults to the supplied due date only at task creation — see
+  `recurrence.ts`'s module comment for why re-deriving it from a clamped date would permanently
+  downgrade a monthly-on-the-31st habit to the 28th instead of recovering the 31st. Because this
+  lives inside `upsertTask` itself, both `minime_upsert_task` and the watcher's inbox dedup-close
+  path ("water the plants — done" matching an open recurring task) materialize identically with
+  no separate code path. (2) **habit_streak tier scope**: unlike every other labeled metric
+  (`spend_by_category`'s category, or `journal_streak`/`mood`/`energy`'s null label), this
+  metric's label is the task's own title — free-form content, not a count or a short catalog
+  string — streamed through `minime_query_metric`, which (spec §7) carries no unlock gate of its
+  own; `metric_defs.agg_sql` IS the whitelist boundary. The agg_sql is therefore restricted to
+  `tier = 1` (excluding both tier-0, absolute per CLAUDE.md, and tier-2, which must stay behind
+  its normal time-boxed unlock) — a locked-down widening of the existing "labeled metrics are
+  live-only" precedent (`dream.ts` rollupMetrics) into "labeled metrics that expose real content
+  must also be tier-scoped in their own SQL." `superseded_at is null` mirrors 028's mood/energy
+  fix, ahead of need: tasks are explicitly out of scope for `minime_correct` today, so a done
+  recurring task cannot actually be superseded yet.
+- **Why:** (1) reuses the exact done-transition/provenance machinery two other paths (the MCP
+  tool and the watcher) already share, rather than adding a third bespoke "close a task" code
+  path with its own materialization logic to keep in sync. (2) `minime_query_metric` being
+  unconditionally reachable (no session-tier check anywhere in `src/mcp/tools/metric.ts`) means
+  every future content-bearing label has to defend itself in its own agg_sql — there is no
+  shared enforcement point to lean on. Restricting to tier 1 costs nothing in practice
+  (`minime_upsert_task` never exposes a tier parameter, so every agent-created task is already
+  tier 1) while closing off the alternative, which would have let a tier-2 recurring task's title
+  leak to any caller with zero unlock ceremony — exactly the disclosure I3's unlock requirement
+  exists to prevent.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W3 workstream
+  — the recurrence primitive and metric were adopted as planned; the tier-1 restriction on
+  habit_streak's agg_sql is a conservative, invariant-preserving implementation detail within
+  that same scope, not a product-shape change. The owner's end-of-program review before any
+  publication remains the final gate.

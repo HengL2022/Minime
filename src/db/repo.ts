@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type AuditPayload, assertAuditPayloadForVerb, auditPayload } from "../util/audit-payload";
 import { cjkFold, isCjkStopToken } from "../util/cjk";
-import { configuredTimeZone, localDateStr, now } from "../util/clock";
+import { configuredTimeZone, localDateStr, now, todayStr } from "../util/clock";
 import {
   COMPILED_NOTE_MARKER,
   COMPILED_NOTE_SOURCE,
@@ -23,6 +23,7 @@ import {
   config,
 } from "../util/config";
 import { type MetricRollup, metricDateString } from "../util/metric-rollup";
+import { type RecurFreq, nextDue } from "../util/recurrence";
 import {
   type DbExecutor,
   type DbPool,
@@ -1834,6 +1835,71 @@ export class TaskNotFoundError extends Error {
   }
 }
 
+// The row shape materializeRecurrence needs from the task that just went done: the fields its
+// successor copies verbatim (title/body/goal_id/tier/recur_*) plus the due it computes nextDue
+// from and the superseded_at guard. due/recur_anchor come back from postgres.js as Date for a
+// plain `date` column (never a process-local getter — see clock.ts's own note on this), hence
+// metricDateString below rather than a bare .toISOString() call at each use site.
+export interface RecurringTaskRow {
+  id: string;
+  title: string;
+  body: string | null;
+  due: Date | string | null;
+  goal_id: string | null;
+  tier: number;
+  recur_freq: string | null;
+  recur_interval: number;
+  recur_anchor: Date | string | null;
+  superseded_at?: Date | string | null;
+}
+
+// Mint the next instance of a completed recurring task, unless one already exists (idempotent —
+// both upsertTask's own done-transition check and the dream sweeper's crash-safety backfill call
+// this for the same row shape). Assumes an ambient transaction from the caller: the existence
+// check and the insert must commit together, or a crash between them could double-materialize.
+// recur_anchor is copied VERBATIM, never recomputed from the successor's own (possibly
+// end-of-month-clamped) due — see recurrence.ts's nextMonthCycle comment for why re-deriving it
+// from a clamped date would permanently downgrade a monthly-on-the-31st habit to the 28th.
+export async function materializeRecurrence(task: RecurringTaskRow): Promise<string | null> {
+  if (!task.recur_freq) return null;
+  const [existing] = await db()`
+    select 1 from tasks where derived_from = ${task.id} and source = 'recurrence' limit 1`;
+  if (existing) return null;
+  const fromDue = task.due !== null ? metricDateString(task.due) : todayStr();
+  const anchor = task.recur_anchor !== null ? metricDateString(task.recur_anchor) : null;
+  const due = nextDue(task.recur_freq as RecurFreq, task.recur_interval, anchor, fromDue);
+  const id = crypto.randomUUID();
+  await db()`
+    insert into tasks
+      (id, title, body, status, due, goal_id, tier, recur_freq, recur_interval, recur_anchor,
+       created_by, source, derived_from)
+    values
+      (${id}, ${task.title}, ${task.body}, 'inbox', ${due}::date, ${task.goal_id}, ${task.tier},
+       ${task.recur_freq}, ${task.recur_interval}, ${anchor}::date,
+       'system:recurrence', 'recurrence', ${task.id})`;
+  return id;
+}
+
+// Crash-safety net for the dream sweeper (step 5b): done recurring tasks with no recurrence
+// successor yet. Normally empty — upsertTask's own done-transition materializes inside the same
+// transaction as the completing update — this only finds work after a status='done' write that
+// bypassed upsertTask entirely. superseded_at is null excludes a corrected-away row from ever
+// spawning a fresh successor (tasks are out of scope for minime_correct today, so this cannot
+// currently happen, but the guard costs nothing and matches every other PARENTS-table read).
+export async function recurringTasksNeedingSuccessor(): Promise<RecurringTaskRow[]> {
+  return db()`
+    select t.id, t.title, t.body, t.due, t.goal_id, t.tier, t.recur_freq, t.recur_interval,
+           t.recur_anchor
+    from tasks t
+    where t.recur_freq is not null
+      and t.status = 'done'
+      and t.superseded_at is null
+      and not exists (
+        select 1 from tasks s where s.derived_from = t.id and s.source = 'recurrence'
+      )
+    order by t.completed_at nulls last, t.id` as any;
+}
+
 export async function upsertTask(
   t: {
     id?: string | null;
@@ -1842,33 +1908,66 @@ export async function upsertTask(
     status?: string | null;
     due?: string | null;
     goalId?: string | null;
+    // recur_freq is three-state like due/goalId below (undefined=keep, null=clear); recur_
+    // interval is plain coalesce (no clear semantic — meaningless without recur_freq, and the
+    // column is not-null so there is nothing to clear it TO). recurAnchor has no update path at
+    // all: minime_upsert_task never exposes it, so it is set once (create-time default from due,
+    // or an explicit override for internal/test callers) and never touched again.
+    recurFreq?: string | null;
+    recurInterval?: number | null;
+    recurAnchor?: string | null;
   } & Std,
 ): Promise<{ id: string; title: string; body: string | null }> {
   if (t.id) {
-    // due/goal_id are three-state at this boundary: undefined (key omitted) means KEEP,
-    // explicit null means CLEAR. coalesce() can't tell those apart (coalesce(null, col) is
+    // Captured into a local: narrowing `t.id` from `if (t.id)` does not survive into the
+    // withDbTransaction closure below (TS drops property narrowing across a function boundary).
+    const taskId = t.id;
+    // due/goal_id/recur_freq are three-state at this boundary: undefined (key omitted) means
+    // KEEP, explicit null means CLEAR. coalesce() can't tell those apart (coalesce(null, col) is
     // always "keep"), so the provided-flags carry the distinction into the SQL explicitly.
     const dueProvided = t.due !== undefined;
     const goalIdProvided = t.goalId !== undefined;
-    const [row] = await db()`
-      update tasks set title = coalesce(${t.title ?? null}, title),
-                       body = coalesce(${t.body ?? null}, body),
-                       status = coalesce(${t.status ?? null}, status),
-                       due = case when ${dueProvided} then ${t.due ?? null}::date else due end,
-                       goal_id = case when ${goalIdProvided} then ${t.goalId ?? null}::uuid else goal_id end,
-                       completed_at = case when ${t.status ?? null} = 'done' then ${now()}
-                                           when ${t.status ?? null}::text is not null then null
-                                           else completed_at end
-      where id = ${t.id} returning id, title, body`;
-    if (!row) throw new TaskNotFoundError();
-    return row as any;
+    const recurFreqProvided = t.recurFreq !== undefined;
+    return withDbTransaction(async (tx) => {
+      // First SELECT (locking) the prior status: completing two concurrent "mark done" calls on
+      // the same row must materialize exactly one successor. The second call's SELECT blocks on
+      // this row lock until the first commits, then reads status='done' post-commit — so at most
+      // one caller ever observes a false->done transition for a given completion.
+      const [prior] = await tx`select status from tasks where id = ${taskId} for update`;
+      if (!prior) throw new TaskNotFoundError();
+      const wasDone = prior.status === "done";
+      const [row] = await tx`
+        update tasks set title = coalesce(${t.title ?? null}, title),
+                         body = coalesce(${t.body ?? null}, body),
+                         status = coalesce(${t.status ?? null}, status),
+                         due = case when ${dueProvided} then ${t.due ?? null}::date else due end,
+                         goal_id = case when ${goalIdProvided} then ${t.goalId ?? null}::uuid else goal_id end,
+                         recur_freq = case when ${recurFreqProvided} then ${t.recurFreq ?? null}::text else recur_freq end,
+                         recur_interval = coalesce(${t.recurInterval ?? null}::int, recur_interval),
+                         completed_at = case when ${t.status ?? null} = 'done' then ${now()}
+                                             when ${t.status ?? null}::text is not null then null
+                                             else completed_at end
+        where id = ${taskId}
+        returning id, title, body, status, due, goal_id, tier, recur_freq, recur_interval,
+                  recur_anchor, superseded_at`;
+      if (!row) throw new TaskNotFoundError();
+      if (!wasDone && row.status === "done" && row.superseded_at === null) {
+        await materializeRecurrence(row as RecurringTaskRow);
+      }
+      return row as any;
+    });
   }
   const id = crypto.randomUUID();
+  // Non-goal: no inbox-capture syntax for recurrence, so the only "on create" source for a
+  // phase anchor is the due date supplied in this same call.
+  const recurAnchor = t.recurAnchor ?? (t.recurFreq && t.due ? t.due : null);
   const [row] = await db()`
-    insert into tasks (id, title, body, status, due, goal_id, created_by, source, derived_from, tier, completed_at)
+    insert into tasks (id, title, body, status, due, goal_id, created_by, source, derived_from, tier,
+                        completed_at, recur_freq, recur_interval, recur_anchor)
     values (${id}, ${t.title ?? null}, ${t.body ?? null}, ${t.status ?? "inbox"}, ${t.due ?? null}, ${t.goalId ?? null},
             ${t.createdBy ?? "human"}, ${t.source ?? "manual"}, ${t.derivedFrom ?? null}, ${t.tier ?? 1},
-            ${t.status === "done" ? now() : null})
+            ${t.status === "done" ? now() : null},
+            ${t.recurFreq ?? null}, ${t.recurInterval ?? 1}, ${recurAnchor}::date)
     returning id, title, body`;
   return row as any;
 }

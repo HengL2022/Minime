@@ -218,12 +218,14 @@ describe("MCP server", () => {
 
     const { raw, parsed, isError } = await call("minime_list_metrics", {});
     expect(isError).toBe(false);
-    expect(parsed.data.metrics).toHaveLength(10); // 6 from 006 + mood/energy/body_mass/hr_resting from 027
+    // 6 from 006 + mood/energy/body_mass/hr_resting from 027 + habit_streak from 030
+    expect(parsed.data.metrics).toHaveLength(11);
     expect(parsed.data.metrics.map((m: any) => m.name).sort()).toEqual(
       [
         "body_mass",
         "deep_work_minutes",
         "energy",
+        "habit_streak",
         "hr_resting",
         "journal_streak",
         "mood",
@@ -236,7 +238,7 @@ describe("MCP server", () => {
     for (const m of parsed.data.metrics) {
       expect(Object.keys(m).sort()).toEqual(["description", "name", "rollup", "unit"]);
     }
-    expect(parsed.sources).toHaveLength(10);
+    expect(parsed.sources).toHaveLength(11);
     expect(raw).not.toContain("agg_sql");
     expect(raw).not.toContain("select ");
   });

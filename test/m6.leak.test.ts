@@ -594,11 +594,20 @@ describe("RLS belt-and-braces (spec §12)", () => {
   test("metric definitions declare checked sum/last/avg rollup semantics", async () => {
     const defs = await sql`select name, rollup from metric_defs order by name`;
     const rollupOf = (name: string) => defs.find((row) => row.name === name)?.rollup;
-    // journal_streak and body_mass are current-value-as-of-period-end ("last"); mood/energy/
-    // hr_resting are already-averaged day values that keep averaging into weeks/months ("avg").
-    for (const name of ["journal_streak", "body_mass"]) expect(rollupOf(name)).toBe("last");
+    // journal_streak, body_mass and habit_streak are current-value-as-of-period-end ("last");
+    // mood/energy/hr_resting are already-averaged day values that keep averaging into
+    // weeks/months ("avg").
+    for (const name of ["journal_streak", "body_mass", "habit_streak"])
+      expect(rollupOf(name)).toBe("last");
     for (const name of ["mood", "energy", "hr_resting"]) expect(rollupOf(name)).toBe("avg");
-    const nonSum = new Set(["journal_streak", "body_mass", "mood", "energy", "hr_resting"]);
+    const nonSum = new Set([
+      "journal_streak",
+      "body_mass",
+      "habit_streak",
+      "mood",
+      "energy",
+      "hr_resting",
+    ]);
     expect(defs.filter((row) => !nonSum.has(row.name)).every((row) => row.rollup === "sum")).toBe(
       true,
     );

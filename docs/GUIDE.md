@@ -49,6 +49,16 @@ Phrasing nudges the classifier (all optional):
 | `Today felt scattered. Energy low…` | a journal entry (tier 2, private) |
 | anything else substantial | a reference note → a brain page |
 
+**Recurring tasks**: ask your agent to make a task repeat — "make watering the plants a weekly
+task" → `minime_upsert_task` with `recur_freq` (daily/weekly/monthly/yearly, optionally every N
+of those with `recur_interval`) and `recur_anchor` defaulted from its due date. There's no inbox
+phrasing for this (yet) — it's set in chat, not typed into a capture. Marking a recurring task
+done immediately creates its next open instance with the same title, goal, and cadence, phase-locked
+to the original due date (a monthly-on-the-31st task lands on the 28th in February, then recovers
+the 31st once the month allows it again) — closing it via a "done" capture in the inbox works the
+same way. Ask "how's my streak?" (→ `minime_query_metric habit_streak`) for your current run of
+consecutive completed days, labeled per task title.
+
 ### 2. Brain pages — for notes and ideas you curate
 
 `data/brain/` is a gitignored folder of plain Markdown in Minime's local data archive. Minime

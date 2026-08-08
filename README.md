@@ -181,7 +181,7 @@ The new owner-side entry points are `bun run src/cli.ts unlock:approve <request-
 | `minime_journal` | Writes a private journal entry with optional mood and energy. |
 | `minime_log_decision` | Saves a decision, its options/reasoning, review date, branches, and optional interview transcript. |
 | `minime_review_decision` | Records the actual outcome and can turn a learned lesson into a linked principle. |
-| `minime_upsert_task` | Creates or updates a task with status, due date, body, and provenance. |
+| `minime_upsert_task` | Creates or updates a task with status, due date, body, provenance, and optional recurrence (auto-materializes its next instance on completion). |
 | `minime_agenda` | Lists forward-looking tasks over a caller-zone date window. |
 | `minime_log_interaction` | Records a person/org interaction and updates relationship recency. |
 | `minime_review_queue` | Lists review flags and marks them resolved or dismissed; it never edits the flagged source rows. |
