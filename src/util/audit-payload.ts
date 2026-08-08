@@ -405,6 +405,10 @@ function dreamSummary(input: Record<string, unknown>): AuditPayload {
   });
 }
 
+// edges_repointed is a live post-cleanup snapshot — edges still touching the merge/retype
+// target after self-referential drops and collision de-dupe run — not a raw count of rows a
+// repoint UPDATE touched. retypeOrgToPerson and mergePersonIntoPerson (src/db/repo.ts) both
+// compute it the same way so this key means one thing regardless of which repair wrote it.
 type RepairCompleteCounts = {
   edges_repointed?: number;
   aliases_moved?: number;

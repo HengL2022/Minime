@@ -68,7 +68,10 @@ describe("mergePersonIntoPerson", () => {
     const res = await mergePersonIntoPerson(fromId, intoId);
 
     expect(res.interactionsRepointed).toBe(1);
-    expect(res.edgesRepointed).toBe(3); // self-loop edge + collision edge + survivor edge
+    // Live post-cleanup count, not a raw repoint tally: the self-loop edge is dropped and one
+    // side of the collision is deduped away, so only the surviving collision edge + the
+    // survivor edge still reference the target once the merge finishes.
+    expect(res.edgesRepointed).toBe(2);
     const [interaction] = await sql`select person_id from interactions where id = ${interactionId}`;
     expect(interaction!.person_id).toBe(intoId);
     const dangling =

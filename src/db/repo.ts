@@ -1163,6 +1163,9 @@ export async function retypeOrgToPerson(
           )
         )
         and (e.src_id = ${personId} or e.dst_id = ${personId})`;
+    // Live post-cleanup snapshot, taken after the self-loop delete and de-dupe above — see the
+    // matching edges_repointed comment in mergePersonIntoPerson below for why this is a live
+    // count rather than a raw repoint-UPDATE tally.
     const cntRows = await tx`
       select count(*)::int n from edges where src_id = ${personId} or dst_id = ${personId}`;
     const edgesRepointed = ((cntRows[0] as any)?.n ?? 0) as number;
@@ -1271,16 +1274,10 @@ export async function mergePersonIntoPerson(
 
     // 3. Repoint edges on both sides, drop self-referential edges the repoint creates, and
     // de-dupe collisions — copied from retypeOrgToPerson's edge-repoint logic (step 3 above).
-    const srcRepointed = await tx`
-      update edges set src_id = ${intoId} where src_type = 'person' and src_id = ${fromId}
-      returning id`;
-    const dstRepointed = await tx`
-      update edges set dst_id = ${intoId} where dst_type = 'person' and dst_id = ${fromId}
-      returning id`;
-    const repointedEdgeIds = new Set<string>([
-      ...srcRepointed.map((row: any) => row.id as string),
-      ...dstRepointed.map((row: any) => row.id as string),
-    ]);
+    await tx`
+      update edges set src_id = ${intoId} where src_type = 'person' and src_id = ${fromId}`;
+    await tx`
+      update edges set dst_id = ${intoId} where dst_type = 'person' and dst_id = ${fromId}`;
     // drop self-referential edges created by the repoint (e.g. "X knows X")
     await tx`delete from edges where src_id = ${intoId} and dst_id = ${intoId}
              and src_type = 'person' and dst_type = 'person'`;
@@ -1300,7 +1297,16 @@ export async function mergePersonIntoPerson(
           )
         )
         and (e.src_id = ${intoId} or e.dst_id = ${intoId})`;
-    const edgesRepointed = repointedEdgeIds.size;
+    // edges_repointed is a live post-cleanup snapshot — edges still touching the target AFTER
+    // both the self-loop delete and the collision de-dupe above — not a raw count of rows the
+    // repoint UPDATEs touched. Matches retypeOrgToPerson's edgesRepointed (repo.ts:1166-1168) so
+    // the shared `edges_repointed` audit key (scripts/repair.ts REPAIR_SUMMARY_COUNT_KEYS,
+    // src/util/audit-payload.ts RepairCompleteCounts) means the same thing regardless of which
+    // repair produced the event: an edge repointed and then immediately dropped as a self-loop
+    // or a losing collision must not be reported as still referencing the target.
+    const [edgeCntRow] = await tx`
+      select count(*)::int n from edges where src_id = ${intoId} or dst_id = ${intoId}`;
+    const edgesRepointed = ((edgeCntRow as any)?.n ?? 0) as number;
 
     // 4. Target absorbs the source's relation/context/last-contact/tier; supersedes_id records
     // only the FIRST ancestor (coalesce) — a target merged into more than once keeps its
