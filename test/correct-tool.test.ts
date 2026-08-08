@@ -5,7 +5,10 @@
 // this tool can only correct what the calling session can currently read — getRow's own tier
 // predicate 404s a locked session before any write, and supersedeRow/retractRow (repo.ts)
 // independently re-check the same bound at the SQL layer (028's tier_update RLS policy), so a
-// locked session gets the identical NOT_FOUND either way.
+// locked session gets the identical NOT_FOUND either way. Two halves of that rule are covered
+// below: a locked (tier-1) session hitting a tier-2 row, and — independently — no session at all,
+// including one with a genuine active tier-2 unlock, ever reaching a tier-0 row, since getRow's
+// predicate carries an unconditional `tier >= 1` floor with no exception.
 
 import { beforeAll, describe, expect, test } from "bun:test";
 import {
@@ -430,6 +433,66 @@ describe("minime_correct", () => {
       select superseded_by, superseded_at from journal_entries where id = ${id}::uuid`;
     expect(row!.superseded_by).toBeNull();
     expect(row!.superseded_at).toBeNull();
+  });
+
+  test("a session with an active tier-2 unlock still cannot amend, retract, or retier a tier-0 row (absorbing quarantine has no bypass)", async () => {
+    const ctx = sessionToolCtx("agent:correct-tier0-unlocked");
+    await requestAndApproveTier2(ctx); // genuine, approved tier-2 unlock for THIS session
+
+    // journal_entries.tier carries no CHECK constraint (unlike decisions, which the DB itself
+    // refuses at tier 0 -- 014_decision_interview.sql's `decisions_tier_check`) and insertJournal
+    // passes `tier` straight through with no JS-side gate, so this is a legitimate tier-0
+    // fixture: the same technique test/h1-brain-sync.test.ts and test/h1-note-recovery.test.ts
+    // already use to construct tier-0 pages ("Private zero" / `tier: 0` frontmatter).
+    const { id: journalId } = await insertJournal({
+      entryMd: "Fictional absorbing-quarantine entry that must never be correctable.",
+      mood: 3,
+      tier: 0,
+      createdBy: "human",
+      source: "test:correct",
+    });
+
+    const amendError = expectErr(
+      await correct(ctx, {
+        type: "journal",
+        action: "amend",
+        id: journalId,
+        entry_md: "Should not land.",
+      }),
+    );
+    expect(amendError.code).toBe("NOT_FOUND");
+
+    const retractError = expectErr(
+      await correct(ctx, { type: "journal", action: "retract", id: journalId }),
+    );
+    expect(retractError.code).toBe("NOT_FOUND");
+
+    const [journalRow] = await testSql`
+      select tier, superseded_by, superseded_at from journal_entries where id = ${journalId}::uuid`;
+    expect(journalRow!.tier).toBe(0); // refusal did not touch the row
+    expect(journalRow!.superseded_by).toBeNull();
+    expect(journalRow!.superseded_at).toBeNull();
+
+    // pages.tier is equally unconstrained at the DB layer, but upsertPage's own assertProseTier
+    // JS gate refuses tier 0 outright (TIER0_PROSE_BLOCKED) -- bypass it with a raw insert, same
+    // technique as above, to reach handleRetier's independent getRow("page", ...) call with a
+    // tier-0 target. retier has its own explicit "requires an approved tier-2 unlock" check, but
+    // getRow runs first (correct.ts), so a real unlock here proves the tier-0 floor specifically,
+    // not just the separate no-unlock refusal already covered above.
+    const [zeroPage] = await testSql`
+      insert into pages (path, title, body_md, content_hash, tier, created_by, source)
+      values ('test/zqx-correct-tier0-note.md', 'Fictional tier-0 note',
+              'Fictional tier-0 body that must never be retiered.', 'zqx-correct-tier0-note', 0,
+              'human', 'manual')
+      returning id`;
+
+    const retierError = expectErr(
+      await correct(ctx, { type: "note", action: "retier", id: zeroPage!.id, to_tier: 2 }),
+    );
+    expect(retierError.code).toBe("NOT_FOUND");
+
+    const [pageRow] = await testSql`select tier from pages where id = ${zeroPage!.id}::uuid`;
+    expect(pageRow!.tier).toBe(0); // refusal did not touch the row
   });
 
   test("type=task is rejected by the schema (not a supported correction type)", async () => {
