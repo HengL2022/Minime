@@ -17,7 +17,7 @@ override TIME := $(TIME_LITERAL)
 export TIME
 endif
 
-.PHONY: install setup install-hooks onboard update up down psql-ro migrate provision-runtime-role seed embed test lint format typecheck typecheck-ops verify-m0 verify-m0-offline verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 verify-m13 verify-m14 verify-m15 check-subsystems check-tracked-privacy verify-offline verify verify-restore-e2e restore-drill restore-pitr promote-restore eval-search eval-search-live eval-snapshot eval-pmb eval-pmb-official eval-graph-hygiene eval-skills optimize-skill
+.PHONY: install setup install-hooks install-service uninstall-service onboard update up down psql-ro migrate provision-runtime-role seed embed test lint format typecheck typecheck-ops verify-m0 verify-m0-offline verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 verify-m13 verify-m14 verify-m15 check-subsystems check-tracked-privacy verify-offline verify verify-restore-e2e restore-drill restore-pitr promote-restore eval-search eval-search-live eval-snapshot eval-pmb eval-pmb-official eval-graph-hygiene eval-skills optimize-skill
 
 # Every automated child is provisioned by this parent-owned runner. The child receives only
 # the generated loopback URL and (where applicable) one approved compatibility alias.
@@ -46,6 +46,18 @@ update:
 # episodic summary into the inbox (agents/hooks/session-capture.sh). Safe to re-run.
 install-hooks:
 	@bash scripts/install-session-hook.sh
+
+# Owner-run: install the resident `serve` as a per-user background service -- a launchd
+# LaunchAgent on macOS, a systemd --user unit on Linux (docs/GUIDE.md "Keeping Minime
+# running"). Renders ops/service/*.tmpl and (re)starts it; safe to re-run. DRY_RUN=1 prints
+# the rendered file without touching launchd/systemd. FORCE_OS=macos|debian reviews the
+# other branch from either OS. It is just another `serve`; the W3-5 lock decides ownership.
+install-service:
+	@bash scripts/install-service.sh install
+
+# Stop and remove the installed LaunchAgent/systemd unit. Safe to re-run even if absent.
+uninstall-service:
+	@bash scripts/install-service.sh uninstall
 
 # Start Postgres (Docker if present, else native service) and check Ollama models.
 up:

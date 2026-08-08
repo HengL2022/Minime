@@ -278,6 +278,24 @@ or a distributed rollback across Postgres, files, model providers, or indexes.
   first, and applies migrations. Your `.env`, `data/`, and backups are never touched —
   they live outside git. Restart `serve` afterward.
 
+### Keeping Minime running
+
+For real-time inbox filing and nightly maintenance without an open agent session, install
+`serve` as a per-user background service:
+
+    make install-service                # macOS: launchd LaunchAgent · Linux: systemd --user unit
+    make install-service DRY_RUN=1      # preview the rendered file; installs nothing
+
+It renders `ops/service/*.tmpl` for your OS and checkout, then (re)starts it — safe to re-run
+after a repo move or a Bun upgrade. Check it with `launchctl list | grep minime` (macOS) or
+`systemctl --user status minime` (Linux). Logs land in `data/logs/serve.log` on macOS;
+`journalctl --user -u minime -f` on Linux. `make uninstall-service` stops and removes it.
+
+Every `serve` — this resident one, or an interactive one your agent starts per session — runs
+its own inbox watcher and MCP endpoint; only whichever one holds the maintenance lock also
+runs dream/backup. A resident install makes sure something always holds it, and takes over
+within 5 minutes of the previous owner exiting.
+
 ## Three habits that make it work
 
 1. **Capture without ceremony.** If it takes more than ten seconds, you'll stop. Drop it

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd LaunchAgent template for Minime's resident `serve` (MCP stdio supervisor + inbox
+  watcher + dream/backup cron). Rendered by `make install-service` (scripts/install-service.sh),
+  which substitutes @REPO_ROOT@, @BUN_PATH@, and @HOME@ for this machine and this checkout.
+  Do not edit the rendered copy in ~/Library/LaunchAgents by hand -- rerun the install instead.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.minime.serve</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>@BUN_PATH@</string>
+		<string>run</string>
+		<string>src/cli.ts</string>
+		<string>serve</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>@REPO_ROOT@</string>
+	<!-- launchd LaunchAgents do not reliably inherit a login shell's HOME/PATH, and the
+	     nightly dream job shells out to restic/pg_dump by bare name -- so both are pinned
+	     explicitly here rather than left to whatever launchd happens to provide. -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>@HOME@</string>
+		<key>PATH</key>
+		<string>@HOME@/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>@REPO_ROOT@/data/logs/serve.log</string>
+	<key>StandardErrorPath</key>
+	<string>@REPO_ROOT@/data/logs/serve.log</string>
+</dict>
+</plist>

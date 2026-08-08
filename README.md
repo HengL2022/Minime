@@ -115,7 +115,8 @@ make setup     # interactive; the local-Ollama defaults need no credentials at a
 </details>
 
 After install (optional): install `restic` + set `RESTIC_REPOSITORY`/`RESTIC_PASSWORD_FILE`
-for backups; run `bun run src/cli.ts serve` under launchd/systemd for resident mode; load
+for backups; run `make install-service` for resident mode — a launchd LaunchAgent on macOS or a
+systemd `--user` unit on Linux (see [docs/GUIDE.md](docs/GUIDE.md#keeping-minime-running)); load
 the `agents/skills/` prompts into your agent — `RESOLVER.md` routes requests to the right
 skill (query, graph-query, person-brief, capture, review-triage, morning-brief,
 evening-review, decision-brief, decision-interview).
