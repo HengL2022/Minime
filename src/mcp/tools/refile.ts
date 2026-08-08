@@ -16,13 +16,12 @@
 // interaction need no such check: fileRow always files them at tier 2 regardless of any
 // override, so they can never be the laundering channel. The floor is computed from the row's
 // state AT CLAIM TIME (claim.item, from claimPendingInboxItemForRefile's UPDATE ... RETURNING),
-// never from the plain read at the top of this handler — the handler runs inside one ambient
-// READ COMMITTED transaction (executeTool -> withActorDbSession), so a concurrent classifier
-// pass that commits in the gap between that read and the claim is visible to the claim but must
-// not be allowed to leave a stale, weaker evidence value already baked into the floor.
+// never from the plain read at the top of this handler — every query here runs READ COMMITTED
+// (see the claim's own independent transaction below), so a concurrent classifier pass that
+// commits in the gap between that read and the claim is visible to the claim but must not be
+// allowed to leave a stale, weaker evidence value already baked into the floor.
 
 import { z } from "zod";
-import { withDbTransaction } from "../../db/client";
 import {
   allowedTier,
   assertInboxClaim,
@@ -31,6 +30,7 @@ import {
   logEvent,
   resolveOpenReviewItemsForInbox,
   setInboxFiledClaimed,
+  withActorDurableDbSession,
 } from "../../db/repo";
 import type { Classification } from "../../pipeline/classify";
 import {
@@ -147,82 +147,98 @@ export const refileTool: ToolDef = {
     if (params.mood !== undefined) fields.mood = params.mood;
 
     // A tool handler runs inside ONE ambient actor transaction (executeTool -> withActorDbSession)
-    // for its whole call, so withDbTransaction here is reentrant, not a separate commit boundary:
-    // if the handler throws AFTER this returns, postgres.js rolls back everything in it too. A
-    // duplicate match therefore throws immediately (below fileRow's call, inside this block) —
-    // there is no way to keep fileRow's queued duplicate review item while still failing the
-    // overall call, so this simply undoes the claim along with it, leaving the item exactly as it
-    // was. The standard tool:minime_refile:result audit event (I8) still records the attempt on
-    // its own separate durable connection, independent of this rollback.
-    const outcome = await withDbTransaction<TransactionOutcome>(async () => {
-      // claimPendingInboxItemForRefile (not claimInboxItem) so a concurrent watcher replay OR a
-      // second concurrent refile call is fenced exactly like the automatic pipeline, even though
-      // this item was already classified (claimInboxItem's 'pending' branch deliberately excludes
-      // that case — see its repo.ts doc comment).
-      const claim = await claimPendingInboxItemForRefile(item.id);
-      if (!claim) {
-        throw new ToolError(
-          "BAD_INPUT",
-          "capture is currently claimed by another process — retry shortly",
-        );
-      }
-      await assertInboxClaim(item.id, claim.token);
+    // for its whole call, so an ordinary withDbTransaction here would be reentrant, not a separate
+    // commit boundary: its "commit" would only actually happen once this whole handler resolves —
+    // i.e. AFTER any publish call made before returning, not before it. withActorDurableDbSession
+    // (repo.ts) always opens a genuinely fresh transaction on its own connection regardless of the
+    // ambient scope — the same withDurableRuntimeDbTransaction primitive capture.ts already uses
+    // for "commit for real before a filesystem write" — so it actually commits the instant this
+    // callback returns, strictly before publishNoteProjection runs below. It carries the same
+    // minime.actor/minime.session_id GUCs withActorDbSession set on the ambient transaction, so
+    // app_allowed_tier() (the tier predicate every claim/assert/setFiled call below appends) sees
+    // the identical tier-2-unlock state either way. A duplicate match still throws immediately
+    // (below fileRow's call, inside this block) — there is no way to keep fileRow's queued
+    // duplicate review item while still failing the overall call, so this transaction's own
+    // rollback undoes the claim along with it, leaving the item exactly as it was — the ambient
+    // transaction never held any of this work, so it has nothing to undo. The standard
+    // tool:minime_refile:result audit event (I8) still records the attempt on its own separate
+    // durable connection, independent of either transaction.
+    const outcome = await withActorDurableDbSession<TransactionOutcome>(
+      ctx.actor,
+      async () => {
+        // claimPendingInboxItemForRefile (not claimInboxItem) so a concurrent watcher replay OR a
+        // second concurrent refile call is fenced exactly like the automatic pipeline, even though
+        // this item was already classified (claimInboxItem's 'pending' branch deliberately excludes
+        // that case — see its repo.ts doc comment).
+        const claim = await claimPendingInboxItemForRefile(item.id);
+        if (!claim) {
+          throw new ToolError(
+            "BAD_INPUT",
+            "capture is currently claimed by another process — retry shortly",
+          );
+        }
+        await assertInboxClaim(item.id, claim.token);
 
-      // Anti-laundering floor + gate (see file header): computed from claim.item, the row
-      // exactly as claimPendingInboxItemForRefile's UPDATE ... RETURNING just observed it — never
-      // from the plain read at the top of this handler, which a concurrent classifier pass could
-      // have raced past. task/decision are rejected outright above the floor; note is floored,
-      // never lowered; journal/interaction always file at tier 2 regardless (no check needed).
-      const floor = Math.max(
-        evidenceFloor(storedClassification(claim.item.classifier_output)),
-        noteHintTier(text),
-      ) as 1 | 2;
-      if (floor === 2 && (type === "task" || type === "decision_note")) {
-        throw new ToolError(
-          "BAD_INPUT",
-          "this capture's own stored evidence indicates tier-2-grade content — file it as " +
-            "journal, interaction, or note (tier 2) instead; task/decision have no tier-2 " +
-            "representation",
-        );
-      }
-      if (type === "note") {
-        fields.tier = params.tier !== undefined ? Math.max(params.tier, floor) : floor;
-      }
+        // Anti-laundering floor + gate (see file header): computed from claim.item, the row
+        // exactly as claimPendingInboxItemForRefile's UPDATE ... RETURNING just observed it — never
+        // from the plain read at the top of this handler, which a concurrent classifier pass could
+        // have raced past. task/decision are rejected outright above the floor; note is floored,
+        // never lowered; journal/interaction always file at tier 2 regardless (no check needed).
+        const floor = Math.max(
+          evidenceFloor(storedClassification(claim.item.classifier_output)),
+          noteHintTier(text),
+        ) as 1 | 2;
+        if (floor === 2 && (type === "task" || type === "decision_note")) {
+          throw new ToolError(
+            "BAD_INPUT",
+            "this capture's own stored evidence indicates tier-2-grade content — file it as " +
+              "journal, interaction, or note (tier 2) instead; task/decision have no tier-2 " +
+              "representation",
+          );
+        }
+        if (type === "note") {
+          fields.tier = params.tier !== undefined ? Math.max(params.tier, floor) : floor;
+        }
 
-      const classification: Classification = {
-        type,
-        confidence: 1,
-        fields,
-        reason: "owner refile",
-      };
+        const classification: Classification = {
+          type,
+          confidence: 1,
+          fields,
+          reason: "owner refile",
+        };
 
-      const result = await fileRow(classification, text, item.id);
-      if (result === "duplicate") {
-        throw new ToolError(
-          "BAD_INPUT",
-          "this capture matches an existing open task — file it as a different type, or " +
-            "resolve the match first",
-        );
-      }
-      if (!result) {
-        // Unreachable: CLASSIFICATION_TYPE only emits types fileRow's switch recognizes.
-        throw new Error("refile_unfileable_type");
-      }
-      const [filedTable, filedId] = result.primary;
-      await setInboxFiledClaimed(item.id, claim.token, filedTable, filedId, classification);
-      const resolved = await resolveOpenReviewItemsForInbox(item.id);
-      await logEvent({
-        actor: ctx.actor,
-        verb: "inbox:refiled",
-        entityType: "inbox_item",
-        entityId: item.id,
-        payload: auditPayload.inboxRefiled({ type: classification.type, filedTable, filedId }),
-      });
-      return { filedTable, filedId, resolved, projection: result.projection };
-    });
+        const result = await fileRow(classification, text, item.id);
+        if (result === "duplicate") {
+          throw new ToolError(
+            "BAD_INPUT",
+            "this capture matches an existing open task — file it as a different type, or " +
+              "resolve the match first",
+          );
+        }
+        if (!result) {
+          // Unreachable: CLASSIFICATION_TYPE only emits types fileRow's switch recognizes.
+          throw new Error("refile_unfileable_type");
+        }
+        const [filedTable, filedId] = result.primary;
+        await setInboxFiledClaimed(item.id, claim.token, filedTable, filedId, classification);
+        const resolved = await resolveOpenReviewItemsForInbox(item.id);
+        await logEvent({
+          actor: ctx.actor,
+          verb: "inbox:refiled",
+          entityType: "inbox_item",
+          entityId: item.id,
+          payload: auditPayload.inboxRefiled({ type: classification.type, filedTable, filedId }),
+        });
+        return { filedTable, filedId, resolved, projection: result.projection };
+      },
+      ctx.sessionId,
+    );
 
-    // The Markdown mirror publishes only after the database commit, exactly like
-    // processInboxSnapshot: a rolled-back finalization must never leave a visible projection.
+    // Only reachable once the independent transaction above has genuinely committed (see the
+    // comment there), exactly like processInboxSnapshot: a rolled-back finalization must never
+    // leave a visible projection. A crash between that commit and here just leaves a filed row
+    // with no markdown mirror yet — the same residual risk processInboxSnapshot already accepts
+    // for the automatic pipeline.
     if (outcome.projection) await publishNoteProjection(outcome.projection);
 
     return envelope(

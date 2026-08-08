@@ -29,6 +29,7 @@ import {
   db,
   hasDbTransaction,
   withDbTransaction,
+  withDurableRuntimeDbTransaction,
   withReservedDb,
   withRuntimeDbTransaction,
   withRuntimeReservedDb,
@@ -248,6 +249,28 @@ export async function withActorDbSession<T>(
 ): Promise<T> {
   if (hasDbTransaction()) throw new Error("nested_actor_scope");
   return withRuntimeDbTransaction(async (tx) => {
+    await tx`select set_config('minime.actor', ${actor}, true)`;
+    await tx`select set_config('minime.session_id', ${sessionId ?? ""}, true)`;
+    return work();
+  });
+}
+
+/**
+ * Like withActorDbSession, but always opens a genuinely independent transaction (client.ts's
+ * withDurableRuntimeDbTransaction) regardless of any ambient actor transaction already open —
+ * deliberately callable FROM inside one (no nested_actor_scope guard). For work that must commit
+ * for real before some later action the caller's own ambient transaction can't order a commit
+ * around (e.g. minime_refile publishing a note projection only once its filing has truly
+ * committed, not just once the surrounding tool handler returns). Carries the same
+ * minime.actor/minime.session_id GUCs withActorDbSession sets, so app_allowed_tier() and every
+ * tier predicate behave identically on either transaction.
+ */
+export async function withActorDurableDbSession<T>(
+  actor: string,
+  work: () => Promise<T>,
+  sessionId?: string,
+): Promise<T> {
+  return withDurableRuntimeDbTransaction(async (tx) => {
     await tx`select set_config('minime.actor', ${actor}, true)`;
     await tx`select set_config('minime.session_id', ${sessionId ?? ""}, true)`;
     return work();

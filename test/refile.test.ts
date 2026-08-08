@@ -9,6 +9,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { withActorDbSession } from "../src/db/repo";
 import { toolByName } from "../src/mcp/tools";
 import { type ToolResult, invokeTool } from "../src/mcp/tools/registry";
 import { processInboxFile } from "../src/pipeline/watcher";
@@ -121,6 +122,117 @@ describe("minime_refile", () => {
     const projected = await readFile(join(config.dataDir, "brain", String(page!.path)), "utf8");
     expect(projected).toBe(page!.body_md);
     expect(projected).toContain("ZQX-REFILE-NOTE");
+  });
+
+  test("refiles a pending capture as an interaction: person resolved, review item resolved, event logged", async () => {
+    const text = "unclear: ZQX-REFILE-INTERACTION fictional chat about the winch bearing";
+    const inboxId = await pendingUnfiled("zqx-refile-interaction.md", text);
+    const [reviewBefore] = await testSql`
+      select id from review_queue
+      where kind = 'inbox_unfiled' and payload ->> 'inbox_item_id' = ${inboxId} and status = 'open'`;
+    expect(reviewBefore).toBeTruthy();
+
+    const ctx = sessionToolCtx("agent:refile-interaction");
+    await requestAndApproveTier2(ctx);
+    const result = await refile(ctx, {
+      inbox_item_id: inboxId,
+      type: "interaction",
+      person_name: "Priya Kestrel",
+      kind: "call",
+    });
+    const data = expectOk(result);
+    expect(data.filed_table).toBe("interactions");
+    expect(data.resolved_review_items).toContain(reviewBefore!.id);
+
+    const [row] = await testSql`
+      select summary, kind, tier, derived_from, person_id, org_id
+      from interactions where id = ${data.filed_id}::uuid`;
+    expect(row!.summary).toBe(text);
+    expect(row!.kind).toBe("call");
+    expect(row!.tier).toBe(2);
+    expect(row!.derived_from).toBe(inboxId);
+    expect(row!.org_id).toBeNull();
+    expect(row!.person_id).toBeTruthy();
+
+    // "Priya Kestrel" carries no org cue, so fileRow's person/org heuristic must resolve it to a
+    // real person row, not a phantom org (the phantom-org bug the heuristic exists to avoid).
+    const [person] = await testSql`
+      select canonical_name from people where id = ${row!.person_id}`;
+    expect(person!.canonical_name).toBe("Priya Kestrel");
+
+    const [inboxRow] = await testSql`
+      select status, filed_table, filed_id from inbox_items where id = ${inboxId}::uuid`;
+    expect(inboxRow).toEqual({
+      status: "filed",
+      filed_table: "interactions",
+      filed_id: data.filed_id,
+    });
+
+    const [reviewAfter] = await testSql`
+      select status from review_queue where id = ${reviewBefore!.id}::uuid`;
+    expect(reviewAfter!.status).toBe("resolved");
+
+    const [event] = await testSql`
+      select payload from events
+      where verb = 'inbox:refiled' and entity_id = ${inboxId}::uuid`;
+    expect(event!.payload).toEqual({
+      type: "interaction",
+      filed_table: "interactions",
+      filed_id: data.filed_id,
+    });
+  });
+
+  test("refiles a pending capture as a decision: fields set correctly, review item resolved, event logged with the decision_note remap", async () => {
+    const text = "unclear: ZQX-REFILE-DECISION fictional debate about the spare bilge pump";
+    const inboxId = await pendingUnfiled("zqx-refile-decision.md", text);
+    const [reviewBefore] = await testSql`
+      select id from review_queue
+      where kind = 'inbox_unfiled' and payload ->> 'inbox_item_id' = ${inboxId} and status = 'open'`;
+    expect(reviewBefore).toBeTruthy();
+
+    const ctx = sessionToolCtx("agent:refile-decision");
+    await requestAndApproveTier2(ctx);
+    const result = await refile(ctx, {
+      inbox_item_id: inboxId,
+      type: "decision",
+      question: "Replace the spare bilge pump now or at next haul-out?",
+      choice: "Replace now",
+    });
+    const data = expectOk(result);
+    expect(data.filed_table).toBe("decisions");
+    expect(data.resolved_review_items).toContain(reviewBefore!.id);
+
+    const [row] = await testSql`
+      select question, choice, reasoning, tier, derived_from
+      from decisions where id = ${data.filed_id}::uuid`;
+    expect(row!.question).toBe("Replace the spare bilge pump now or at next haul-out?");
+    expect(row!.choice).toBe("Replace now");
+    expect(row!.reasoning).toBe(text);
+    expect(row!.tier).toBe(1); // decisions have no owner-facing tier-2 pathway through this tool
+    expect(row!.derived_from).toBe(inboxId);
+
+    const [inboxRow] = await testSql`
+      select status, filed_table, filed_id from inbox_items where id = ${inboxId}::uuid`;
+    expect(inboxRow).toEqual({
+      status: "filed",
+      filed_table: "decisions",
+      filed_id: data.filed_id,
+    });
+
+    const [reviewAfter] = await testSql`
+      select status from review_queue where id = ${reviewBefore!.id}::uuid`;
+    expect(reviewAfter!.status).toBe("resolved");
+
+    // CLASSIFICATION_TYPE remaps the owner-facing "decision" to fileRow's internal
+    // "decision_note" — the audit payload records that internal type verbatim, not "decision".
+    const [event] = await testSql`
+      select payload from events
+      where verb = 'inbox:refiled' and entity_id = ${inboxId}::uuid`;
+    expect(event!.payload).toEqual({
+      type: "decision_note",
+      filed_table: "decisions",
+      filed_id: data.filed_id,
+    });
   });
 
   test("refiling without an active tier-2 unlock is rejected and leaves the item pending", async () => {
@@ -337,11 +449,11 @@ describe("minime_refile", () => {
     expect(error.code).toBe("BAD_INPUT");
     expect(error.message).toContain("existing open task");
 
-    // The whole attempt is one transaction (minime_refile runs inside the tool call's ambient
-    // actor transaction, so a throw here rolls back everything fileRow did too, including its
-    // own duplicate review item/event) — the item is left exactly as it was: still pending, its
-    // original classification untouched, no new task, and the pre-existing inbox_unfiled item
-    // still open and unresolved.
+    // The whole attempt is one transaction (refile.ts runs the claim/fileRow/duplicate-throw
+    // sequence inside its own independent transaction, so a throw here rolls back everything
+    // fileRow did too, including its own duplicate review item/event) — the item is left exactly
+    // as it was: still pending, its original classification untouched, no new task, and the
+    // pre-existing inbox_unfiled item still open and unresolved.
     expect(
       await testSql`select id from tasks where title = 'ZQX-REFILE-DUP fictional pier inspection'`,
     ).toHaveLength(1); // only the pre-inserted existing task, no second row
@@ -385,5 +497,49 @@ describe("minime_refile", () => {
     expect(row!.status).toBe("filed");
     expect(row!.filed_table).toBe("pages");
     expect(await testSql`select id from pages where derived_from = ${inboxId}`).toHaveLength(1);
+  });
+
+  test("a filed note and its markdown projection survive the ambient actor transaction failing to commit afterward", async () => {
+    const text = "unclear: ZQX-REFILE-DURABLE fictional log about the spare bilge pump";
+    const inboxId = await pendingUnfiled("zqx-refile-durable.md", text);
+    const ctx = sessionToolCtx("agent:refile-durable");
+    await requestAndApproveTier2(ctx);
+
+    // withActorDbSession is exactly what executeTool wraps every tool.handler call in — calling
+    // the handler directly (bypassing invokeTool/executeTool) lets this test hold that same
+    // wrapper open and force it to fail to commit AFTER the handler has already returned, the
+    // exact crash window DECISIONS.md 2026-08-06 (fenced finalization) requires refile.ts's own
+    // filing transaction to be independent of (test/capture-durability.test.ts proves the same
+    // guarantee for minime_capture's identity commit using the analogous technique).
+    let filedId = "";
+    await expect(
+      withActorDbSession(
+        ctx.actor,
+        async () => {
+          const result = await toolByName("minime_refile").handler(
+            { inbox_item_id: inboxId, type: "note", title: "Bilge pump durability note" },
+            ctx,
+          );
+          filedId = (result.data as { filed_id: string }).filed_id;
+          throw new Error("forced_outer_refile_rollback");
+        },
+        ctx.sessionId,
+      ),
+    ).rejects.toThrow("forced_outer_refile_rollback");
+
+    // The filing transaction is independent of the ambient session (see refile.ts) — it must
+    // already have committed for real, surviving the forced rollback above intact.
+    const [page] = await testSql`
+      select tier, body_md, path from pages where id = ${filedId}::uuid`;
+    expect(page).toBeTruthy();
+    const [inboxRow] = await testSql`
+      select status, filed_table, filed_id from inbox_items where id = ${inboxId}::uuid`;
+    expect(inboxRow).toEqual({ status: "filed", filed_table: "pages", filed_id: filedId });
+
+    // The markdown mirror publishes only after that independent commit, so it is on disk too —
+    // proof it was never written from inside a transaction the rollback above could have undone.
+    const projected = await readFile(join(config.dataDir, "brain", String(page!.path)), "utf8");
+    expect(projected).toBe(page!.body_md);
+    expect(projected).toContain("ZQX-REFILE-DURABLE");
   });
 });
