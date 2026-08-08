@@ -499,13 +499,16 @@ function correctRetract(input: {
 }
 
 // retier only ever promotes a note (page) from tier 1 to tier 2 — to_tier is fixed, never a
-// caller-supplied value, so the payload itself proves the up-only invariant it audits.
-function correctRetier(input: { id: string; fromTier: 1 | 2 }): AuditPayload {
+// caller-supplied value, so the payload itself proves the up-only invariant it audits. reason is
+// optional like correctAmend/correctRetract's — minime_correct's schema and docstring accept it
+// for every action, not just amend/retract.
+function correctRetier(input: { id: string; fromTier: 1 | 2; reason?: string }): AuditPayload {
   return construct("correctRetier", {
     type: "note",
     id: uuid(input.id),
     from_tier: routeTier(input.fromTier),
     to_tier: 2,
+    ...(input.reason !== undefined ? { reason: correctionReason(input.reason) } : {}),
   });
 }
 

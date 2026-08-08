@@ -277,7 +277,11 @@ async function handleRetier(params: Record<string, any>, ctx: ToolCtx): Promise<
   await logEvent({
     actor: ctx.actor,
     verb: "correct:retier",
-    payload: auditPayload.correctRetier({ id: params.id, fromTier }),
+    payload: auditPayload.correctRetier({
+      id: params.id,
+      fromTier,
+      ...(params.reason !== undefined ? { reason: params.reason } : {}),
+    }),
   });
 
   return envelope({ action: "retier" as const, superseded_id: params.id as string }, [

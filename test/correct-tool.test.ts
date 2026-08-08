@@ -335,8 +335,15 @@ describe("minime_correct", () => {
       insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, tier)
       values ('page', ${page.id}, 'mentions', 'person', ${dstId}::uuid, 'pages', ${page.id}, 1)`;
 
+    const [marker] = await testSql`select coalesce(max(id), 0)::bigint as id from events`;
     const data = expectOk(
-      await correct(ctx, { type: "note", action: "retier", id: page.id, to_tier: 2 }),
+      await correct(ctx, {
+        type: "note",
+        action: "retier",
+        id: page.id,
+        to_tier: 2,
+        reason: "misclassified as tier 1 originally",
+      }),
     );
     expect(data).toEqual({ action: "retier", superseded_id: page.id });
 
@@ -348,6 +355,17 @@ describe("minime_correct", () => {
     const [edgeRow] = await testSql`
       select tier from edges where src_type = 'page' and src_id = ${page.id}::uuid`;
     expect(edgeRow!.tier).toBe(2);
+
+    // reason is audited on retier too — the tool's schema/docstring accept it for every action,
+    // not just amend/retract (W2-4 review finding).
+    const retierEvent = await eventPayload("correct:retier", marker!.id);
+    expect(retierEvent!.payload).toEqual({
+      type: "note",
+      id: page.id,
+      from_tier: 1,
+      to_tier: 2,
+      reason: "misclassified as tier 1 originally",
+    });
 
     // up-only: an explicit request to move to tier 1 is refused, not silently ignored.
     const error = expectErr(
