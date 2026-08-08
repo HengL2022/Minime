@@ -368,6 +368,9 @@ describe("expandOccurrences (pure, src/importers/rrule.ts)", () => {
     ["both COUNT and UNTIL", "FREQ=DAILY;COUNT=3;UNTIL=20260105T000000Z"],
     ["empty value", ""],
     ["UNTIL before DTSTART", "FREQ=DAILY;UNTIL=20251231T000000Z"],
+    ["UNTIL with an out-of-range month/day (bare DATE)", "FREQ=DAILY;UNTIL=20261332"],
+    ["UNTIL with an out-of-range month/day (DATE-TIME)", "FREQ=DAILY;UNTIL=20261332T000000Z"],
+    ["UNTIL day exceeds the target month's real length", "FREQ=DAILY;UNTIL=20260230"], // Feb 30
   ])("unsupported RRULE part (%s) degrades to [DTSTART] with unsupported:true", (_label, rrule) => {
     const result = expandOccurrences(
       utcStart(1),

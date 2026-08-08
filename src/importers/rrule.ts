@@ -70,6 +70,14 @@ function daysInMonth(year: number, month: number): number {
   return [4, 6, 9, 11].includes(month) ? 30 : 31;
 }
 
+// A regex can only guarantee digit *counts* (e.g. UNTIL's "\d{2}" month), not calendar validity --
+// a syntactically well-formed UNTIL=20261332 (month 13, day 32) must still be rejected the same
+// way assertDateTimeParts (src/util/clock.ts) rejects it for DTSTART/DTEND/RDATE/EXDATE, or it
+// silently sorts above every real candidate and the "bound" never actually bounds anything.
+function isValidCalendarDate(year: number, month: number, day: number): boolean {
+  return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth(year, month);
+}
+
 interface Ymd {
   year: number;
   month: number;
@@ -146,22 +154,30 @@ function parseUntil(value: string): UntilBound | null {
   const dateMatch = value.match(/^(\d{4})(\d{2})(\d{2})$/);
   if (dateMatch) {
     const [, y, m, d] = dateMatch;
-    return { kind: "date", ymd: { year: +y!, month: +m!, day: +d! }, instant: new Date(0) };
+    const year = +y!;
+    const month = +m!;
+    const day = +d!;
+    if (!isValidCalendarDate(year, month, day)) return null;
+    return { kind: "date", ymd: { year, month, day }, instant: new Date(0) };
   }
   // A DATE-TIME UNTIL must be UTC ("Z") per RFC 5545; a floating or TZID'd UNTIL has no
   // unambiguous meaning here, so it is treated the same as any other malformed RRULE part.
   const dateTimeMatch = value.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/);
   if (!dateTimeMatch) return null;
   const [, y, m, d, h, mi, s] = dateTimeMatch;
-  const ymd = { year: +y!, month: +m!, day: +d! };
+  const year = +y!;
+  const month = +m!;
+  const day = +d!;
   const hour = +h!;
   const minute = +mi!;
   const second = +s!;
-  if (hour > 23 || minute > 59 || second > 59) return null;
+  if (!isValidCalendarDate(year, month, day) || hour > 23 || minute > 59 || second > 59) {
+    return null;
+  }
   return {
     kind: "instant",
-    ymd,
-    instant: new Date(Date.UTC(ymd.year, ymd.month - 1, ymd.day, hour, minute, second)),
+    ymd: { year, month, day },
+    instant: new Date(Date.UTC(year, month - 1, day, hour, minute, second)),
   };
 }
 
