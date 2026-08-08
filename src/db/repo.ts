@@ -2725,14 +2725,21 @@ export interface MaintenanceLockHandle {
 /** Non-blocking: resolves a handle when the caller becomes the maintenance owner, else null. */
 export async function tryAcquireMaintenanceLock(): Promise<MaintenanceLockHandle | null> {
   const reservation = await reserveDb();
-  const [row] = (await reservation.executor`
-    select pg_try_advisory_lock(${MAINTENANCE_LOCK_KEY[0]}, ${MAINTENANCE_LOCK_KEY[1]}) as locked
-  `) as { locked: boolean }[];
-  if (!row?.locked) {
+  // The query runs on a reservation the caller doesn't own yet (unlike withReservedDb's
+  // single-call try/finally, this reservation is meant to outlive the function on success), so a
+  // throw here needs its own release-before-rethrow -- otherwise a mid-query failure (Postgres
+  // restart, backend termination) leaks the reservation forever and eventually starves the pool.
+  try {
+    const [row] = (await reservation.executor`
+      select pg_try_advisory_lock(${MAINTENANCE_LOCK_KEY[0]}, ${MAINTENANCE_LOCK_KEY[1]}) as locked
+    `) as { locked: boolean }[];
+    if (row?.locked) return { reservation };
+  } catch (error) {
     await reservation.release();
-    return null;
+    throw error;
   }
-  return { reservation };
+  await reservation.release();
+  return null;
 }
 
 /** Release a handle from tryAcquireMaintenanceLock() and return its connection to the pool. */
