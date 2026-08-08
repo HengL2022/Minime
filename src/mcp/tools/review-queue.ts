@@ -4,6 +4,7 @@ import {
   allowedTier,
   edgeVisibleAtTier,
   getInboxItem,
+  getRow,
   openReviewItems,
   parentMeta,
   resolveReviewItem,
@@ -25,6 +26,12 @@ const HIDDEN = "[above current tier]";
 // Distinct from HIDDEN: the tier check passed but the archived bytes could not be proven
 // authentic (missing file, hash mismatch). Never fabricate text in that case.
 const CAPTURE_UNAVAILABLE = "[archive unavailable]";
+// Distinct from HIDDEN: the tier check passed but the target row itself was withdrawn
+// (minime_correct retraction, W2-4). parentMeta (repo.ts) now excludes retracted rows for every
+// caller, not just hybridSearch, so a retracted-but-tier-visible target also misses parentMeta —
+// see visibleTitle, which tells the two miss reasons apart so this never reports a false tier
+// claim (that could prompt an unneeded owner tier-2-unlock) for a row the caller can fully see.
+const RETRACTED = "[retracted]";
 const OMITTED_KEYS = new Set(["classifier", "classifier_output", "raw_path"]);
 const CONTENT_KEYS = new Set([
   "body",
@@ -55,13 +62,22 @@ function maskContentKeys(value: unknown): unknown {
 
 async function visibleTitle(type: ParentType, id: string, actor: string): Promise<string | null> {
   const meta = await parentMeta(type, [id], actor);
-  return meta.get(id)?.title ?? null;
+  const hit = meta.get(id);
+  if (hit) return hit.title;
+  // parentMeta misses for two reasons: the row is above the caller's tier, or it's retracted
+  // (superseded_at set, superseded_by null — the only extra condition parentMeta excludes beyond
+  // the tier predicate, repo.ts:702-714). getRow applies the same tier bound WITHOUT the
+  // retraction filter, so a hit here proves tier was never the issue — report RETRACTED, not
+  // HIDDEN. A miss on both means genuinely above tier (or the id doesn't exist), unchanged from
+  // before this distinction existed.
+  const row = await getRow(type, id, actor);
+  return row ? RETRACTED : null;
 }
 
 // extract_suspect endpoints ({type, id, name}) carry names the dream job captured in system
 // context (no tier predicate). Even when the edge itself is visible, re-resolve each name
-// through the tier-filtered parentMeta so e.g. a tier-2 person's name never rides a tier-1
-// edge — anything parentMeta won't return at the caller's tier comes back masked.
+// through the tier-filtered parentMeta (via visibleTitle) so e.g. a tier-2 person's name never
+// rides a tier-1 edge, and a retracted endpoint reads RETRACTED rather than a false HIDDEN.
 async function visibleEndpoint(ep: any, actor: string): Promise<any> {
   if (!ep || typeof ep !== "object" || ep.name == null) return ep;
   if (ep.type !== "person" && ep.type !== "org") return ep; // page/etc. srcs store no name
@@ -74,8 +90,9 @@ function maskEndpointName(ep: any): any {
 }
 
 // Stale payloads carry a label captured at dream time, which may title a row that is
-// above the caller's current tier — re-resolve through the tier-filtered parentMeta and
-// mask what the caller may not see (row IDs are fine, titles are not).
+// above the caller's current tier — re-resolve through visibleTitle and mask what the caller
+// may not see (row IDs are fine, titles are not); a retracted-but-visible target reads
+// RETRACTED instead, since that isn't a tier problem.
 async function maskReviewPayload(item: any, actor: string): Promise<any> {
   let payload = maskContentKeys(item.payload ?? {}) as Record<string, unknown>;
 
@@ -105,7 +122,8 @@ async function maskReviewPayload(item: any, actor: string): Promise<any> {
   }
 
   // Phantom-person payloads store canonical_name captured at dream time (system context) —
-  // re-resolve through the tier-filtered parentMeta so a tier-2 person stays masked.
+  // re-resolve through visibleTitle so a tier-2 person stays masked (a retracted-but-visible
+  // person reads RETRACTED instead).
   if (item.kind === "phantom_person" && typeof item.payload?.person_id === "string") {
     try {
       payload = {

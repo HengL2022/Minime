@@ -80,6 +80,63 @@ describe("superseded rows: labeled and down-weighted in search", () => {
     expect(successorHit.superseded_by).toBeUndefined();
   });
 
+  // The hybridSearch test above exercises the ranking/Hit side directly; this one goes through
+  // the actual minime_search tool boundary (search.ts's `hits.map(...)` SourceRef stamping) so a
+  // future refactor that drops the `...(h.superseded ? { superseded: true } : {})` spread would
+  // fail a test instead of shipping silently.
+  test("minime_search stamps sources[].superseded through the real tool call path", async () => {
+    const ctx = sessionToolCtx("agent:superseded-search-tool");
+    const title = "Fictional orca pod tracking log";
+    const body =
+      "# Fictional orca pod tracking log\n\nFictional orcas ZQXORCA pass the strait every " +
+      "autumn. Tracking notes on orca pod movement and sightings.";
+
+    const original = await upsertPage({
+      path: "test/superseded-search-tool-original.md",
+      title,
+      bodyMd: body,
+      contentHash: "superseded-search-tool-original-h1",
+      createdBy: "human",
+      source: "manual",
+    });
+    await indexParent("page", original.id, body, title, 1);
+
+    const successor = await upsertPage({
+      path: "test/superseded-search-tool-successor.md",
+      title,
+      bodyMd: body,
+      contentHash: "superseded-search-tool-successor-h1",
+      createdBy: "human",
+      source: "correction",
+      derivedFrom: original.id,
+      supersedesId: original.id,
+    });
+    await indexParent("page", successor.id, body, title, 1);
+    await supersedeRow("page", original.id, successor.id);
+
+    const envelope = expectOk(
+      await invokeTool(
+        toolByName("minime_search"),
+        { query: "ZQXORCA pod tracking log", limit: 20 },
+        ctx,
+      ),
+    );
+
+    const hits = envelope.data.hits as any[];
+    const originalHit = hits.find((h) => h.id === original.id);
+    const successorHit = hits.find((h) => h.id === successor.id);
+    expect(originalHit?.superseded).toBe(true);
+    expect(successorHit?.superseded).toBe(false);
+
+    const originalSource = envelope.sources.find((s) => s.id === original.id);
+    const successorSource = envelope.sources.find((s) => s.id === successor.id);
+    expect(originalSource?.superseded).toBe(true);
+    // Unflagged hits keep their source refs unchanged — no `superseded` key at all (spec: agents
+    // should cite the successor instead, so the field is stamped only when true).
+    expect(successorSource).toBeDefined();
+    expect(Object.hasOwn(successorSource!, "superseded")).toBe(false);
+  });
+
   test("get_context on a superseded row includes the pointer gap and provenance.superseded_by", async () => {
     const ctx = sessionToolCtx("agent:superseded-search-context");
     const title = "Fictional superseded context original";

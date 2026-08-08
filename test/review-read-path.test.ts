@@ -8,6 +8,7 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { reviewQueueSummaries } from "../src/cli";
+import { retractRow } from "../src/db/repo";
 import { toolByName } from "../src/mcp/tools";
 import { invokeTool } from "../src/mcp/tools/registry";
 import { processInboxFile } from "../src/pipeline/watcher";
@@ -16,6 +17,7 @@ import { resetDb, testSql } from "./helpers";
 import { requestAndApproveTier2, sessionToolCtx } from "./support/unlock";
 
 const HIDDEN = "[above current tier]";
+const RETRACTED = "[retracted]";
 const inboxDir = join(config.dataDir, "inbox");
 
 beforeAll(async () => {
@@ -133,6 +135,37 @@ describe("minime_review_queue: enriched inbox_unfiled/duplicate read path", () =
       (i: any) => i.payload?.inbox_item_id === inboxId,
     );
     expect(unlockedItem.payload.capture.text).toBe(text);
+  });
+
+  // W2-5 regression: parentMeta (repo.ts) now excludes retracted rows for every caller, not just
+  // hybridSearch. Before that change, a parentMeta miss for existing_title could only mean
+  // "above current tier". A retracted-but-tier-1 target must not ride that same false claim —
+  // it would read as a tier problem and could prompt an unneeded owner tier-2-unlock approval.
+  test("a retracted duplicate target reads [retracted], not the false '[above current tier]' claim", async () => {
+    const [existing] = await testSql`
+      insert into tasks (title, status, tier)
+      values ('ZQX-REVIEW-READ-PATH-RETRACTED fictional calibration run', 'active', 1)
+      returning id`;
+    const text = "todo: ZQX-REVIEW-READ-PATH-RETRACTED fictional calibration run";
+    const path = join(inboxDir, "zqx-review-read-path-retracted.md");
+    await Bun.write(path, text);
+    const { inboxId, filed } = await processInboxFile(path);
+    expect(filed).toBe(false); // routed to review as a likely duplicate, not filed
+
+    await retractRow("task", existing!.id);
+
+    const result = await invokeTool(
+      toolByName("minime_review_queue"),
+      { action: "list", kind: "duplicate" },
+      sessionToolCtx("agent:review-read-path-retracted"),
+    );
+    if (!result.ok) throw new Error(result.error.message);
+    const item = (result.envelope.data as any).items.find(
+      (i: any) => i.payload?.inbox_item_id === inboxId,
+    );
+    expect(item.payload.existing_task_id).toBe(existing!.id);
+    expect(item.payload.existing_title).toBe(RETRACTED);
+    expect(item.payload.existing_title).not.toBe(HIDDEN);
   });
 
   test("a legacy item with no matching inbox row is untouched (no crash, no capture field)", async () => {
