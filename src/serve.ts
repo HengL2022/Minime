@@ -3,7 +3,10 @@ import { Cron } from "croner";
 import { withAdminDbScope } from "./db/client";
 import {
   type MaintenanceLockHandle,
+  insertReviewItem,
   lastEventAt,
+  openReviewItems,
+  recentEventsByVerb,
   releaseMaintenanceLock,
   tryAcquireMaintenanceLock,
 } from "./db/repo";
@@ -282,6 +285,31 @@ async function scheduleDreamCatchUp(
   );
 }
 
+// Persistent-failure detector (W3-7): after each dream run, look at the last 3 dream:summary
+// events (this run plus the two before it). Only when all 3 failed at least one step AND no
+// ops_failure item is already open does this enqueue one -- one bad night never pages the owner,
+// but three in a row (a real, not transient, problem) does exactly once, and it stays quiet while
+// that item is open (no re-flag storm on every subsequent failing night). failed_steps/since are
+// fixed dream-step identifiers and a timestamp, never prose (see audit-payload.ts's dreamSummary).
+// Exported so tests can seed events directly and call this without running a real dream().
+export async function flagPersistentDreamFailure(): Promise<void> {
+  const recent = await recentEventsByVerb("dream:summary", 3);
+  if (recent.length < 3) return;
+  const failedSteps = recent.map((event) =>
+    Array.isArray(event.payload?.failed_steps)
+      ? (event.payload.failed_steps as unknown[]).filter(
+          (step): step is string => typeof step === "string",
+        )
+      : [],
+  );
+  if (failedSteps.some((steps) => steps.length === 0)) return; // at least one clean run in the window
+  if ((await openReviewItems("ops_failure")).length > 0) return; // already flagged and still open
+  await insertReviewItem("ops_failure", {
+    failed_steps: failedSteps[0],
+    since: recent[recent.length - 1]!.at,
+  });
+}
+
 async function beginOwnedMaintenance(
   createCron: MaintenanceCronFactory,
   crons: MaintenanceCron[],
@@ -342,7 +370,14 @@ export async function startOwnerMaintenanceSchedule(
     void task.finally(() => active.delete(task));
   };
 
-  const runDream = () => run("dream", () => withAdminDbScope(() => dream()));
+  const runDream = () =>
+    run("dream", () =>
+      withAdminDbScope(async () => {
+        const summary = await dream();
+        await flagPersistentDreamFailure();
+        return summary;
+      }),
+    );
 
   const attemptTakeover = async (): Promise<void> => {
     // Also the runtime pool, not admin scope -- see scheduleDreamCatchUp above.

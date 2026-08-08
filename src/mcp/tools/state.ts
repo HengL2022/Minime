@@ -5,7 +5,7 @@ import type { ToolDef } from "./registry";
 export const stateTool: ToolDef = {
   name: "minime_state",
   description:
-    "Snapshot of now: today/tomorrow calendar, due tasks, tasks moved (closed) today, captures filed today (type/confidence/title/tier), open commitments, decision reviews due, review-queue count, metric anomalies (from rollups only).",
+    "Snapshot of now: today/tomorrow calendar, due tasks, tasks moved (closed) today, captures filed today (type/confidence/title/tier), open commitments, decision reviews due, review-queue count, metric anomalies (from rollups only), and ops_health (nightly maintenance status: dream_last_at, failed_steps, ops_failure_open — content-free, same for every actor).",
   schema: {},
   handler: async (_params, ctx) => {
     const s = await stateSnapshot(ctx.actor, ctx.timeZone);

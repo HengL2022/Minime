@@ -467,7 +467,12 @@ describe("resident serve authority split", () => {
     expect(runtimeBlock).not.toContain("dream(");
     expect(serve).toContain("startOwnerMaintenanceSchedule");
     expect(serve).toContain('"--no-env-file"');
-    expect(serve).toContain('run("dream", () => withAdminDbScope(() => dream()))');
+    // W3-7: dream() still runs under admin scope inside the "dream"-labeled run() wrapper: the
+    // wrapper now also checks for a persistent (3-consecutive-night) failure in the same scope.
+    expect(serve).toContain('run("dream", () =>');
+    expect(serve).toContain("withAdminDbScope(async () => {");
+    expect(serve).toContain("const summary = await dream();");
+    expect(serve).toContain("await flagPersistentDreamFailure();");
     expect(serve).toContain('run("db snapshot", dbSnapshot)');
   });
 });

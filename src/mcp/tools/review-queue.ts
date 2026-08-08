@@ -21,6 +21,7 @@ const KINDS = [
   "inbox_unfiled",
   "phantom_person",
   "extract_suspect",
+  "ops_failure",
 ] as const;
 const HIDDEN = "[above current tier]";
 // Distinct from HIDDEN: the tier check passed but the archived bytes could not be proven
@@ -212,7 +213,7 @@ async function maskStaleLabel(item: any, actor: string): Promise<any> {
 export const reviewQueueTool: ToolDef = {
   name: "minime_review_queue",
   description:
-    "List open review-queue items (contradiction | stale | duplicate | decision_review | inbox_unfiled | phantom_person | extract_suspect), or resolve one as 'resolved' | 'dismissed'. inbox_unfiled/duplicate items carry the classifier's type/confidence guess (always visible) under payload.capture; its reason and a ~500-char capture text excerpt require an approved tier-2 unlock (minime_unlock) and read '[above current tier]' until then. The queue is flag-only: resolving never edits the flagged rows themselves.",
+    "List open review-queue items (contradiction | stale | duplicate | decision_review | inbox_unfiled | phantom_person | extract_suspect | ops_failure), or resolve one as 'resolved' | 'dismissed'. inbox_unfiled/duplicate items carry the classifier's type/confidence guess (always visible) under payload.capture; its reason and a ~500-char capture text excerpt require an approved tier-2 unlock (minime_unlock) and read '[above current tier]' until then. ops_failure carries only fixed dream-step identifiers and a timestamp (payload.failed_steps, payload.since) — always visible, no unlock needed; run `bun run src/cli.ts doctor` locally for the full maintenance checklist. The queue is flag-only: resolving never edits the flagged rows themselves.",
   schema: {
     action: z.enum(["list", "resolve"]).default("list"),
     kind: z.enum(KINDS).optional(),

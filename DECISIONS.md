@@ -2936,3 +2936,59 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   ever needed one connection at a time) verified against the full H1 compiled-notes regression
   suite; it is flagged for a follow-up session to review whether the deeper nested-lease pattern
   itself (not just the pool ceiling) warrants a more principled fix.
+
+## 2026-08-09 — minime doctor CLI + ops_health + ops_failure review kind
+
+- **Context:** Livability-program task W3-7. Nightly `dream()` runs (W3-5's maintenance lock) had
+  no owner-visible health signal: a database whose maintenance had silently broken for days looked
+  identical, from `minime_state`, to one running cleanly — the only way to know was to read the
+  `events` table directly.
+- **Decision:** `db/migrations/033_ops_failure_kind.sql` recreates `review_queue`'s kind
+  constraint (the strict superset of every kind `017_edge_validation.sql` listed — the latest
+  prior recreation; nothing between 017 and this migration touched it) adding `ops_failure`.
+  `util/audit-payload.ts`'s `dreamSummary` payload gains `failed_steps: string[]`, filtered from
+  the fixed `DREAM_STEPS` step-identifier list by KEY, never by a step's VALUE — so even if a
+  future bug put free text in a step's stored result, only its fixed identifier can ever cross
+  into the audit trail (dream.ts's own `step()` wrapper already collapses every failure to the
+  literal string `"failed"`, discarding the real error; this filter is defense in depth on top of
+  that). `repo.ts` adds `recentEventsByVerb(verb, limit)` (newest-first, bounded) and
+  `opsHealth()` — the last `dream:summary` event's `dream_last_at`/`failed_steps` plus the open
+  `ops_failure` count. `opsHealth()` takes no actor and is deliberately NOT tier-gated: none of it
+  is personal content, so it is identical for every actor/session regardless of tier (a narrower
+  read than the spec sketch's `opsHealth(actor)`, adopted because the acceptance bar is literally
+  "no tier leak — facts are content-free" and there is no tier-shaped fact to gate). `stateSnapshot`
+  folds `opsHealth()` into a new `ops_health` field; `minime_state`'s description documents it.
+  `serve.ts`'s maintenance scheduler now calls `flagPersistentDreamFailure()` after every `dream()`
+  run, inside the same `withAdminDbScope`: it inspects the last 3 `dream:summary` events, and only
+  when all 3 have at least one failed step AND no `ops_failure` item is already open does it
+  enqueue one (payload: `failed_steps` from the most recent of the 3, `since` the oldest's
+  timestamp) — one bad night never pages the owner, three in a row does, exactly once, and the
+  item stays open (a later clean run does not auto-resolve it) until a human resolves it.
+  `minime_review_queue` adds `ops_failure` to its kind enum; its payload has no `CONTENT_KEYS` so
+  it renders unmasked with no tier-2 unlock needed, matching its "system health, not owner data"
+  framing. New `src/ops/doctor.ts` (`bun run src/cli.ts doctor`, wired into `cli.ts` BEFORE the
+  `ollamaPreflight` gate, like `backup:pre-update`, so it can report Ollama being down as one line
+  among several instead of dying before printing anything) runs 7 independent, individually
+  try/catch-wrapped checks — Postgres connectivity, Ollama reachability (non-fatal; skips the real
+  network call under `MINIME_MOCK_OLLAMA` unless a test injects a probe), dream
+  freshness/failures/persistent-failure (folded into one worst-first line from `opsHealth()`),
+  backup-dump freshness (`db-dump/minime.sql` mtime + `minime.manifest.json` presence — backup
+  writes no audit verb today, so file mtime is the honest freshness signal), maintenance-lock
+  holder presence (new `repo.maintenanceLockHeld()`, a read-only `pg_locks` query against the
+  existing W3-5 advisory-lock key `(1296649541, 2)`), and disk headroom for `data/` and `db-dump/`
+  separately (`node:fs.statfsSync`, injectable via `DoctorProbes` for tests) — and exits nonzero
+  only when Postgres is unreachable, dream has never run or is stale past 48h, an `ops_failure`
+  item is open, or a disk is critically low (<3% free); every other problem prints `WARN` without
+  forcing a nonzero exit (backups being off is a legitimate, common configuration choice per
+  GUIDE.md, so a missing/stale dump is never fatal on its own). No check ever prints a secret,
+  URL, DSN, path, or raw child/error output — only fixed labels and counts.
+- **Why:** This is the kind of tiered-egress/public-interface boundary this file exists to pin
+  down. `failed_steps` is a narrow, deliberate exception to "dream step results never leave the
+  audit boundary as free text," justified only because it is drawn from a fixed, closed vocabulary
+  of code identifiers and filtered by key, never by a step's actual (possibly-arbitrary) stored
+  value. Making `ops_health` identical for every actor/tier, rather than gating it, is itself a
+  small, explicit privacy-boundary decision: operational facts about the maintenance pipeline are
+  not "the owner's data" in the I3 sense and gain nothing from being hidden behind a tier-2 unlock.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W3 workstream,
+  matching the approval cover already used for the other W3 entries above.

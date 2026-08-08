@@ -252,6 +252,7 @@ describe("audit payload boundary", () => {
       status: "partial_failure",
       error_code: "dream_step_failed",
       failed_step_count: 1,
+      failed_steps: ["2_entity_link"],
       embed_backlog_count: 3,
       entity_link_count: 0,
       note_candidate_count: 2,

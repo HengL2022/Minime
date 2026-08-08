@@ -555,6 +555,13 @@ export async function lastEventAt(verb?: string): Promise<Date | null> {
   return at ? new Date(at) : null;
 }
 
+// Newest-first, bounded. Used by opsHealth (last dream:summary) and serve.ts's persistent-failure
+// detector (last 3 dream:summary events) -- both read-only, content-free (payload shapes crossing
+// this are audit-payload.ts's fixed-vocabulary constructors, e.g. dreamSummary's failed_steps).
+export async function recentEventsByVerb(verb: string, limit: number): Promise<any[]> {
+  return db()`select at, payload from events where verb = ${verb} order by at desc limit ${limit}`;
+}
+
 // ---------------------------------------------------------------- chunks & search
 
 export async function replaceChunks(
@@ -2752,6 +2759,19 @@ export async function releaseMaintenanceLock(handle: MaintenanceLockHandle): Pro
   }
 }
 
+// `minime doctor` (W3-7): true when SOME process (any backend, not necessarily the caller) holds
+// the maintenance lock right now -- pg_locks is a system view, readable regardless of who granted
+// it, so this answers "is anything currently scheduled to run dream/backup" without taking or
+// releasing the lock itself.
+export async function maintenanceLockHeld(): Promise<boolean> {
+  const rows = await db()`
+    select 1 from pg_locks
+    where locktype = 'advisory' and granted
+      and classid = ${MAINTENANCE_LOCK_KEY[0]} and objid = ${MAINTENANCE_LOCK_KEY[1]}
+    limit 1`;
+  return rows.length > 0;
+}
+
 export async function listActivePages(actor?: AccessActor): Promise<any[]> {
   const allowed = await allowedTier(actor);
   return db()`select id, path, title, content_hash, tier from pages
@@ -3340,6 +3360,31 @@ async function resolveFiledToday(
   });
 }
 
+export interface OpsHealth {
+  dream_last_at: Date | null;
+  failed_steps: string[];
+  ops_failure_open: number;
+}
+
+// Content-free operational facts for minime_state's ops_health block and `minime doctor`
+// (W3-7): the last dream:summary run and its failed step names (fixed identifiers only --
+// see audit-payload.ts's dreamSummary/DREAM_STEPS), plus how many ops_failure review items are
+// currently open. Deliberately not tier-gated: none of this is personal content, so it is
+// identical for every actor/tier -- unlike the rest of stateSnapshot, which allowedTier()-filters
+// calendar/tasks/etc.
+export async function opsHealth(): Promise<OpsHealth> {
+  const [[latest], openFailures] = await Promise.all([
+    recentEventsByVerb("dream:summary", 1),
+    openReviewItems("ops_failure"),
+  ]);
+  const steps = latest?.payload?.failed_steps;
+  return {
+    dream_last_at: latest ? new Date(latest.at) : null,
+    failed_steps: Array.isArray(steps) ? steps.filter((s: unknown) => typeof s === "string") : [],
+    ops_failure_open: openFailures.length,
+  };
+}
+
 export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Promise<any> {
   const t = now();
   const ownerTimeZone = configuredTimeZone(config.tz);
@@ -3364,6 +3409,7 @@ export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Pro
     anomalies,
     movedToday,
     filedTodayRaw,
+    opsHealthResult,
   ] = await Promise.all([
     db()`select id, uid, starts_at, ends_at, title, location from calendar_events
         where starts_at >= ${t}::timestamptz - interval '1 hour'
@@ -3405,6 +3451,7 @@ export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Pro
           and (updated_at at time zone ${effectiveTimeZone})::date = ${today}::date
           and tier >= 1 and tier <= ${allowed}
         order by updated_at`,
+    opsHealth(),
   ]);
   const filedToday = await resolveFiledToday(filedTodayRaw as unknown as FiledTodayRow[], actor);
   return {
@@ -3416,6 +3463,7 @@ export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Pro
     decision_reviews_due: decisionsDue,
     review_queue_open: openReview[0]?.n ?? 0,
     metric_anomalies: anomalies,
+    ops_health: opsHealthResult,
   };
 }
 

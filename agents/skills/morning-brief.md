@@ -7,8 +7,8 @@ decision reminders over generic summaries.
 ## Tools to call
 
 1. `minime_state` — always. Calendar, tasks due, open commitments, decision
-   reviews due, review-queue count, metric anomalies. This is today-anchored (due <= today)
-   and cannot see forward on its own.
+   reviews due, review-queue count, metric anomalies, ops_health (nightly maintenance status).
+   This is today-anchored (due <= today) and cannot see forward on its own.
 2. `minime_agenda` — always. Forward-looking window, default today..+7 days, for "Coming up
    this week" — `minime_state` alone cannot warn about a Friday deadline before Friday. Pass
    `include_undated:true` to also get open tasks with no due date back in a separate
@@ -46,7 +46,11 @@ A brief, in this order:
 6. **Anomalies** — metric anomalies from the snapshot, stated neutrally
    ("sleep 2σ below trailing 28-day mean").
 7. **Review queue** — just the open count, one line.
-8. **Suggested focus** — 1–3 concrete focus areas grounded in the above. If
+8. **Maintenance** — one line from `ops_health`: last night's dream run and whether it's
+   current (e.g. "maintenance: ran 6h ago, no issues" / "maintenance: ran 6h ago, 2 steps
+   failed" / "maintenance: hasn't run in 51h"). If `ops_failure_open` is nonzero, add that a
+   persistent failure is open and `bun run src/cli.ts doctor` (local, owner-run) has the detail.
+9. **Suggested focus** — 1–3 concrete focus areas grounded in the above. If
    nothing is urgent, say so plainly, then suggest focus areas from stored context.
 
 ## Answer rules

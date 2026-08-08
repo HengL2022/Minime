@@ -9,6 +9,15 @@ auto-resolve).
 1. `minime_review_queue` (action `list`) — group items by `kind`, lead with the count:
    "6 open: 3 unfiled captures, 2 contradictions, 1 stale page."
 2. Work one kind at a time, one item per question:
+   - **ops_failure** — the last 3 consecutive nightly `dream` runs each failed at least one
+     step (payload: `failed_steps`, fixed step identifiers like `3_contradictions`, never
+     prose; `since`, when the run of failures started) — a signal about the maintenance
+     pipeline itself, not owner data, and always visible (no unlock needed). Tell the owner
+     nightly maintenance has been failing and point them at `bun run src/cli.ts doctor`
+     (local, owner-run) for the full checklist: Postgres/Ollama reachability, dump freshness,
+     maintenance-owner presence, disk headroom. This never auto-resolves — a following clean
+     `dream` run does not close it — so resolve it yourself only after the owner confirms the
+     underlying problem is actually fixed.
    - **inbox_unfiled** — the queue item always carries the classifier's `type`/`confidence`
      guess under `payload.capture` (e.g. "note, 0.62"); its `reason` and a ~500-char text
      excerpt read `[above current tier]` until this session has an approved tier-2 unlock.
@@ -74,8 +83,9 @@ auto-resolve).
 
 ## Answer rules
 
-- Triage order: unfiled (quick wins) → decision reviews (time-sensitive) → contradictions →
-  stale. Offer to stop after 5 minutes; report what remains.
+- Triage order: ops_failure (the pipeline producing every other flag may itself be broken) →
+  unfiled (quick wins) → decision reviews (time-sensitive) → contradictions → stale. Offer to
+  stop after 5 minutes; report what remains.
 - Resolving a flag (`minime_review_queue` action `resolve`) never by itself touches the flagged
   rows. Changing content is always a separate, explicit, owner-approved write —
   `minime_correct`, a type's own write tool, or an owner-run repair script. The `events` audit

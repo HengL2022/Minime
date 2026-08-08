@@ -17,6 +17,7 @@ import { importHealth } from "./importers/health";
 import { type TxProfile, importTransactions } from "./importers/transactions";
 import { validateProviderRoutes } from "./llm";
 import { startMcpServer } from "./mcp/server";
+import { type DoctorCheck, runDoctorChecks } from "./ops/doctor";
 import { dbSnapshot, preUpdateSnapshot } from "./pipeline/backup";
 import { brainSync } from "./pipeline/brain-sync";
 import { dream } from "./pipeline/dream";
@@ -42,6 +43,7 @@ const USAGE = `minime <command>
   reembed                          wipe + re-embed all chunks (after switching embed provider/model)
   onboard                          first-run interview: seed your values, goals, people, projects
   dream                            run the nightly maintenance job once
+  doctor                           print a content-free maintenance/ops health checklist
   backup                           take a tagged db snapshot now (pg_dump -> restic db-snap)
   backup:pre-update                take the fail-closed pre-update db snapshot
   unlock:approve <request-id>      approve one pending tier-2 request for its MCP connection
@@ -58,6 +60,10 @@ const USAGE = `minime <command>
 function arg(flag: string): string | undefined {
   const i = process.argv.indexOf(flag);
   return i >= 0 ? process.argv[i + 1] : undefined;
+}
+
+function formatDoctorCheck(check: DoctorCheck): string {
+  return `${check.status.padEnd(4)}  ${check.name}${check.detail ? ` — ${check.detail}` : ""}`;
 }
 
 /** Resident MCP must always use a distinct restricted app DSN, never owner fallback. */
@@ -172,6 +178,13 @@ async function main(): Promise<number> {
     if (outcome.kind === "taken") return 0;
     if (outcome.kind === "unconfigured") return 3;
     return 1;
+  }
+  // Ahead of the ollamaPreflight gate below (like backup:pre-update): doctor must be able to
+  // REPORT Ollama being unreachable as one line among several, not die before printing anything.
+  if (cmd === "doctor") {
+    const { checks, exitCode } = await runDoctorChecks();
+    for (const check of checks) console.log(formatDoctorCheck(check));
+    return exitCode;
   }
   if (cmd === "unlock:approve") {
     const requestArg = process.argv[3];

@@ -229,7 +229,12 @@ local audit boundary only; they do not promise crash recovery
 or a distributed rollback across Postgres, files, model providers, or indexes.
 
 - **Nightly dream job** (3am): embeds backlogs, links entities, compiles per-person
-  notes, flags contradictions and staleness, rolls up metrics, backs up.
+  notes, flags contradictions and staleness, rolls up metrics, backs up. `minime_state`'s
+  `ops_health` block always shows when it last ran and which steps (if any) failed on that run
+  — content-free identifiers, same for every actor. Three consecutive nightly runs that each
+  failed at least one step raise a single `ops_failure` review-queue item (it stays open until
+  you resolve it, even once a run succeeds again); `bun run src/cli.ts doctor` gives the fuller
+  local checklist.
 - **Compiled-note recovery**: compiled archives contain tier frontmatter. Dream repairs legacy
   mirrors without a model call when possible, and valid private recovery records under
   `data/tmp/compiled-notes/` resume automatically. Invalid files remain for inspection and are
@@ -295,6 +300,14 @@ Every `serve` — this resident one, or an interactive one your agent starts per
 its own inbox watcher and MCP endpoint; only whichever one holds the maintenance lock also
 runs dream/backup. A resident install makes sure something always holds it, and takes over
 within 5 minutes of the previous owner exiting.
+
+Run `bun run src/cli.ts doctor` any time for a content-free health checklist: Postgres and
+Ollama reachability, when dream last ran and whether it's current, backup dump freshness,
+whether some process currently owns nightly maintenance, and disk headroom for `data/` and
+`db-dump/`. Each line prints `PASS`, `WARN`, or `FAIL`; the command exits nonzero only when
+something is actually broken (Postgres unreachable, dream never run or stale past 48h, or
+critically low disk) — a down Ollama or a missing/stale backup dump prints `WARN` but is not
+itself fatal. No secrets, URLs, or paths appear in its output.
 
 ## Three habits that make it work
 

@@ -377,16 +377,23 @@ const DREAM_STEPS = [
 
 function dreamSummary(input: Record<string, unknown>): AuditPayload {
   const noteFailed = nestedCount(input["2b_compile_notes"], "failed");
-  const failedSteps = DREAM_STEPS.filter((step) => typeof input[step] === "string").length;
-  const hasFailure = failedSteps > 0 || noteFailed > 0;
+  // Step KEYS only, never the string VALUE dream.ts's step() wrapper assigned on failure
+  // (currently always the fixed literal "failed" — dream.ts's catch block discards the real
+  // error). Filtering on DREAM_STEPS this way means only members of that fixed, closed
+  // vocabulary can ever appear here regardless of what a future bug put in the value, so this
+  // stays safe to surface through minime_state's ops_health (W3-7) and an ops_failure review
+  // item's payload — content never crosses, only fixed dream-step identifiers.
+  const failedStepNames = DREAM_STEPS.filter((step) => typeof input[step] === "string");
+  const hasFailure = failedStepNames.length > 0 || noteFailed > 0;
   return construct("dreamSummary", {
     status: hasFailure ? "partial_failure" : "complete",
-    ...(failedSteps > 0
+    ...(failedStepNames.length > 0
       ? { error_code: "dream_step_failed" }
       : noteFailed > 0
         ? { error_code: "dream_item_failed" }
         : {}),
-    failed_step_count: failedSteps,
+    failed_step_count: failedStepNames.length,
+    failed_steps: failedStepNames,
     embed_backlog_count: summaryCount(input["1_embed_backlog"]),
     entity_link_count: summaryCount(input["2_entity_link"]),
     note_candidate_count: nestedCount(input["2b_compile_notes"], "candidates"),
