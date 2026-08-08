@@ -329,7 +329,22 @@ async function preImageDump(scriptName: string, dumpDir: string): Promise<string
 
 export const __preImageDumpForTest = preImageDump;
 
-type SafeRepairSummary = { counts: { edges_repointed?: number }; ids: string[] };
+// Fixed allowlist of summary count keys every repair module may report — never a free-form
+// key, so an arbitrary module can't smuggle row content through a made-up count name.
+type RepairSummaryCountKey = "edges_repointed" | "aliases_moved" | "interactions_repointed";
+const REPAIR_SUMMARY_COUNT_KEYS: readonly RepairSummaryCountKey[] = [
+  "edges_repointed",
+  "aliases_moved",
+  "interactions_repointed",
+];
+function isRepairSummaryCountKey(key: string): key is RepairSummaryCountKey {
+  return (REPAIR_SUMMARY_COUNT_KEYS as readonly string[]).includes(key);
+}
+
+type SafeRepairSummary = {
+  counts: Partial<Record<RepairSummaryCountKey, number>>;
+  ids: string[];
+};
 
 function safeSummary(value: unknown): SafeRepairSummary | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
@@ -341,10 +356,10 @@ function safeSummary(value: unknown): SafeRepairSummary | undefined {
       Array.isArray(candidate.counts)
     )
       return undefined;
-    const counts: { edges_repointed?: number } = {};
+    const counts: Partial<Record<RepairSummaryCountKey, number>> = {};
     for (const [key, count] of Object.entries(candidate.counts)) {
       if (
-        key !== "edges_repointed" ||
+        !isRepairSummaryCountKey(key) ||
         typeof count !== "number" ||
         !Number.isSafeInteger(count) ||
         count < 0
@@ -379,8 +394,28 @@ export const __safeRepairSummaryForTest = safeSummary;
 type RepairAuditInput = Parameters<typeof auditPayload.repair>[0];
 type RepairAuditFailureCode = Extract<RepairAuditInput, { phase: "failed" }>["code"];
 
+// Fixed registry of sanctioned repair scripts -> their repair:* audit verb. Extend this map
+// (never accept a free-form script name anywhere below) when a new repair module is added.
+const REPAIR_SCRIPTS = {
+  "retype-org-to-person": "repair:retype-org-to-person",
+  "merge-person": "repair:merge-person",
+} as const;
+type KnownRepairScript = keyof typeof REPAIR_SCRIPTS;
+
+function isKnownRepairScript(name: string): name is KnownRepairScript {
+  return Object.hasOwn(REPAIR_SCRIPTS, name);
+}
+
+function repairVerbForScript(scriptName: string): string {
+  return isKnownRepairScript(scriptName) ? REPAIR_SCRIPTS[scriptName] : "repair:unknown";
+}
+
+const REPAIR_VERB_TO_SCRIPT: ReadonlyMap<string, KnownRepairScript> = new Map(
+  (Object.keys(REPAIR_SCRIPTS) as KnownRepairScript[]).map((name) => [REPAIR_SCRIPTS[name], name]),
+);
+
 function repairScript(verb: string): RepairAuditInput["script"] {
-  return verb === "repair:retype-org-to-person" ? "retype-org-to-person" : "unknown";
+  return REPAIR_VERB_TO_SCRIPT.get(verb) ?? "unknown";
 }
 
 async function repairFailure(
@@ -410,8 +445,7 @@ async function runRepairImpl(
   args: string[],
   opts: { dumpDir?: string } = {},
 ): Promise<number> {
-  const verb =
-    scriptName === "retype-org-to-person" ? "repair:retype-org-to-person" : "repair:unknown";
+  const verb = repairVerbForScript(scriptName);
   if (
     !/^[a-z0-9-]+$/.test(scriptName) ||
     !(await committed(scriptName)) ||
@@ -446,14 +480,15 @@ async function runRepairImpl(
         const summary = safeSummary(rawSummary);
         if (!summary) throw new Error(REPAIR_INVALID_SUMMARY_CODE);
         state.phase = "audit";
-        if (verb !== "repair:retype-org-to-person") throw new Error(REPAIR_AUDIT_FAILURE_CODE);
+        const completedScript = repairScript(verb);
+        if (completedScript === "unknown") throw new Error(REPAIR_AUDIT_FAILURE_CODE);
         // The completion event is part of the same owner transaction as the repair. If this
         // required audit write fails, every mutation is rolled back before repairFailure logs.
         await logEvent({
           actor: "system:repair",
           verb,
           payload: auditPayload.repair({
-            script: "retype-org-to-person",
+            script: completedScript,
             phase: "complete",
             code: "repair_complete",
             counts: summary.counts,

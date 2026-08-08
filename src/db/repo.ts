@@ -730,7 +730,8 @@ export async function entitiesNamedIn(query: string, actor?: AccessActor): Promi
     where (${q} like '%' || lower(p.canonical_name) || '%'
        or (a.alias is not null and a.tier >= 1 and a.tier <= ${allowed}
            and ${q} like '%' || lower(a.alias) || '%'))
-      and p.tier >= 1 and p.tier <= ${allowed}`;
+      and p.tier >= 1 and p.tier <= ${allowed}
+      and p.superseded_at is null`;
   const orgs = await db()`
     select distinct o.id from orgs o
     left join org_aliases a on a.org_id = o.id
@@ -805,6 +806,7 @@ export async function resolvePerson(name: string, actor?: AccessActor): Promise<
     where (lower(p.canonical_name) = lower(${name})
        or (a.tier >= 1 and a.tier <= ${allowed} and lower(a.alias) = lower(${name})))
       and p.tier >= 1 and p.tier <= ${allowed}
+      and p.superseded_at is null
     limit 1`;
   return rows[0] ?? null;
 }
@@ -931,7 +933,8 @@ export async function setPersonCanonicalName(personId: string, name: string): Pr
 export async function peopleByFirstName(first: string): Promise<{ id: string }[]> {
   return db()`
     select id from people
-    where lower(split_part(canonical_name, ' ', 1)) = ${first.toLowerCase()}` as any;
+    where lower(split_part(canonical_name, ' ', 1)) = ${first.toLowerCase()}
+      and superseded_at is null` as any;
 }
 
 // ---------------------------------------------------------------- orgs
@@ -1164,6 +1167,162 @@ export async function retypeOrgToPerson(
              where id = ${orgId}`;
 
     return { personId, orgId, created, edgesRepointed: edgesRepointed as number };
+  });
+}
+
+// Sanctioned, reversible repair for a duplicate identity: two person rows that are really the
+// same human (ten years of "Sarha"/"Sarah" fragmentation from repeated capture typos). There is
+// no auto-merge path — canonical_name has no uniqueness constraint (DECISIONS.md 2026-08-08) —
+// so this is the one authorized place that folds one person row into another. Modeled line-by-line
+// on retypeOrgToPerson above: same FOR UPDATE locking discipline, same tier-0 quarantine
+// namespace rule, same edge-repoint/de-dupe logic. Differences: both rows already exist (no
+// find-or-create), and the source row is never retired — it is superseded via the generic W2-1
+// superseded_by/superseded_at columns (028_correction_supersede.sql), shared with minime_correct.
+export async function mergePersonIntoPerson(
+  fromId: string,
+  intoId: string,
+): Promise<{
+  fromId: string;
+  intoId: string;
+  aliasesMoved: number;
+  interactionsRepointed: number;
+  edgesRepointed: number;
+}> {
+  if (fromId === intoId) throw new Error("cannot merge a person into itself");
+  return withDbTransaction(async (tx) => {
+    // Lock both rows FOR UPDATE in a fixed (lexicographic id) order, independent of which is
+    // from/into, so two concurrent merges naming the same pair in opposite directions can never
+    // deadlock against each other.
+    const [lowId, highId] = fromId < intoId ? [fromId, intoId] : [intoId, fromId];
+    const [lowRow] = await tx`
+      select id, canonical_name, tier, relation, context, last_contact_at, derived_from,
+             superseded_at
+      from people where id = ${lowId} for update`;
+    const [highRow] = await tx`
+      select id, canonical_name, tier, relation, context, last_contact_at, derived_from,
+             superseded_at
+      from people where id = ${highId} for update`;
+    const source = fromId === lowId ? lowRow : highRow;
+    const target = intoId === lowId ? lowRow : highRow;
+    if (!source) throw new Error(`person not found: ${fromId}`);
+    if (!target) throw new Error(`person not found: ${intoId}`);
+    if (source.superseded_at !== null) throw new Error("source person is already merged");
+    if (target.superseded_at !== null) {
+      throw new Error("cannot merge into an already-merged person");
+    }
+
+    const sourceCanonicalName = source.canonical_name as string;
+    const sourceRelation = (source.relation ?? null) as string | null;
+    const sourceContext = (source.context ?? null) as string | null;
+    const sourceLastContactAt = (source.last_contact_at ?? null) as Date | null;
+    const sourceDerivedFrom = (source.derived_from as string | null) ?? fromId;
+    const sourceTier = Number(source.tier) as 0 | 1 | 2;
+    const targetTier = Number(target.tier) as 0 | 1 | 2;
+    // Tier-0 quarantine namespace rule (repo.ts:960-974 in retypeOrgToPerson): a readable
+    // spelling can never absorb a hidden identity, so tier-0 merges only with tier-0; 1/2 with 1/2.
+    if ((sourceTier === 0) !== (targetTier === 0)) {
+      throw new Error("cannot merge across the tier-0 quarantine boundary");
+    }
+
+    // 1. Move aliases: source's aliases -> target (tier-0 absorbing on insert and on collision),
+    // then add the source's own canonical spelling as a target alias, then drop the source's rows
+    // (the source row itself is kept — only its now-migrated aliases are removed).
+    await tx`
+      insert into person_aliases (person_id, alias, tier, source, created_by, derived_from)
+      select ${intoId}, a.alias,
+             case when ${targetTier}::smallint = 0 or a.tier = 0 then 0
+                  else greatest(${targetTier}::smallint, a.tier) end,
+             'merge', 'agent:merge', coalesce(a.derived_from, ${sourceDerivedFrom})
+      from person_aliases a where a.person_id = ${fromId}
+      on conflict (person_id, alias, privacy_namespace) do update
+      set tier = case when person_aliases.tier = 0 or excluded.tier = 0 then 0
+                      else greatest(person_aliases.tier, excluded.tier) end,
+          derived_from = case
+            when person_aliases.tier <> 0 and excluded.tier = 0 then excluded.derived_from
+            else coalesce(person_aliases.derived_from, excluded.derived_from)
+          end`;
+    await tx`
+      insert into person_aliases (person_id, alias, tier, source, created_by, derived_from)
+      values (${intoId}, ${sourceCanonicalName},
+              case when ${targetTier}::smallint = 0 or ${sourceTier}::smallint = 0 then 0
+                   else greatest(${targetTier}::smallint, ${sourceTier}::smallint) end,
+              'merge', 'agent:merge', ${sourceDerivedFrom})
+      on conflict (person_id, alias, privacy_namespace) do update
+      set tier = case when person_aliases.tier = 0 or excluded.tier = 0 then 0
+                      else greatest(person_aliases.tier, excluded.tier) end,
+          derived_from = case
+            when person_aliases.tier <> 0 and excluded.tier = 0 then excluded.derived_from
+            else coalesce(person_aliases.derived_from, excluded.derived_from)
+          end`;
+    const deletedAliases = await tx`
+      delete from person_aliases where person_id = ${fromId} returning alias`;
+    const aliasesMoved = deletedAliases.length;
+
+    // 2. Repoint interactions logged against the source (no de-dupe needed — interactions have
+    // no per-person uniqueness constraint, unlike aliases/edges).
+    const repointedInteractions = await tx`
+      update interactions set person_id = ${intoId} where person_id = ${fromId} returning id`;
+    const interactionsRepointed = repointedInteractions.length;
+
+    // 3. Repoint edges on both sides, drop self-referential edges the repoint creates, and
+    // de-dupe collisions — copied from retypeOrgToPerson's edge-repoint logic (step 3 above).
+    const srcRepointed = await tx`
+      update edges set src_id = ${intoId} where src_type = 'person' and src_id = ${fromId}
+      returning id`;
+    const dstRepointed = await tx`
+      update edges set dst_id = ${intoId} where dst_type = 'person' and dst_id = ${fromId}
+      returning id`;
+    const repointedEdgeIds = new Set<string>([
+      ...srcRepointed.map((row: any) => row.id as string),
+      ...dstRepointed.map((row: any) => row.id as string),
+    ]);
+    // drop self-referential edges created by the repoint (e.g. "X knows X")
+    await tx`delete from edges where src_id = ${intoId} and dst_id = ${intoId}
+             and src_type = 'person' and dst_type = 'person'`;
+    // De-dupe edges that now collide. Privacy strength wins (tier 0, then 2, then 1);
+    // age is only the tie-breaker, so repair can never discard quarantine evidence.
+    await tx`
+      delete from edges e using edges k
+      where e.src_type = k.src_type and e.src_id = k.src_id and e.rel = k.rel
+        and e.dst_type = k.dst_type and e.dst_id = k.dst_id
+        and (
+          (case e.tier when 0 then 3 else e.tier end) <
+            (case k.tier when 0 then 3 else k.tier end)
+          or (
+            (case e.tier when 0 then 3 else e.tier end) =
+              (case k.tier when 0 then 3 else k.tier end)
+            and (e.created_at, e.id) > (k.created_at, k.id)
+          )
+        )
+        and (e.src_id = ${intoId} or e.dst_id = ${intoId})`;
+    const edgesRepointed = repointedEdgeIds.size;
+
+    // 4. Target absorbs the source's relation/context/last-contact/tier; supersedes_id records
+    // only the FIRST ancestor (coalesce) — a target merged into more than once keeps its
+    // original pointer, matching retypeOrgToPerson's own coalesce behavior.
+    await tx`
+      update people
+      set relation = coalesce(relation, ${sourceRelation}),
+          context = coalesce(context, ${sourceContext}),
+          last_contact_at = greatest(last_contact_at, ${sourceLastContactAt}),
+          tier = case when tier = 0 or ${sourceTier}::smallint = 0 then 0
+                      else greatest(tier, ${sourceTier}::smallint) end,
+          supersedes_id = coalesce(supersedes_id, ${fromId})
+      where id = ${intoId}`;
+
+    // 5. Supersede the source (I5: kept, never deleted) — shared helper with minime_correct
+    // (W2-4); stamps superseded_by/superseded_at under the same idempotency guard.
+    await supersedeRow("person", fromId, intoId);
+
+    // 6. Auto-resolve any open phantom_person flag on the row that no longer independently
+    // exists — it would otherwise sit open forever pointing at a now-superseded husk.
+    await tx`
+      update review_queue
+      set status = 'resolved', resolved_at = ${now()}
+      where status = 'open' and kind = 'phantom_person'
+        and payload ->> 'person_id' = ${fromId}`;
+
+    return { fromId, intoId, aliasesMoved, interactionsRepointed, edgesRepointed };
   });
 }
 
@@ -3333,7 +3492,7 @@ export async function phantomPersonCandidates(): Promise<
         union select pa.alias from person_aliases pa
           where pa.person_id = pe.id and pa.tier in (1,2)
       ) x
-      where pe.tier in (1,2)
+      where pe.tier in (1,2) and pe.superseded_at is null
       group by pe.id, pe.canonical_name, pe.relation
     ),
     org_names as (

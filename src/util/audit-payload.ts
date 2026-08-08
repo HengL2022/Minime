@@ -54,7 +54,7 @@ type RepairCode =
   | "repair_backup_failed"
   | "repair_invalid_summary"
   | "repair_complete";
-type RepairScript = "retype-org-to-person" | "unknown";
+type RepairScript = "retype-org-to-person" | "merge-person" | "unknown";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const DECIMAL_EVENT_ID = /^[1-9]\d*$/;
@@ -405,12 +405,18 @@ function dreamSummary(input: Record<string, unknown>): AuditPayload {
   });
 }
 
+type RepairCompleteCounts = {
+  edges_repointed?: number;
+  aliases_moved?: number;
+  interactions_repointed?: number;
+};
+
 type RepairInput =
   | {
-      script: "retype-org-to-person";
+      script: "retype-org-to-person" | "merge-person";
       phase: "complete";
       code: "repair_complete";
-      counts?: { edges_repointed?: number };
+      counts?: RepairCompleteCounts;
       ids?: string[];
     }
   | {
@@ -423,7 +429,7 @@ type RepairInput =
 
 function repair(input: RepairInput): AuditPayload {
   const phase = fixed(input.phase, ["failed", "complete"]);
-  const script = fixed(input.script, ["retype-org-to-person", "unknown"]);
+  const script = fixed(input.script, ["retype-org-to-person", "merge-person", "unknown"]);
   const code =
     phase === "complete"
       ? fixed(input.code, ["repair_complete"])
@@ -435,13 +441,23 @@ function repair(input: RepairInput): AuditPayload {
           "repair_backup_failed",
           "repair_invalid_summary",
         ]);
-  if (phase === "complete" && script !== "retype-org-to-person") invalidPayload();
+  if (phase === "complete" && script !== "retype-org-to-person" && script !== "merge-person") {
+    invalidPayload();
+  }
   if (phase === "failed" && (input.counts !== undefined || input.ids !== undefined)) {
     invalidPayload();
   }
   const counts: Record<string, number> = {};
-  if (phase === "complete" && input.counts?.edges_repointed !== undefined) {
-    counts.edges_repointed = nonNegativeInteger(input.counts.edges_repointed);
+  if (phase === "complete") {
+    if (input.counts?.edges_repointed !== undefined) {
+      counts.edges_repointed = nonNegativeInteger(input.counts.edges_repointed);
+    }
+    if (input.counts?.aliases_moved !== undefined) {
+      counts.aliases_moved = nonNegativeInteger(input.counts.aliases_moved);
+    }
+    if (input.counts?.interactions_repointed !== undefined) {
+      counts.interactions_repointed = nonNegativeInteger(input.counts.interactions_repointed);
+    }
   }
   return construct("repair", {
     script,
@@ -724,6 +740,7 @@ function expectedPayloadKind(verb: string, payload: AuditPayload): AuditPayloadK
 
   const repairScriptByVerb: Readonly<Record<string, RepairScript>> = {
     "repair:retype-org-to-person": "retype-org-to-person",
+    "repair:merge-person": "merge-person",
     "repair:unknown": "unknown",
   };
   const script = repairScriptByVerb[verb];
