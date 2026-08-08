@@ -178,6 +178,11 @@ describe("minime_timeline", () => {
     expect(result.envelope.gaps).toEqual([
       "2 tier-2 entries in range are locked (1 journal, 1 interaction) — an owner-approved unlock (minime_unlock) would include them",
     ]);
+    // staleness is computed from the newest VISIBLE row's `at` (the tier-1 decision on
+    // 2020-03-19, since journal/interaction are locked) — every fixture date is fixed in 2020,
+    // so this is always well past stalenessOf's 30-day threshold regardless of real wall-clock
+    // time when the test runs.
+    expect(result.envelope.staleness).toMatch(/^newest matching item is \d+ days old$/);
 
     // citation type for a calendar row matches state.ts's existing "calendar_event" vocabulary,
     // even though the row's own `kind` (and the `types` filter) stay "calendar".
@@ -241,6 +246,15 @@ describe("minime_timeline", () => {
     const result = await call({ from: MAIN_TO, to: MAIN_FROM });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe("BAD_INPUT");
+  });
+
+  test("a range with no matching rows at all reports no staleness and no gaps", async () => {
+    const result = await call({ from: "1999-01-01", to: "1999-01-02" });
+    const data = okData(result);
+    expect(data.rows).toEqual([]);
+    if (!result.ok) throw new Error("unexpected failure");
+    expect(result.envelope.staleness).toBeUndefined();
+    expect(result.envelope.gaps).toBeUndefined();
   });
 
   test("tier-0 sources never appear even though transaction/health rows were seeded inside the window (I3)", async () => {

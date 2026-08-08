@@ -4,7 +4,7 @@
 
 import { z } from "zod";
 import { type TimelineKind, timelineRows } from "../../db/repo";
-import { type SourceRef, ToolError, envelope } from "../envelope";
+import { type SourceRef, ToolError, envelope, stalenessOf } from "../envelope";
 import type { ToolDef } from "./registry";
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -84,10 +84,17 @@ export const timelineTool: ToolDef = {
       );
     }
 
+    // rows are `order by at asc, id asc` (repo.timelineRows), so the last row is the newest.
+    // Reused like every other read tool (context.ts, search.ts) for parity — even though this
+    // range is caller-bounded rather than open-ended, so an intentionally historical query (e.g.
+    // "June 2020") will often report an old age by design, that is still real information about
+    // how current the range's own newest visible row is, so it stays on rather than being
+    // suppressed for bounded reads and kept only for "current state" ones.
+    const newest = rows.at(-1)?.at;
     return envelope(
       { from: params.from, to: params.to, limit, offset, count: rows.length, rows, locked },
       sources,
-      { gaps },
+      { staleness: stalenessOf(newest), gaps },
     );
   },
 };

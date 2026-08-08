@@ -2815,3 +2815,55 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   workstream — the `(uid, occurrence_start)` identity change and future-only pruning contract
   were adopted as planned, ratified as part of that same upfront program approval. The owner's
   end-of-program review before any publication remains the final gate.
+
+## 2026-08-08 — minime_timeline: per-kind locked count as a bounded-range tier-2 disclosure
+
+- **Context:** Livability-program task W3-3 shipped `minime_timeline` (commit eb5404b): a
+  tier-gated date-range read across calendar/journal/interaction/task/decision, answering period
+  questions (`minime_agenda` and `minime_state` cannot, being forward-looking/today-anchored).
+  Every other tier-2-locked signal in the codebase is a boolean existence flag folded into a
+  `gaps` string — `context.ts`'s interaction gap, `review-queue.ts`'s masked-capture gap, and
+  `unlock.ts`'s pending-request gap all say "locked", never how much. `repo.timelineRows`
+  instead returns an exact per-kind numeric count (`{ journal, interaction }`) of the tier-2 rows
+  a caller's OWN chosen `from`/`to` window matched but the session cannot read — a stronger
+  disclosure than any existing precedent, since a caller can narrow `from`/`to` to a single day
+  (the schema allows `from === to`) and repeat across a range to recover the exact per-day count
+  of locked journal/interaction rows (never their content, ids, or titles) without ever holding a
+  tier-2 unlock — e.g. reconstructing which days the owner journaled and how often. The task's own
+  spec ("risk" field) flagged this exact area up front as "New content read path — I3-sensitive
+  ... Orchestrator invariant review required," and CLAUDE.md's workflow rules call for a
+  DECISIONS.md entry for a public interface introducing new schema-meaning/privacy-relevant
+  behavior; the original commit shipped the code but not the entry (caught in first-pass review)
+  — this entry closes that gap for a design that was already built and reviewed as specified, not
+  a new or changed behavior.
+- **Decision:** Keep the per-kind numeric locked count as shipped, computed only when the session
+  is below tier 2 (`allowedTier(actor) < 2`) and only for a kind the caller actually requested via
+  `types` (a caller scoped to `types:['calendar']` gets no journal/interaction accounting, locked
+  or not) — matching `repo.ts`'s own description of the mechanism as "a deliberate, narrow
+  exception to 'never disclose what a locked session cannot read'". Tier-0 sources (`transactions`,
+  `health_samples`) are structurally excluded from `timelineRows` entirely (I3) and never
+  contribute to any count. No narrower alternative (a boolean flag, or a count bucketed/capped to
+  obscure the exact number) is substituted in this remediation.
+- **Why:** `minime_timeline` exists specifically to answer bounded period questions ("summarize my
+  June"), so collapsing "1 locked entry this week" and "40 locked entries this week" into the same
+  boolean signal — the existing precedent elsewhere — would defeat the tool's own purpose: an
+  agent caveating an answer about a month needs to know roughly how much of that month is hidden,
+  not just that some of it is. The count leaks volume only, never identity, content, or
+  time-of-day, and the per-day enumeration this finding describes costs exactly as many tool calls
+  (and therefore audited `events` rows, per I8) as reading each day's tier-1 content directly
+  would — the append-only audit trail is the existing control for that accumulation pattern, the
+  same "aggregate is fine, raw content is not" shape I3 already establishes for tier-0 metrics via
+  `agg_sql`, applied here to a tier-2 count instead. A narrower boolean-only signal (matching
+  `context.ts`/`review-queue.ts`/`unlock.ts`) would be strictly safer but is not substituted here:
+  the task's own risk mitigation explicitly specified "locked disclosure is count-only", so a
+  boolean would silently under-deliver on that spec commitment rather than fixing anything the
+  review finding actually raised — the finding asked for this decision to be recorded, not for the
+  mechanism to change.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W3 workstream
+  — the count-only locked-disclosure design was adopted as planned and specified by the task
+  itself, not a bespoke per-task approval. Recording it here in DECISIONS.md was done during
+  2026-08-08 W3-3 review-finding remediation, matching the review-finding-remediation cover
+  already exercised earlier in this file for W2-3's anti-laundering evidence-floor fix (see the
+  `minime_refile` entry above). The owner's end-of-program review before any publication remains
+  the final gate.
