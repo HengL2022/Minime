@@ -2581,3 +2581,66 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   correction-loop workstream — the plan's own default (tier-2 gate for capture text, consistent
   with `classify.ts`'s existing treatment) was adopted as specified, not a bespoke per-task
   approval; the owner's end-of-program review before any publication remains the final gate.
+
+## 2026-08-08 — Entity-conflict checks are bound to the caller's own tier
+
+- **Context:** Review-finding remediation for W2-6 (`minime_upsert_person`). Two Postgres
+  conflict signals that `person.ts` translates into a caller-visible `BAD_INPUT` were computed
+  with no bound against the calling session's own `app_allowed_tier()`: (1)
+  `upsert_derived_alias`'s `entity_alias_conflict` exception (`db/migrations/022`; the function is
+  used only by `addAlias`/`addOrgAlias` in `src/db/repo.ts`, which are used only by
+  `minime_upsert_person`), matching any existing alias at tier 1 **or 2**, and (2)
+  `orgs_canonical_name_idx`, unique across tier 1+2 combined. Both fired identically whether the
+  conflicting row was visible to the caller or hidden at a tier above it. That made
+  `minime_upsert_person` a tier-2 existence oracle: a locked (tier-1), never-unlocked session
+  could probe candidate alias/rename strings against a tier-1 target it already controlled, and
+  the ok-vs-`BAD_INPUT` split revealed whether a hidden tier-2 person/org already used that exact
+  string — empirically confirmed live, zero unlocks on the probing session. This contradicted the
+  tool's own documented contract ("a DIFFERENT VISIBLE person/org" / "a readable tier") and the
+  no-tier-2-existence-oracle invariant already enforced elsewhere (W1-5's tier-aware `NOT_FOUND`
+  collapsing in `minime_get_context`).
+- **Decision:** Fixed at the SQL layer, where the signal originates, not by rewording the TS
+  catch blocks. `db/migrations/029_scope_entity_conflicts_by_tier.sql`: (1) `upsert_derived_alias`
+  now adds `p.tier <= app_allowed_tier() and a.tier <= app_allowed_tier()` (org branch:
+  `o.tier <= ...`) to its conflict search, so a conflict hidden above the caller's tier is
+  invisible to the check and the call proceeds exactly like "nothing conflicts" — including
+  actually writing the alias, so a same-caller follow-up resolve can't reopen the oracle a second
+  way. (2) `orgs_canonical_name_idx` changed from `unique (lower(canonical_name)) where tier in
+  (1,2)` to `unique (tier, lower(canonical_name)) where tier in (1,2)` — uniqueness is now scoped
+  per tier, mirroring the tier-0-quarantine-namespace precedent already in migration 022, so a
+  tier-1 and a tier-2 org may share a canonical_name; a rename can no longer collide with a hidden
+  row, and a same-tier collision is by construction always a row the caller could already see.
+  `person.ts`'s `isEntityAliasConflict`/`isUniqueViolation` catch blocks are unchanged — they were
+  already textually correct; only the SQL-level boundary was missing. Regression coverage added
+  to `test/person-tool.test.ts`: three tests reproduce the exact repro shape (a hidden tier-2
+  identity minted by an unlocked owner session; a separate, never-unlocked session then probes)
+  for person `add_alias`, org `add_alias`, and org `rename`, each asserting the hidden-conflict
+  call succeeds identically to a genuinely-unused string, and that a same-tier (mutually visible)
+  conflict is still correctly refused.
+- **Why:** A TS-only fix (reword or suppress the error message) would have left a second channel
+  open — a caller could still distinguish the two cases by immediately re-resolving the alias/name
+  afterward (found vs. not found), since a "pretend success but skip the write" response is
+  observably different from a real write on the very next read. Only making the write itself
+  succeed (by bounding the underlying conflict check to the caller's own tier) closes both the
+  immediate response and the follow-up-probe channel at once. Splitting the org unique index per
+  tier — rather than teaching the TS layer to swallow a cross-tier 23505 — was chosen because the
+  index is a hard physical constraint: a rename to a name a hidden row already owns cannot
+  actually succeed while the index spans both tiers, so no TS-side trick can make "success" true
+  without either silently dropping the write (reopening the same follow-up-probe gap) or relaxing
+  what the index guarantees. Scoping it per tier is the narrowest relaxation available: it removes
+  exactly the cross-tier guarantee that was never load-bearing for any caller (`resolve_or_promote_entity`
+  already merges tier 1+2 into one candidate pool before ever inserting, so it never relied on the
+  index spanning both tiers) while keeping the same-tier guarantee that IS load-bearing (no two
+  mutually visible orgs can share a name). Accepted residual: if a session is later
+  owner-approved-unlocked to tier 2, an alias added while locked may now legitimately match two
+  different entities, and exact-name resolution (no `ORDER BY`, pre-existing) may pick either one
+  nondeterministically — a resolution-ambiguity nuisance for an already-privileged, audited
+  unlock, never a new disclosure to a locked caller. People already tolerate the analogous
+  ambiguity for canonical_name (no uniqueness constraint at all, pending the W2-7 merge tool);
+  this extends the same trade to the alias table and, narrowly, to org canonical_name across
+  tiers.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W2
+  correction-loop workstream, which explicitly includes review-finding remediation passes on
+  already-approved task work; this is a correctness/privacy fix within W2-6's existing scope, not
+  a product-shape change.

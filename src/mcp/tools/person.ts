@@ -11,13 +11,16 @@
 // (effective tier = greatest(current entity tier, requested tier)), so this is belt-and-suspenders,
 // not the only guard.
 //
-// Known limitation (CURRENT 022 semantics — flag for W4-1's tiering re-audit): 022's
-// upsert_derived_alias refuses an alias string already owned by a DIFFERENT tier-1/2 person/org
-// (entity_alias_conflict) regardless of who currently owns it or the caller's own tier — so
+// upsert_derived_alias (029) refuses an alias string already owned by a DIFFERENT person/org, but
+// ONLY when that other row is itself within the calling session's own app_allowed_tier() — so
 // add_alias can PREVENT a future misspelling-driven duplicate (add the correct alias before the
 // typo is ever used) but cannot RETROACTIVELY repair one that already minted a separate phantom
 // person; that needs an actual merge, out of scope here (W2-7). We surface that conflict as a
-// clean BAD_INPUT rather than letting the raw Postgres exception bubble up as INTERNAL.
+// clean BAD_INPUT rather than letting the raw Postgres exception bubble up as INTERNAL. Bounding
+// the SQL-level check by the caller's own tier (029, review fix for W2-6) is load-bearing, not
+// cosmetic: a conflict hidden above the caller's tier is invisible to this check the same way it
+// is to resolvePerson/resolveOrg, so it can never surface as a distinguishable BAD_INPUT — see
+// addResolvedAlias below.
 import { z } from "zod";
 import {
   addAlias,
@@ -46,9 +49,12 @@ function notFoundById(type: TargetType, id: string): ToolError {
   return new ToolError("NOT_FOUND", `${type} ${id} not found or above current access tier`);
 }
 
-// Postgres RAISE EXCEPTION 'entity_alias_conflict' (022_entity_derivation_tiers.sql) surfaces
-// with the default SQLSTATE P0001 and a message equal to the raised text, verified empirically
-// against the real function (not just read off the SQL source).
+// Postgres RAISE EXCEPTION 'entity_alias_conflict' (022_entity_derivation_tiers.sql, tier-bound
+// by 029_scope_entity_conflicts_by_tier.sql) surfaces with the default SQLSTATE P0001 and a
+// message equal to the raised text, verified empirically against the real function (not just
+// read off the SQL source). 029 made the underlying conflict search itself stop at the caller's
+// app_allowed_tier(), so by the time this ever fires, the conflicting row was already something
+// the caller could have found through an ordinary read — safe to name specifically below.
 function isEntityAliasConflict(e: unknown): boolean {
   return (
     e instanceof Error &&
@@ -197,8 +203,14 @@ export const upsertPersonTool: ToolDef = {
           ? await setPersonCanonicalName(target.row.id, params.name)
           : await setOrgCanonicalName(target.row.id, params.name);
     } catch (e) {
-      // orgs.canonical_name is uniquely indexed among tier-1/2 rows (022); people carries no
-      // equivalent constraint (a rename can create two same-named people — no auto-merge, W2-7).
+      // orgs.canonical_name is uniquely indexed PER TIER (029_scope_entity_conflicts_by_tier.sql;
+      // originally spanned tier 1+2 together in 022, which let a rename onto a hidden tier-2
+      // org's exact name leak that org's existence via this same BAD_INPUT — review fix for
+      // W2-6). target.row.tier is always within the caller's own app_allowed_tier() (resolution
+      // above is tier-filtered), and the index can now only collide within that same tier value,
+      // so any 23505 here is necessarily a row at a tier the caller could already see. People
+      // carry no equivalent constraint (a rename can create two same-named people — no
+      // auto-merge, W2-7).
       if (target.type === "org" && isUniqueViolation(e)) {
         throw new ToolError("BAD_INPUT", "another org already has that name");
       }
