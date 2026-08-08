@@ -141,6 +141,9 @@ work becomes part of your searchable history with zero effort.
   always cite source rows with staleness ("newest entry is 142 days old").
 - **Morning brief / evening review**: skills that pull today's calendar, due tasks, open
   commitments, decision reviews due, and the review queue (`minime_state`).
+- **Time periods**: "what happened in June" / "summarize last week" → `minime_timeline` walks
+  calendar, closed tasks, and decisions across the range, plus journal/interactions once
+  unlocked. A locked range still says how many tier-2 entries exist there, never their content.
 - **Numbers**: always via metrics ("how did I sleep this month?" →
   `minime_query_metric sleep_minutes`; unsure of the exact name → `minime_list_metrics` lists
   everything queryable). Agents are forbidden from doing arithmetic over

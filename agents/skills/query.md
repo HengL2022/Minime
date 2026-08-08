@@ -29,6 +29,9 @@ list of search hits. This is the default skill for any lookup.
      `minime_get_context` with the name
    - quantitative angle: "how much / how often / trend" → `minime_query_metric`; unsure of
      the exact metric name → `minime_list_metrics` first
+   - period angle: "summarize my June" / "what happened last week" → `minime_timeline` (a
+     date-range read across calendar, closed tasks, decisions, and — once unlocked —
+     journal/interactions; a locked range still discloses a bare count of what's hidden)
 2. **Read before writing.** Open the top 3–5 hits with `minime_get_context` when the snippet
    is not obviously sufficient. Prefer primary rows over `derived: true` rows.
 3. **Synthesize.** Short prose, claims cited inline, structured only if the question is

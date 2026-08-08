@@ -3664,6 +3664,152 @@ export async function pagesByPaths(paths: string[]): Promise<{ id: string; path:
   return db()`select id, path from pages where path = any(${paths})` as any;
 }
 
+// ---------------------------------------------------------------- timeline (minime_timeline, W3-3)
+
+export type TimelineKind = "calendar" | "journal" | "interaction" | "task" | "decision";
+
+const TIMELINE_KINDS: readonly TimelineKind[] = [
+  "calendar",
+  "journal",
+  "interaction",
+  "task",
+  "decision",
+];
+
+export interface TimelineRow {
+  kind: TimelineKind;
+  id: string;
+  at: Date;
+  title: string;
+}
+
+export interface TimelineLockedCounts {
+  journal: number;
+  interaction: number;
+}
+
+export interface TimelineResult {
+  rows: TimelineRow[];
+  locked: TimelineLockedCounts;
+}
+
+// Tier-gated date-range read across every life source (spec W3-3). Each branch of the UNION
+// carries its OWN `tier >= 1 and tier <= allowed` predicate (never a shared post-filter, so a
+// bug in one branch can never leak another's rows) and its own `superseded_at is null` guard --
+// EXCEPT calendar_events, which is a write-only importer mirror (005_mirrors.sql) outside the
+// PARENTS/correction system and never received that column (028_correction_supersede.sql's
+// twelve-table loop does not include it). journal_entries/interactions default to tier 2, so
+// their branches structurally return nothing for a locked session — the UNION's own predicate
+// IS the enforcement, not a filter applied after the fact. tasks/decisions anchor on a CLOSURE
+// timestamp, not a creation time: a done task on completed_at, a dropped one on updated_at
+// (dropping has no dedicated timestamp column); a decision on decided_at, falling back to
+// created_at for one that was logged but never resolved. Every branch's `at` column is
+// timestamptz, so the five-way UNION ALL is a single consistent type and the trailing
+// `order by at, id` / `limit/offset` is exact SQL pagination — no branch is ever pulled in full
+// just to be sorted in application code. Tier-0 sources (transactions, health_samples) are
+// structurally absent: neither table is named anywhere in this function (I3).
+export async function timelineRows(
+  from: string,
+  to: string,
+  kinds: TimelineKind[] | undefined,
+  limit: number,
+  offset: number,
+  actor?: AccessActor,
+  timeZone?: string,
+): Promise<TimelineResult> {
+  const allowed = await allowedTier(actor);
+  const tz = configuredTimeZone(timeZone);
+  const wanted = kinds && kinds.length > 0 ? kinds : TIMELINE_KINDS;
+  const want = (k: TimelineKind) => wanted.includes(k);
+
+  // `want(...)` interpolates a plain JS boolean directly into the WHERE clause — the same
+  // short-circuit pattern tasksInRange uses for includeUndated above — so an excluded kind
+  // contributes zero rows without the SQL text itself ever changing shape per call.
+  const rows = (await db()`
+    select 'calendar'::text as kind, id, occurrence_start as at, left(title, 120) as title
+    from calendar_events
+    where ${want("calendar")}
+      and (occurrence_start at time zone ${tz})::date between ${from}::date and ${to}::date
+      and tier >= 1 and tier <= ${allowed}
+
+    union all
+
+    select 'journal'::text as kind, id, at, left(entry_md, 120) as title
+    from journal_entries
+    where ${want("journal")}
+      and (at at time zone ${tz})::date between ${from}::date and ${to}::date
+      and tier >= 1 and tier <= ${allowed}
+      and superseded_at is null
+
+    union all
+
+    select 'interaction'::text as kind, id, occurred_at as at, left(summary, 120) as title
+    from interactions
+    where ${want("interaction")}
+      and (occurred_at at time zone ${tz})::date between ${from}::date and ${to}::date
+      and tier >= 1 and tier <= ${allowed}
+      and superseded_at is null
+
+    union all
+
+    select 'task'::text as kind, id,
+           case when status = 'done' then completed_at else updated_at end as at,
+           left(title, 120) as title
+    from tasks
+    where ${want("task")}
+      and status in ('done', 'dropped')
+      and ((case when status = 'done' then completed_at else updated_at end)
+             at time zone ${tz})::date between ${from}::date and ${to}::date
+      and tier >= 1 and tier <= ${allowed}
+      and superseded_at is null
+
+    union all
+
+    select 'decision'::text as kind, id, coalesce(decided_at, created_at) as at,
+           left(question, 120) as title
+    from decisions
+    where ${want("decision")}
+      and (coalesce(decided_at, created_at) at time zone ${tz})::date
+            between ${from}::date and ${to}::date
+      and tier >= 1 and tier <= ${allowed}
+      and superseded_at is null
+
+    order by at asc, id asc
+    limit ${limit} offset ${offset}`) as unknown as TimelineRow[];
+
+  // Locked counts are a deliberate, narrow exception to "never disclose what a locked session
+  // cannot read": a bare count (never a title or id) of the tier-2 rows this call's date window
+  // matched but this session cannot see, so the caller knows there is more here rather than
+  // silently reading an empty range as "nothing happened". Only journal/interactions default to
+  // tier 2 — calendar/task/decision are tier 1 on every product write path today — so counting
+  // is limited to those two sources, matching the spec exactly; tier-0 sources are never queried
+  // here at all (I3). Skipped whenever the session is already unlocked (those rows are already in
+  // `rows` above, so a separate "locked" count would double-count them) or the caller never asked
+  // for that kind via `types` (a caller scoped to types:['calendar'] gets no journal/interaction
+  // accounting, locked or not).
+  const needsLockedCounts = allowed < 2;
+  let journalLocked = 0;
+  let interactionLocked = 0;
+  if (needsLockedCounts && want("journal")) {
+    const [row] = await db()`
+      select count(*)::int as n from journal_entries
+      where tier = 2
+        and (at at time zone ${tz})::date between ${from}::date and ${to}::date
+        and superseded_at is null`;
+    journalLocked = Number(row?.n ?? 0);
+  }
+  if (needsLockedCounts && want("interaction")) {
+    const [row] = await db()`
+      select count(*)::int as n from interactions
+      where tier = 2
+        and (occurred_at at time zone ${tz})::date between ${from}::date and ${to}::date
+        and superseded_at is null`;
+    interactionLocked = Number(row?.n ?? 0);
+  }
+
+  return { rows, locked: { journal: journalLocked, interaction: interactionLocked } };
+}
+
 // ---------------------------------------------------------------- dream support
 
 // Parents never touched by the extractor (no system:extract edges yet). Parents whose

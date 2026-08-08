@@ -13,6 +13,7 @@ import { reviewQueueTool } from "./review-queue";
 import { searchTool } from "./search";
 import { stateTool } from "./state";
 import { upsertTaskTool } from "./tasks";
+import { timelineTool } from "./timeline";
 import { unlockTool } from "./unlock";
 
 export const ALL_TOOLS: ToolDef[] = [
@@ -33,6 +34,7 @@ export const ALL_TOOLS: ToolDef[] = [
   correctTool,
   unlockTool,
   upsertPersonTool,
+  timelineTool,
 ];
 
 export function toolByName(name: string): ToolDef {

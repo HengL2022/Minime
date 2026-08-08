@@ -979,5 +979,64 @@
     "execution": {
       "taskSupport": "forbidden"
     }
+  },
+  {
+    "name": "minime_timeline",
+    "description": "Tier-gated date-range read across every life source: calendar, closed tasks (done/dropped), and decisions at tier 1, plus journal entries and interactions once tier 2 is unlocked. Answers period questions minime_agenda (forward-looking, open tasks only) and minime_state (today-anchored) cannot — 'what happened in June', 'summarize last week'. A locked range still discloses that tier-2 entries exist as a bare count in `gaps` — never their titles or ids — so a locked read is distinguishable from an empty one.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "Inclusive start date, YYYY-MM-DD, in time_zone."
+        },
+        "to": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "Inclusive end date, YYYY-MM-DD, in time_zone."
+        },
+        "types": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "calendar",
+              "journal",
+              "interaction",
+              "task",
+              "decision"
+            ]
+          },
+          "description": "Narrow to a subset of sources. Defaults to all five."
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
   }
 ]
