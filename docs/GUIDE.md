@@ -116,6 +116,18 @@ owner timezone, and all-day `VALUE=DATE` events span local midnights even across
 changes. Invalid dates, zones, or end times are skipped and logged without copying event text into
 the audit trail.
 
+Recurring events (`RRULE`, plus `RDATE`/`EXDATE`) expand into one row per occurrence, identified
+by `(uid, occurrence_start)` rather than `uid` alone — a weekly standup shows up every week, not
+once. Supported: `FREQ=DAILY/WEEKLY/MONTHLY/YEARLY`, `INTERVAL`, `COUNT`, `UNTIL`, and
+`WEEKLY`-only plain-code `BYDAY` (`MO`..`SU`, no ordinals like `1MO`). Each import expands a
+rolling 12-month window from import time, capped around 500 occurrences per event, so re-running
+an import later naturally picks up the next slice of the future — and prunes occurrence rows the
+current export no longer produces, but only ones dated on or after that import's own "now," so
+past occurrences are never touched. A rule outside that supported subset (`BYMONTHDAY`,
+`BYSETPOS`, ordinal `BYDAY`, a non-Monday `WKST`, …) degrades safely: the event still imports its
+first instance, and a content-free audit event flags it for review rather than guessing at
+partial recurrence semantics.
+
 ### 7. Agent work sessions — automatic, opt-in
 
 `make install-hooks` adds a Claude Code hook that summarizes every coding session (what

@@ -2747,3 +2747,71 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   habit_streak's agg_sql is a conservative, invariant-preserving implementation detail within
   that same scope, not a product-shape change. The owner's end-of-program review before any
   publication remains the final gate.
+
+## 2026-08-08 — Calendar occurrence identity: (uid, occurrence_start) expansion + future-only pruning
+
+- **Context:** Livability-program task W3-2: the calendar importer (`src/importers/calendar.ts`)
+  keyed `calendar_events` on `uid` alone, so a recurring `RRULE` event (a weekly standup, a
+  yearly birthday) only ever imported its `DTSTART` as one row — every future occurrence was
+  invisible to `minime_state`'s calendar window and the `deep_work_minutes` metric. Migration 031
+  changes `calendar_events`' identity to `(uid, occurrence_start)` and a new pure module
+  (`src/importers/rrule.ts`) expands `RRULE`/`RDATE`/`EXDATE` into concrete occurrence rows. The
+  task's own spec text targeted migration 028, already taken by
+  `028_correction_supersede.sql`; the program's reassignment (030) was ALSO taken in the interim
+  by `030_task_recurrence.sql` (W3-1, landed on this branch first). This shipped as 031, the true
+  next free number as of this migration — noted here since it is a numbering deviation from the
+  task's own spec, not because renumbering itself is a contract decision (same convention as
+  030's own migration-comment/DECISIONS precedent).
+- **Decision:** (1) **Schema**: `calendar_events` gains `occurrence_start timestamptz not null`
+  (backfilled `= starts_at` for every existing row), and `unique(uid)` is replaced by
+  `unique(uid, occurrence_start)`. `occurrence_start` and `starts_at` are always written equal by
+  today's importer; they are kept as separate columns so a future single-instance edit (move just
+  this Tuesday's meeting) could change `starts_at` without changing the row's recurrence
+  identity. Migration 031 also grants `minime_app` `DELETE` on `calendar_events` and adds a
+  `tier_delete` RLS policy (`tier >= 1 and tier <= app_allowed_tier()`), mirroring the exact
+  chunks/edges `tier_delete` precedent in `021_runtime_app_role.sql` — the first content table
+  needing deletion since chunks/edges. (2) **Expansion**: `expandOccurrences` (pure: no DB, no
+  clock, no network) supports `FREQ=DAILY/WEEKLY/MONTHLY/YEARLY`, `INTERVAL`, `COUNT`, `UNTIL`
+  (UTC datetime or bare `DATE`), and `WEEKLY`-only plain-code `BYDAY` (no ordinals, `WKST` only
+  when absent or `MO`); `MONTHLY`/`YEARLY` reproduce RFC 5545's actual "day doesn't exist this
+  cycle → skip it, don't clamp" rule (Jan 31 has no February occurrence; Feb 29 only fires on
+  leap years) — deliberately different from `src/util/recurrence.ts`'s end-of-month CLAMPING for
+  task due-dates (030), a separate, simpler design for a different call site. Any other RRULE
+  part (`BYMONTHDAY`, `BYSETPOS`, ordinal `BYDAY`, non-`MO` `WKST`, both `COUNT` and `UNTIL`,
+  `UNTIL` before `DTSTART`, an unrecognized/empty rule) makes the whole rule "unsupported": the
+  importer falls back to importing `DTSTART` alone (RDATE/EXDATE not applied in that fallback)
+  and logs a new content-free audit event, verb `import:rrule-unsupported`
+  (`auditPayload.importMalformed` gains a `calendar`-only `reason: "unsupported_rrule"`,
+  mirroring the existing `import:malformed` shape) — never silent guessing at partial semantics.
+  Each import expands a rolling window (import time → +12 months, cap ~500 occurrences/uid).
+  (3) **Pruning**: `repo.deleteCalendarOccurrencesNotIn(uid, fromInstant, keepInstants)` deletes
+  that uid's rows with `occurrence_start >= fromInstant` not in `keepInstants` — called for
+  *every* imported uid (not only ones with an active `RRULE` this time), so a uid whose export
+  dropped its recurrence entirely (converted to a one-off, same UID) also loses its stale future
+  occurrences. `fromInstant` is always the current import's own "now", so occurrences already
+  dated in the past are structurally excluded from the delete filter regardless of
+  `keepInstants` — re-running an identical import is a no-op, and a superseded rule can never
+  delete history, only prevent stale future rows from lingering.
+- **Why:** Recurring calendar data is the common case for the events the whole point of a
+  calendar mirror is to surface (standups, 1:1s), so importing only `DTSTART` silently made most
+  of a real export invisible — not a corner case. Keying identity on `(uid, occurrence_start)`
+  rather than inventing a separate "expanded occurrence" table keeps the mirror a single flat
+  table (`minime_state`'s calendar query and the `deep_work_minutes` agg_sql needed zero
+  changes — they already just read `starts_at`) and keeps every write going through the same
+  `upsertCalendarEvent` upsert path. Falling back to DTSTART-only (rather than, say, silently
+  dropping the whole event, or guessing at an ordinal/BYMONTHDAY semantic this importer doesn't
+  implement) matches every other importer's established degrade contract in this codebase
+  (`logMalformed`): a human owner can always see *something* for a real calendar entry and the
+  audit trail flags exactly which ones need a closer look, rather than either silently losing
+  data or silently fabricating an occurrence pattern that might be wrong. Scoping pruning's
+  DELETE to `occurrence_start >= fromInstant` (never "not seen in this file" alone) is the
+  reversibility guarantee the risk assessment for this task specifically called for: the importer
+  can only ever destroy mirror data it could regenerate from a subsequent export of the same
+  calendar, and only within the forward-looking window it itself just computed — a stale or
+  buggy `RRULE` change can never retroactively erase a historical record of what actually
+  happened on a past date.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W3
+  workstream — the `(uid, occurrence_start)` identity change and future-only pruning contract
+  were adopted as planned, ratified as part of that same upfront program approval. The owner's
+  end-of-program review before any publication remains the final gate.

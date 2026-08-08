@@ -645,6 +645,7 @@ export async function seed(): Promise<Record<string, number>> {
     const end = new Date(start.getTime() + 2 * 3600_000);
     await upsertCalendarEvent({
       uid: `seed-deepwork-${i}@minime`,
+      occurrenceStart: start,
       startsAt: start,
       endsAt: end,
       title: "Deep work: reconciliation",
@@ -663,6 +664,7 @@ export async function seed(): Promise<Record<string, number>> {
     start.setHours(hour, 0, 0, 0);
     await upsertCalendarEvent({
       uid: `seed-${tag}@minime`,
+      occurrenceStart: start,
       startsAt: start,
       endsAt: new Date(start.getTime() + 3600_000),
       title,

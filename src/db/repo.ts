@@ -2686,8 +2686,14 @@ export async function listActivePages(actor?: AccessActor): Promise<any[]> {
 
 // ---------------------------------------------------------------- mirrors (importers write-only)
 
+// One row per expanded occurrence (migration 031): identity is (uid, occurrence_start), not
+// uid alone, so a recurring event's weekly/monthly/yearly instances coexist as separate rows.
+// occurrenceStart is always the same instant as startsAt for the importer today -- the two
+// columns are kept distinct in the schema so a future single-instance edit (move just this
+// Tuesday's meeting) could change starts_at without changing the row's recurrence identity.
 export async function upsertCalendarEvent(e: {
   uid: string;
+  occurrenceStart: Date;
   startsAt: Date;
   endsAt?: Date | null;
   title: string;
@@ -2695,14 +2701,34 @@ export async function upsertCalendarEvent(e: {
   attendees?: unknown;
 }): Promise<boolean> {
   const rows = await db()`
-    insert into calendar_events (uid, starts_at, ends_at, title, location, attendees, created_by, source, tier)
-    values (${e.uid}, ${e.startsAt}, ${e.endsAt ?? null}, ${e.title}, ${e.location ?? null},
+    insert into calendar_events (uid, occurrence_start, starts_at, ends_at, title, location, attendees, created_by, source, tier)
+    values (${e.uid}, ${e.occurrenceStart}, ${e.startsAt}, ${e.endsAt ?? null}, ${e.title}, ${e.location ?? null},
             ${e.attendees ? db().json(e.attendees as any) : null}, 'importer:calendar', 'importer:calendar', 1)
-    on conflict (uid) do update
+    on conflict (uid, occurrence_start) do update
       set starts_at = excluded.starts_at, ends_at = excluded.ends_at, title = excluded.title,
           location = excluded.location, attendees = excluded.attendees
     returning (xmax = 0) as inserted`;
   return Boolean(rows[0]?.inserted);
+}
+
+// Deletes this uid's mirror rows that the importer no longer produces, scoped to
+// occurrence_start >= fromInstant (the current import's window start) so past occurrences --
+// which the importer never re-generates on a later import -- are structurally untouched no
+// matter what keepInstants contains. Safe to call for every imported uid (recurring or not):
+// keepInstants=[] correctly clears every future row for a uid whose recurrence disappeared
+// entirely from the latest export.
+export async function deleteCalendarOccurrencesNotIn(
+  uid: string,
+  fromInstant: Date,
+  keepInstants: Date[],
+): Promise<number> {
+  const rows = await db()`
+    delete from calendar_events
+    where uid = ${uid}
+      and occurrence_start >= ${fromInstant}
+      and not (occurrence_start = any(${db().array(keepInstants)}))
+    returning id`;
+  return rows.length;
 }
 
 export async function insertTransaction(t: {

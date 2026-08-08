@@ -10,7 +10,7 @@ export const RUNTIME_ROLE_TABLE_PRIVILEGES = {
   journal_entries: ["SELECT", "INSERT"],
   person_aliases: ["SELECT", "INSERT"],
   interactions: ["SELECT", "INSERT"],
-  calendar_events: ["SELECT", "INSERT", "UPDATE"],
+  calendar_events: ["SELECT", "INSERT", "UPDATE", "DELETE"],
   email_meta: ["SELECT", "INSERT"],
   org_aliases: ["SELECT", "INSERT"],
   decision_transcripts: ["SELECT", "INSERT"],

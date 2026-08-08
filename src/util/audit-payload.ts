@@ -288,7 +288,14 @@ function llmEgressOutcome(input: {
 }
 
 type ImportMalformedInput =
-  | { importer: "calendar"; reason: "missing_required_fields"; recordNumber: number }
+  // "unsupported_rrule" backs the calendar importer's separate "import:rrule-unsupported" verb
+  // (an event whose RRULE has an unsupported part still imports DTSTART as one row -- not
+  // skipped, so this reason is never paired with verb "import:malformed").
+  | {
+      importer: "calendar";
+      reason: "missing_required_fields" | "unsupported_rrule";
+      recordNumber: number;
+    }
   | { importer: "email_meta"; reason: "missing_required_fields"; recordNumber: number }
   | { importer: "transactions"; reason: "invalid_date_or_amount"; recordNumber: number }
   | {
@@ -300,7 +307,9 @@ type ImportMalformedInput =
 function importMalformed(input: ImportMalformedInput): AuditPayload {
   const importer = fixed(input.importer, ["calendar", "email_meta", "health", "transactions"]);
   let reason: ImportMalformedInput["reason"];
-  if (importer === "calendar" || importer === "email_meta") {
+  if (importer === "calendar") {
+    reason = fixed(input.reason, ["missing_required_fields", "unsupported_rrule"]);
+  } else if (importer === "email_meta") {
     reason = fixed(input.reason, ["missing_required_fields"]);
   } else if (importer === "transactions") {
     reason = fixed(input.reason, ["invalid_date_or_amount"]);
@@ -715,6 +724,7 @@ function expectedPayloadKind(verb: string, payload: AuditPayload): AuditPayloadK
     "egress:embed": "llmEmbedEgress",
     "egress:embed:outcome": "llmEmbedOutcome",
     "import:malformed": "importMalformed",
+    "import:rrule-unsupported": "importMalformed",
     "inbox:closed-existing-task": "inboxClosedExistingTask",
     "inbox:duplicate": "inboxDuplicate",
     "inbox:filed": "inboxFiled",
