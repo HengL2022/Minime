@@ -72,11 +72,25 @@ interface Target {
   row: Record<string, any>;
 }
 
-// Mirrors minime_get_context's own resolution exactly (context.ts): type+id goes through the
-// same tier-filtered getRow, and a bare name tries person then org. The NOT_FOUND wording for
-// the name path is byte-identical to context.ts's on purpose — resolvePerson/resolveOrg already
-// collapse "nothing exists" and "a tier-2 match exists but is locked" into the same null, so
-// this tool must not add a query that would split that back into a tier-2 existence oracle.
+// Mirrors minime_get_context's own resolution exactly (context.ts) for the tier predicate:
+// type+id goes through the same tier-filtered getRow, and a bare name tries person then org. The
+// NOT_FOUND wording for the name path is byte-identical to context.ts's on purpose —
+// resolvePerson/resolveOrg already collapse "nothing exists" and "a tier-2 match exists but is
+// locked" into the same null, so this tool must not add a query that would split that back into a
+// tier-2 existence oracle.
+//
+// One deliberate divergence from context.ts, for the type+id path only: getRow does not filter
+// orgs.retired_at, and that is CORRECT for context.ts — an inspection tool must always be able to
+// read a row by id (I5), and it flags retirement in its response instead of hiding the row. This
+// tool is a MUTATION tool, so a retired org (retypeOrgToPerson, repo.ts — an extractor-minted org
+// that turned out to actually be a person) must not be a valid write target, matching resolveOrg's
+// own NAME-path exclusion of retired_at (012_org_retire.sql). Without this, add_alias/rename would
+// resolve the retired org and only fail later, deep in upsert_derived_alias's `retired_at is null`
+// guard (029) — a raw entity_alias_parent_missing exception with no translation below, surfacing
+// as an opaque INTERNAL error instead of a clean domain one (review fix for W2-6). Excluding it
+// here instead means a retired org behaves exactly like any other invisible target — plain
+// NOT_FOUND, same message, no new oracle (the name path already couldn't find it either) — and the
+// SQL guard is never reached at all.
 async function resolveTarget(params: Record<string, any>, ctx: ToolCtx): Promise<Target> {
   if (params.person_name) {
     let type: TargetType = "person";
@@ -96,7 +110,8 @@ async function resolveTarget(params: Record<string, any>, ctx: ToolCtx): Promise
   }
   if (params.type && params.id) {
     const row = await getRow(params.type, params.id, ctx.actor);
-    if (!row) throw notFoundById(params.type, params.id);
+    const retired = params.type === "org" && row && row.retired_at;
+    if (!row || retired) throw notFoundById(params.type, params.id);
     return { type: params.type, row };
   }
   throw new ToolError("BAD_INPUT", "provide either type+id or person_name");

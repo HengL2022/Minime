@@ -483,6 +483,53 @@ describe("minime_upsert_person", () => {
     expect(contextError.code).toBe("BAD_INPUT");
   });
 
+  // Review fix for W2-6: a retired org (retypeOrgToPerson's soft-delete, repo.ts, marks
+  // retired_at when an extractor-minted org turns out to actually be a person) was still
+  // resolvable as a MUTATION target via type+id — getRow deliberately leaves retired_at
+  // unfiltered for inspection tools (minime_get_context) but this tool never excluded it for
+  // itself, so add_alias/rename reached upsert_derived_alias's `retired_at is null` guard (029)
+  // and crashed with an opaque INTERNAL error instead of a clean domain one. resolveTarget now
+  // excludes retired orgs on the type+id path too, matching resolveOrg's own name-path exclusion.
+  test("retired org resolved by id is NOT_FOUND, not an opaque INTERNAL crash — add_alias and rename", async () => {
+    const ctx = sessionToolCtx("agent:org-retired-target");
+    const { id: orgId } = await ensureOrg("Fictional Retired Holdings Co", "human", "manual", {
+      tier: 1,
+    });
+    // Mirrors retypeOrgToPerson's own write (repo.ts) without the full retype dance — retired_at
+    // alone is what getRow leaves unfiltered and what the fix now checks for.
+    await testSql`
+      update orgs set retired_at = now(), retired_reason = 'fictional test retirement'
+      where id = ${orgId}::uuid`;
+
+    const aliasError = expectErr(
+      await upsertPerson(ctx, {
+        type: "org",
+        id: orgId,
+        action: "add_alias",
+        alias: "Fictional Ret Alias",
+      }),
+    );
+    expect(aliasError.code).toBe("NOT_FOUND");
+
+    const renameError = expectErr(
+      await upsertPerson(ctx, {
+        type: "org",
+        id: orgId,
+        action: "rename",
+        name: "Fictional Retired Renamed",
+      }),
+    );
+    expect(renameError.code).toBe("NOT_FOUND");
+
+    // Neither refusal wrote anything: no alias row landed, canonical name untouched.
+    const aliasRows = await testSql`
+      select 1 from org_aliases where org_id = ${orgId}::uuid
+        and lower(alias) = lower('Fictional Ret Alias')`;
+    expect(aliasRows).toHaveLength(0);
+    const [orgRow] = await testSql`select canonical_name from orgs where id = ${orgId}::uuid`;
+    expect(orgRow!.canonical_name).toBe("Fictional Retired Holdings Co");
+  });
+
   test("set_relation and set_context use coalesce semantics: each patches only its own field", async () => {
     const ctx = sessionToolCtx("agent:person-relation-context");
     const { id: personId } = await ensurePerson("Fictional Owen Rel", "human", "manual", {
