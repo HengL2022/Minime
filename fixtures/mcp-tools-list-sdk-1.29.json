@@ -90,7 +90,7 @@
   },
   {
     "name": "minime_state",
-    "description": "Snapshot of now: today/tomorrow calendar, due tasks, tasks moved (closed) today, open commitments, decision reviews due, review-queue count, metric anomalies (from rollups only).",
+    "description": "Snapshot of now: today/tomorrow calendar, due tasks, tasks moved (closed) today, captures filed today (type/confidence/title/tier), open commitments, decision reviews due, review-queue count, metric anomalies (from rollups only).",
     "inputSchema": {
       "type": "object",
       "properties": {

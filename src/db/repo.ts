@@ -679,6 +679,7 @@ export async function vectorCandidates(
 export interface ParentMeta {
   id: string;
   title: string;
+  tier: number;
   updated_at: Date;
   created_by: string;
   derived_from: string | null;
@@ -707,8 +708,8 @@ export async function parentMeta(
   // hiding it. getRow (below) deliberately does NOT apply this filter: the owner/agent can
   // always inspect any row, live or not, by id.
   const rows = await db()`
-    select id, left(${db()(titleCol)}::text, 120) as title, updated_at, created_by, derived_from,
-           source, superseded_by, superseded_at
+    select id, left(${db()(titleCol)}::text, 120) as title, tier, updated_at, created_by,
+           derived_from, source, superseded_by, superseded_at
     from ${db()(table)}
     where id = any(${ids}) and tier >= 1 and tier <= ${allowed}
       and not (superseded_at is not null and superseded_by is null)`;
@@ -3000,6 +3001,85 @@ export async function resolveOpenReviewItemsForInbox(inboxItemId: string): Promi
 
 // ---------------------------------------------------------------- state snapshot
 
+// inbox_items.filed_table (the raw SQL table name fileRow/refile.ts just filed into) -> the
+// ParentType parentMeta expects. Fixed map, not user input; mirrors refile.ts's own SOURCE_TYPE
+// (a different layer, same five destinations — pipeline/watcher.ts's FiledTable is the closed
+// set fileRow ever produces). Kept local to this file rather than imported/exported: repo.ts
+// must not depend on src/pipeline or src/mcp/tools (layering).
+const FILED_TABLE_PARENT_TYPE: Record<string, ParentType> = {
+  tasks: "task",
+  journal_entries: "journal",
+  pages: "page",
+  interactions: "interaction",
+  decisions: "decision",
+};
+
+// Mirrors review-queue.ts's HIDDEN sentinel. Duplicated rather than imported: repo.ts must not
+// depend on src/mcp/tools (layering), and stateSnapshot is the one place that needs it here.
+const FILING_HIDDEN_TITLE = "[above current tier]";
+
+export interface FiledTodayEntry {
+  id: string; // inbox_items.id (the capture)
+  type: ParentType | null; // resolved via FILED_TABLE_PARENT_TYPE; null only for an unrecognized filed_table
+  filed_table: string;
+  filed_id: string;
+  kind: string | null; // classifier_output->>'type' — the classifier's own guess, unmasked (tier 1: inbox_items is always tier 1)
+  confidence: number | null;
+  title: string; // resolved through parentMeta at the caller's tier; FILING_HIDDEN_TITLE when the destination row isn't visible
+  tier: number | null; // the destination row's actual tier, only when visible — never guessed or revealed for a masked row
+}
+
+interface FiledTodayRow {
+  id: string;
+  filed_table: string | null;
+  filed_id: string | null;
+  kind: string | null;
+  confidence: number | null;
+}
+
+/**
+ * Resolve each today-filed capture's destination title/tier through the SAME tier-filtered
+ * parentMeta every other title lookup uses — never from classifier_output (which is unmasked
+ * inbox metadata and may describe tier-2-grade content the caller cannot see). A filing whose
+ * destination is above the caller's tier keeps kind/confidence/filed_table (all inbox_items
+ * metadata, always tier 1) but its title reads FILING_HIDDEN_TITLE and tier is null — the
+ * masking convention review-queue.ts's visibleTitle established, reused here rather than
+ * reimplemented differently.
+ */
+async function resolveFiledToday(
+  rows: FiledTodayRow[],
+  actor: AccessActor,
+): Promise<FiledTodayEntry[]> {
+  if (rows.length === 0) return [];
+  const idsByType = new Map<ParentType, Set<string>>();
+  for (const r of rows) {
+    const type = r.filed_table ? FILED_TABLE_PARENT_TYPE[r.filed_table] : undefined;
+    if (!type || !r.filed_id) continue;
+    if (!idsByType.has(type)) idsByType.set(type, new Set());
+    idsByType.get(type)!.add(r.filed_id);
+  }
+  const meta = new Map<string, ParentMeta>();
+  for (const [type, ids] of idsByType) {
+    for (const [id, m] of await parentMeta(type, [...ids], actor)) {
+      meta.set(`${type}:${id}`, m);
+    }
+  }
+  return rows.map((r) => {
+    const type = r.filed_table ? (FILED_TABLE_PARENT_TYPE[r.filed_table] ?? null) : null;
+    const hit = type && r.filed_id ? meta.get(`${type}:${r.filed_id}`) : undefined;
+    return {
+      id: r.id,
+      type,
+      filed_table: r.filed_table ?? "",
+      filed_id: r.filed_id ?? "",
+      kind: r.kind,
+      confidence: r.confidence,
+      title: hit ? hit.title : FILING_HIDDEN_TITLE,
+      tier: hit ? Number(hit.tier) : null,
+    };
+  });
+}
+
 export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Promise<any> {
   const t = now();
   const ownerTimeZone = configuredTimeZone(config.tz);
@@ -3015,42 +3095,63 @@ export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Pro
   // govern due work and moved_today, but must never select a different cache day.
   const ownerToday = localDateStr(t, ownerTimeZone);
   const allowed = await allowedTier(actor);
-  const [calendar, tasks, commitments, decisionsDue, openReview, anomalies, movedToday] =
-    await Promise.all([
-      db()`select id, uid, starts_at, ends_at, title, location from calendar_events
+  const [
+    calendar,
+    tasks,
+    commitments,
+    decisionsDue,
+    openReview,
+    anomalies,
+    movedToday,
+    filedTodayRaw,
+  ] = await Promise.all([
+    db()`select id, uid, starts_at, ends_at, title, location from calendar_events
         where starts_at >= ${t}::timestamptz - interval '1 hour'
           and starts_at < ${t}::timestamptz + interval '2 days'
           and tier >= 1 and tier <= ${allowed}
         order by starts_at`,
-      db()`select id, title, status, due from tasks
+    db()`select id, title, status, due from tasks
         where status in ('inbox','active','waiting') and due is not null and due <= ${today}::date
           and tier >= 1 and tier <= ${allowed}
         order by due`,
-      db()`select id, what, to_whom, due from commitments
+    db()`select id, what, to_whom, due from commitments
         where status = 'open' and tier >= 1 and tier <= ${allowed}
         order by due nulls last`,
-      db()`select id, question, review_at, choice from decisions
+    db()`select id, question, review_at, choice from decisions
         where reviewed_at is null
           and tier >= 1 and tier <= ${allowed}
           and ( (review_at is not null and review_at <= ${today}::date + 3)
                 or choice is null )
         order by review_at nulls last`,
-      db()`select count(*)::int as n from review_queue where status = 'open'`,
-      metricAnomalies(ownerToday, ownerTimeZone),
-      // What MOVED today: tasks closed (done/dropped) on the caller's LOCAL calendar day
-      // (the owner zone by default). minime_state otherwise reports only OPEN work, so completions
-      // were structurally invisible to the evening review's "what moved today".
-      // Compare updated_at and today in the same effective caller zone (owner zone by default).
-      db()`select id, title, status, updated_at from tasks
+    db()`select count(*)::int as n from review_queue where status = 'open'`,
+    metricAnomalies(ownerToday, ownerTimeZone),
+    // What MOVED today: tasks closed (done/dropped) on the caller's LOCAL calendar day
+    // (the owner zone by default). minime_state otherwise reports only OPEN work, so completions
+    // were structurally invisible to the evening review's "what moved today".
+    // Compare updated_at and today in the same effective caller zone (owner zone by default).
+    db()`select id, title, status, updated_at from tasks
         where status in ('done','dropped')
           and (updated_at at time zone ${effectiveTimeZone})::date = ${today}::date
           and tier >= 1 and tier <= ${allowed}
         order by updated_at`,
-    ]);
+    // What was FILED today: captures the classifier/refile routed into a typed row on the
+    // caller's LOCAL calendar day (same predicate shape as moved_today above). inbox_items
+    // itself is always tier 1 (assigned before the row has a real destination), so this read
+    // never needs to hide a row — only the destination title/tier resolved below can be masked.
+    db()`select id, filed_table, filed_id, classifier_output->>'type' as kind,
+           (classifier_output->>'confidence')::float as confidence
+        from inbox_items
+        where status = 'filed'
+          and (updated_at at time zone ${effectiveTimeZone})::date = ${today}::date
+          and tier >= 1 and tier <= ${allowed}
+        order by updated_at`,
+  ]);
+  const filedToday = await resolveFiledToday(filedTodayRaw as unknown as FiledTodayRow[], actor);
   return {
     calendar,
     tasks_due: tasks,
     moved_today: movedToday,
+    filed_today: filedToday,
     commitments_open: commitments,
     decision_reviews_due: decisionsDue,
     review_queue_open: openReview[0]?.n ?? 0,
