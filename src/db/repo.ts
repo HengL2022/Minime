@@ -1023,10 +1023,12 @@ export async function upsertPersonDate(d: {
 // (e.g. day=31 in a 30-day month).
 //
 // Tier-gated on BOTH the date row's own tier and its person's tier: a date is only visible when
-// both are within the caller's allowed tier. A person promoted to tier 2 (e.g. by
-// minime_log_interaction) makes their tier-1 dates drop out of this list at tier 1 too --
-// consistent with how every other person-attached fact behaves once its person is hidden, and
-// accepted rather than special-cased (W3-10 spec).
+// both are within the caller's allowed tier. A person whose own identity tier is 2 (e.g. minted
+// purely from journal/page extraction — 037_identity_content_tier_split.sql; minime_log_interaction
+// no longer mints or promotes a subject to tier 2) makes their dates drop out of this list at
+// tier 1 too, even a date row that is itself tier 1 -- consistent with how every other
+// person-attached fact behaves once its person is hidden, and accepted rather than special-cased
+// (W3-10 spec).
 export async function upcomingPersonDates(
   today: string,
   days: number,
@@ -1213,20 +1215,26 @@ export async function retypeOrgToPerson(
       personId = row!.id as string;
       created = true;
     }
-    const [promoted] = await tx`
+    // W4-1 identity/content tier split: the reused person's own identity tier is no longer
+    // raised to match the org being folded into it (greatest(tier, orgTier)) -- resolving into
+    // an EXISTING identity never promotes it, matching resolve_or_promote_entity's own rule
+    // (037_identity_content_tier_split.sql). Only the tier-0 quarantine absorb stays unconditional
+    // (and is, in practice, unreachable here: the namespace-matching query above already requires
+    // existingPerson.tier and orgTier to share tier-0-ness or both be in {1,2}, so the "one side
+    // is 0 and the other isn't" arm below never fires for a REUSED person — it is kept anyway as
+    // the same defensive, verbatim absorbing floor every other CASE in this migration keeps).
+    const [updated] = await tx`
       update people
       set relation = coalesce(relation, ${opts.relation ?? null}),
-          tier = case when tier = 0 or ${orgTier} = 0 then 0
-                      else greatest(tier, ${orgTier}) end,
+          tier = case when tier = 0 or ${orgTier} = 0 then 0 else tier end,
           derived_from = case when tier <> 0 and ${orgTier} = 0
                               then ${org.derived_from ?? orgId}
                               else coalesce(derived_from, ${org.derived_from ?? orgId}) end,
           supersedes_id = coalesce(supersedes_id, ${orgId})
       where id = ${personId}
       returning tier, derived_from`;
-    const personTier = Number(promoted!.tier) as 0 | 1 | 2;
-    const personDerivedFrom =
-      (promoted!.derived_from as string | null) ?? org.derived_from ?? orgId;
+    const personTier = Number(updated!.tier) as 0 | 1 | 2;
+    const personDerivedFrom = (updated!.derived_from as string | null) ?? org.derived_from ?? orgId;
     await tx`
       update person_aliases
       set tier = case when tier = 0 or ${personTier} = 0 then 0
@@ -1461,16 +1469,23 @@ export async function mergePersonIntoPerson(
       select count(*)::int n from edges where src_id = ${intoId} or dst_id = ${intoId}`;
     const edgesRepointed = ((edgeCntRow as any)?.n ?? 0) as number;
 
-    // 4. Target absorbs the source's relation/context/last-contact/tier; supersedes_id records
-    // only the FIRST ancestor (coalesce) — a target merged into more than once keeps its
-    // original pointer, matching retypeOrgToPerson's own coalesce behavior.
+    // 4. Target absorbs the source's relation/context/last-contact; supersedes_id records only
+    // the FIRST ancestor (coalesce) — a target merged into more than once keeps its original
+    // pointer, matching retypeOrgToPerson's own coalesce behavior. W4-1 identity/content tier
+    // split: the target's own identity tier is no longer raised to the source's tier
+    // (greatest(tier, sourceTier)) — folding in a more-privately-evidenced source must not push a
+    // publicly-known identity's own card out of tier-1 reach, mirroring
+    // resolve_or_promote_entity's "resolving an existing identity never promotes it" rule
+    // (037_identity_content_tier_split.sql). The tier-0 quarantine absorb stays unconditional —
+    // and, same as retypeOrgToPerson above, is unreachable in practice here since the guard above
+    // this block already refuses a merge that crosses the tier-0 boundary, so source and target
+    // always already share tier-0-ness or both sit in {1,2} by the time this UPDATE runs.
     await tx`
       update people
       set relation = coalesce(relation, ${sourceRelation}),
           context = coalesce(context, ${sourceContext}),
           last_contact_at = greatest(last_contact_at, ${sourceLastContactAt}),
-          tier = case when tier = 0 or ${sourceTier}::smallint = 0 then 0
-                      else greatest(tier, ${sourceTier}::smallint) end,
+          tier = case when tier = 0 or ${sourceTier}::smallint = 0 then 0 else tier end,
           supersedes_id = coalesce(supersedes_id, ${fromId})
       where id = ${intoId}`;
 

@@ -401,9 +401,16 @@ export async function fileRow(
       const existingOrg = await exactActiveOrgExists(name);
       const st = c.fields.subject_type;
       const useOrg = !!existingOrg || st === "org" || (st !== "person" && orgCue(name));
+      // W4-1 identity/content tier split: this is the same "log an interaction with a subject"
+      // product behavior as minime_log_interaction (interactions.ts), just triggered from the
+      // watcher's own auto-classify-and-file pipeline (and, via fileRow, minime_refile) instead
+      // of a direct tool call — the subject's identity mints at tier 1, matching interactions.ts,
+      // while the interaction row/chunk indexed below stay tier 2. Resolving an EXISTING
+      // person/org never changes its stored tier either way (resolve_or_promote_entity,
+      // 037_identity_content_tier_split.sql).
       if (useOrg) {
         const org = await ensureOrg(name, actor, "capture", {
-          tier: 2,
+          tier: 1,
           derivedFrom: inboxId,
         });
         const { id } = await insertInteraction({
@@ -418,7 +425,7 @@ export async function fileRow(
         return { primary: ["interactions", id] };
       }
       const person = await ensurePerson(name, actor, "capture", {
-        tier: 2,
+        tier: 1,
         derivedFrom: inboxId,
       });
       const { id } = await insertInteraction({

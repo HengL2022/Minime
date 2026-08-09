@@ -448,8 +448,10 @@ describe("minime_review_queue tool", () => {
 
 // W1-5: the person_name NOT_FOUND message must never distinguish "exists at tier 2, locked"
 // from "does not exist at all" — that distinction would be an oracle for otherwise
-// RLS-hidden tier-2 identities (e.g. people minted by minime_log_interaction via
-// ensurePerson({tier:2}), interactions.ts:65).
+// RLS-hidden tier-2 identities (e.g. people minted purely from journal/page extraction via
+// ensureExtractedPerson — since W4-1, minime_log_interaction's OWN subjects mint at tier 1
+// instead, 037_identity_content_tier_split.sql, but a tier-2 identity is still directly
+// reachable through ensurePerson({tier:2}) below, which is exactly what this test exercises).
 describe("minime_get_context person_name NOT_FOUND (tier-aware, no oracle)", () => {
   const TIER_AWARE_NOT_FOUND =
     "no person or org matching that name at the current access tier — a match may exist " +

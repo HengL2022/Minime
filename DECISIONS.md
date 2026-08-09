@@ -3330,3 +3330,65 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   renumbered 032→036 only because 032-035 were already taken by other W3 tasks landing first on
   this branch, the same numbering-deviation precedent 030/031/034/035 each already documented; not
   a product or scope decision in itself).
+
+## 2026-08-09 — Identity/content tier split: resolving an existing identity no longer promotes its tier
+
+- **Context:** Since migration 022, every entity resolution promoted tier via
+  `greatest(current, requested)`: `resolve_or_promote_entity`, `resolve_or_promote_extracted_person`/
+  `_org`, and `upsert_derived_alias` all raised an EXISTING person/org row's stored tier (and
+  bulk-bumped its other aliases) merely because it was resolved again from more-private content,
+  and the `keep_entity_tier_monotonic` trigger forbade any demotion outright. One tier-2 journal
+  mention of a tier-1 friend therefore swallowed their whole identity card — canonical name,
+  relation, `last_contact_at` — into tier 2 permanently, and `minime_log_interaction` (and the
+  watcher's own auto-filed/refiled interaction path) minted every new interaction subject straight
+  at tier 2, so simply logging a call with someone hid their own identity by default.
+- **Decision:** Migration 037 (`db/migrations/037_identity_content_tier_split.sql`) splits identity
+  from content. Resolving an EXISTING person/org/alias row never raises (or lowers) its stored
+  tier regardless of the requested tier — only `derived_from` is backfilled when absent — across
+  `resolve_or_promote_entity`, `resolve_or_promote_extracted_person`, `resolve_or_promote_extracted_org`,
+  and `upsert_derived_alias`; a brand-new row minted by a tier-2 derivation still mints at tier 2,
+  unchanged, and the tier-0 quarantine absorb (`when tier = 0 then 0`) is preserved verbatim
+  everywhere. `keep_entity_tier_monotonic` is replaced by `keep_entity_tier_guarded`: a raise is
+  still always allowed, a tier-0 transition still absorbs unconditionally for the owner connection
+  but is flatly refused for `minime_app`, and a demotion (nonzero tier N to a lower nonzero tier)
+  is allowed only inside a transaction that has explicitly set `minime.allow_tier_demotion = '1'`
+  AND is not running as `minime_app` — the sanctioned owner-CLI review/backfill path W4-2 will add;
+  nothing in this migration's own functions ever exercises that path, since none of them touch the
+  tier column on an existing row anymore. `retypeOrgToPerson` and `mergePersonIntoPerson`
+  (`src/db/repo.ts`) get the same treatment: reusing/merging into an existing person keeps that
+  person's own tier (still floored to 0 by the same tier-0 absorb) instead of raising it to
+  `greatest(tier, incoming)`. `minime_log_interaction` (`src/mcp/tools/interactions.ts`) and the
+  watcher's own auto-filed/refiled interaction path (`src/pipeline/watcher.ts` — the identical
+  product behavior reached through a different entry point) now call `ensurePerson`/`ensureOrg`
+  with `tier: 1` instead of `tier: 2` for a new subject — an owner-initiated contact is
+  identity-tier data, not content — while the interaction row itself, its indexed chunk, and any
+  captured promise/commitment stay tier 2, unchanged. No existing row is rewritten by this
+  migration; a review/backfill pass over history already promoted under the old rule is W4-2,
+  deliberately out of scope here.
+- **Supersedes (identity fields only):** narrows the 2026-08-06 "Derived identities inherit source
+  privacy and provenance" entry's "Promotion is monotonic from tier 1 to tier 2" clause for a
+  person/org row's own identity fields (`canonical_name`, `relation`, `last_contact_at`)
+  specifically — those now live at the identity row's own tier and are never raised merely because
+  the entity is mentioned in, or resolved by, tier-2 content; this discloses at tier 1 that contact
+  happened and roughly when, but never what. That entry's other provisions are unchanged and still
+  govern: the tier-0 absorbing quarantine is never lifted; a brand-new alias spelling or graph edge
+  genuinely DERIVED from tier-2 prose still mints at tier 2 (content, not identity); every derived
+  row still records its real `source`/`created_by`/`derived_from`; and the alias
+  privacy-namespace/RLS mechanics are untouched.
+- **Why:** Locating a contact ("I know Alice, we last spoke Tuesday") is meaningfully less
+  sensitive than the content of that contact ("what Alice and I discussed"). The prior monotonic
+  rule conflated the two: one private mention of a public contact permanently hid that contact's
+  own identity card, and every routine `minime_log_interaction` call minted a brand-new phantom
+  identity nobody could find again without an unlock — defeating the tool's basic purpose.
+  Splitting identity from content keeps content strictly tier-gated (I3) while making identity
+  behave like the rest of the owner's address book: writable and locatable at tier 1, regardless
+  of what tier-2 content later happens to mention it.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W4 workstream
+  — task W4-1, the program's own stated highest-risk change, implemented as specified (the
+  ratified split: identity fields stay at the identity's own tier even when the entity is
+  mentioned in tier-2 content; `minime_log_interaction` subjects become tier-1 identities).
+  Migration numbered 037 (the spec's own file list named it "032_identity_content_tier_split.sql
+  (new, provisional number)") only because 032-036 were already taken by other tasks landing first
+  on this branch — the same numbering-deviation precedent 030/031/034/035/036 each already
+  documented; not a product or scope decision in itself.

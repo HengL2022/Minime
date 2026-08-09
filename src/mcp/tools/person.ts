@@ -7,9 +7,12 @@
 // Alias tier inheritance is the safety edge this tool exists to get right: a new alias always
 // carries the resolved entity's CURRENT tier (never a caller-supplied or default tier), so an
 // alias minted for a tier-2 person is itself tier 2 and can never make that person resolvable
-// at tier 1. upsert_derived_alias (022) independently enforces the same floor at the SQL layer
-// (effective tier = greatest(current entity tier, requested tier)), so this is belt-and-suspenders,
-// not the only guard.
+// at tier 1. Since 037_identity_content_tier_split.sql, upsert_derived_alias itself no longer
+// recomputes this floor (resolving an EXISTING entity/alias no longer touches tier at all, so a
+// mention elsewhere can't quietly change what a manual add_alias here would produce) — but
+// person_aliases' own before-insert trigger (set_entity_alias_tier, 022, unchanged by the split)
+// still floors any newly inserted alias to at least its parent's CURRENT tier regardless of what
+// tier the caller requested, so this remains belt-and-suspenders, not the only guard.
 //
 // upsert_derived_alias (029) refuses an alias string already owned by a DIFFERENT person/org, but
 // ONLY when that other row is itself within the calling session's own app_allowed_tier() — so

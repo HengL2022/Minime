@@ -134,6 +134,10 @@ describe("retypeOrgToPerson", () => {
       },
     ]);
 
+    // W4-1 identity/content tier split: reusing an EXISTING person (tier 1, the default here)
+    // never raises its own identity tier to match the org being folded into it
+    // (037_identity_content_tier_split.sql) — only derived_from is backfilled. The MOVED/inserted
+    // aliases below still inherit the (unraised) person's tier as their own floor, same as before.
     const reusedPerson = await ensurePerson("Private Reused Person", "human");
     const reusedOrg = await ensureOrg("Private Reused Person", "system:extract", "extract", {
       tier: 2,
@@ -143,7 +147,7 @@ describe("retypeOrgToPerson", () => {
     expect(reused.personId).toBe(reusedPerson.id);
     const [reusedAfter] = await sql`
       select tier, derived_from from people where id = ${reused.personId}`;
-    expect(reusedAfter).toMatchObject({ tier: 2, derived_from: source!.id });
+    expect(reusedAfter).toMatchObject({ tier: 1, derived_from: source!.id });
     const aliases = await sql`
       select tier from person_aliases where person_id in (${fresh.personId}, ${reused.personId})`;
     expect(aliases.length).toBeGreaterThanOrEqual(3);

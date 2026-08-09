@@ -136,9 +136,23 @@ describe("mergePersonIntoPerson", () => {
     expect(row!.context).toBe("met at a conference"); // filled from source since target had none
   });
 
-  test("target absorbs the source's tier (greatest of 1/2)", async () => {
+  // W4-1 identity/content tier split: the target keeps its OWN identity tier regardless of the
+  // source's -- folding in a more-privately-evidenced source must not push a publicly-known
+  // identity's own card out of tier-1 reach (037_identity_content_tier_split.sql), mirroring
+  // resolve_or_promote_entity's "resolving an existing identity never promotes it" rule.
+  test("target keeps its own identity tier — merging in a more-private source does not raise it", async () => {
     const { id: fromId } = await ensurePerson("Private Source", "human", "manual", { tier: 2 });
     const { id: intoId } = await ensurePerson("Public Target", "human", "manual", { tier: 1 });
+
+    await mergePersonIntoPerson(fromId, intoId);
+
+    const [row] = await sql`select tier from people where id = ${intoId}`;
+    expect(row!.tier).toBe(1);
+  });
+
+  test("target keeps its own identity tier — merging in a less-private source does not lower it", async () => {
+    const { id: fromId } = await ensurePerson("Public Source", "human", "manual", { tier: 1 });
+    const { id: intoId } = await ensurePerson("Private Target", "human", "manual", { tier: 2 });
 
     await mergePersonIntoPerson(fromId, intoId);
 

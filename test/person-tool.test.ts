@@ -162,17 +162,21 @@ describe("minime_upsert_person", () => {
       select id from people where lower(canonical_name) = lower('Fictional Sarha Chen')`;
     expect(peopleNamedSarha).toHaveLength(0); // no separate person was ever minted
 
-    // The interaction promotes her to tier 2 (minime_log_interaction always writes tier 2); the
-    // owner's unlocked session can still find her by the misspelling going forward.
+    // W4-1: resolving her via the interaction does NOT touch her identity tier either way — she
+    // stays exactly tier 1, same as before the call (minime_log_interaction never promotes an
+    // existing identity; the interaction content itself is tier 2, unaffected by her own tier).
+    const [sarahRow] = await testSql`select tier from people where id = ${sarahId}::uuid`;
+    expect(sarahRow!.tier).toBe(1);
+    // A tier-1 identity resolves the same whether the caller is locked or unlocked.
     expect(await findByName(ctx, "Fictional Sarha Chen")).toBe(sarahId);
   });
 
   test("add_alias refuses a string a DIFFERENT visible person already owns (current 022 conflict guard — retroactive repair is not a merge)", async () => {
     const ctx = sessionToolCtx("agent:person-conflict");
-    // Unlocked so the phantom minted below (log_interaction always tiers its subject 2) is
-    // actually VISIBLE to this session — otherwise the conflict check correctly treats it as
-    // invisible (029's tier-bound fix, see the tier-oracle tests above) and this would no longer
-    // exercise "a DIFFERENT VISIBLE person already owns it" at all.
+    // W4-1: log_interaction now mints its subject's identity at tier 1, so the phantom minted
+    // below is visible to this session even locked — the unlock here is no longer load-bearing
+    // for that visibility, only kept so this test still exercises the SAME (now-unlocked) caller
+    // shape as the tier-2-hidden oracle variant below, which does still need it.
     await requestAndApproveTier2(ctx);
     const { id: realId } = await ensurePerson("Fictional Real Marta", "human", "manual", {
       tier: 1,
@@ -205,17 +209,13 @@ describe("minime_upsert_person", () => {
   test("tier-2 person's new alias is itself tier 2 and does NOT resolve at a locked (tier-1) session — the alias-tier-inheritance safety edge", async () => {
     const ownerCtx = sessionToolCtx("agent:person-tier2-owner");
     await requestAndApproveTier2(ownerCtx);
-    // A tier-2 person, minted the way minime_log_interaction always mints its subjects.
-    const interactionData = expectOk(
-      await invokeTool(
-        toolByName("minime_log_interaction"),
-        { person_name: "Fictional Hidden Dana", kind: "call", summary: "Fictional tier-2 call." },
-        ownerCtx,
-      ),
-    );
-    const [interactionRow] = await testSql`
-      select person_id from interactions where id = ${interactionData.interaction_id}::uuid`;
-    const danaId = interactionRow!.person_id as string;
+    // A tier-2 person — W4-1: minime_log_interaction mints its subject's identity at tier 1, so
+    // a genuinely tier-2 identity now comes only from a purely content-derived mint (e.g. a
+    // journal/page extraction, simulated directly here the same way ensureOrg({tier:2}) already
+    // simulates a hidden org a few tests below).
+    const { id: danaId } = await ensurePerson("Fictional Hidden Dana", "human", "manual", {
+      tier: 2,
+    });
     const [danaRow] = await testSql`select tier from people where id = ${danaId}::uuid`;
     expect(danaRow!.tier).toBe(2);
 
@@ -269,19 +269,13 @@ describe("minime_upsert_person", () => {
   // visible) conflict is still correctly refused, proving the fix narrows rather than removes the
   // guard.
   test("add_alias does not leak whether a hidden tier-2 person already owns the alias string — existence-oracle closed", async () => {
-    const ownerCtx = sessionToolCtx("agent:alias-oracle-owner");
-    await requestAndApproveTier2(ownerCtx);
     const secretName = "Fictional Secret Affair Person";
-    const interactionData = expectOk(
-      await invokeTool(
-        toolByName("minime_log_interaction"),
-        { person_name: secretName, kind: "note", summary: "Fictional hidden note." },
-        ownerCtx,
-      ),
-    );
-    const [secretRow] = await testSql`
-      select person_id from interactions where id = ${interactionData.interaction_id}::uuid`;
-    const secretId = secretRow!.person_id as string;
+    // W4-1: minime_log_interaction mints its subject's identity at tier 1, so this repro's
+    // "genuinely hidden tier-2 person" precondition now comes from a purely content-derived
+    // mint instead (simulated directly, matching the sibling org/rename oracle tests below —
+    // neither needs an owner session/unlock any more than they do, since the mint is a direct
+    // repo.ts call, not a tool invocation).
+    const { id: secretId } = await ensurePerson(secretName, "human", "manual", { tier: 2 });
     const [secretPerson] = await testSql`select tier from people where id = ${secretId}::uuid`;
     expect(secretPerson!.tier).toBe(2); // repro precondition: a genuinely hidden tier-2 person
 

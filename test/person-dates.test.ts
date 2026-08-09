@@ -243,22 +243,18 @@ describe("tier gating and minime_state integration", () => {
   test("a date attached to a tier-2 person is invisible at tier 1 and visible only after an unlock", async () => {
     const ownerCtx = sessionToolCtx("agent:pd-tier-owner");
     await requestAndApproveTier2(ownerCtx);
-    const interactionData = expectOk(
-      await invokeTool(
-        toolByName("minime_log_interaction"),
-        {
-          person_name: "Fictional Hidden Birthday Person",
-          kind: "note",
-          summary: "Fictional hidden note.",
-        },
-        ownerCtx,
-      ),
+    // W4-1: minime_log_interaction mints its subject's identity at tier 1
+    // (037_identity_content_tier_split.sql), so this repro's "genuinely tier-2 person"
+    // precondition now comes from a direct tier-2 mint instead (the unlock above is still needed
+    // for setDate/state below, which resolve/read her through the actual MCP tools).
+    const { id: hiddenPersonId } = await ensurePerson(
+      "Fictional Hidden Birthday Person",
+      "human",
+      "manual",
+      { tier: 2 },
     );
-    const [interactionRow] = await testSql`
-      select person_id from interactions where id = ${interactionData.interaction_id}::uuid`;
-    const hiddenPersonId = interactionRow!.person_id as string;
     const [personRow] = await testSql`select tier from people where id = ${hiddenPersonId}::uuid`;
-    expect(personRow!.tier).toBe(2); // repro precondition: log_interaction always tiers 2
+    expect(personRow!.tier).toBe(2); // repro precondition: a genuinely tier-2 person
 
     setNow(noonUtc(2026, 5, 5));
     expectOk(

@@ -119,6 +119,20 @@ describe("tier-2 visibility: a promise-derived commitment follows the interactio
       (locked.envelope.data as any).commitments_open.some((c: any) => c.id === data.commitment_id),
     ).toBe(false);
 
+    // W4-1 identity/content tier split: the interaction's subject mints at tier 1
+    // (037_identity_content_tier_split.sql), so unlike before the split, a still-LOCKED
+    // minime_get_context finds her identity card by name — it just doesn't show the tier-2
+    // commitment (the generic tier-2-hides-commitments mechanism, a tier-1 person + tier-2
+    // commitment, is covered in depth by privacy-hardening.test.ts; this just confirms the
+    // interaction-minted subject specifically behaves the same way).
+    const lockedDossier = await invokeTool(
+      toolByName("minime_get_context"),
+      { person_name: "COMMITSENTINEL Tiered Person" },
+      ctx,
+    );
+    if (!lockedDossier.ok) throw new Error(lockedDossier.error.message);
+    expect((lockedDossier.envelope.data as any).open_commitments).toEqual([]);
+
     await requestAndApproveTier2(ctx);
 
     const unlocked = await invokeTool(toolByName("minime_state"), {}, ctx);
@@ -129,11 +143,8 @@ describe("tier-2 visibility: a promise-derived commitment follows the interactio
       ),
     ).toBe(true);
 
-    // End-to-end person-dossier check. Only meaningful post-unlock: the interaction itself
-    // promoted this person to tier 2 too (resolve_or_promote_entity's monotonic tier), so a
-    // locked minime_get_context 404s on the person entirely rather than returning a dossier with
-    // a filtered commitments list — the generic tier-2-hides-commitments mechanism itself (a
-    // tier-1 person, tier-2 commitment) is already covered by privacy-hardening.test.ts.
+    // End-to-end person-dossier check, now unlocked: her commitment appears alongside her
+    // already-visible (see lockedDossier above) identity card.
     const dossier = await invokeTool(
       toolByName("minime_get_context"),
       { person_name: "COMMITSENTINEL Tiered Person" },

@@ -25,6 +25,7 @@ export async function resetDb(): Promise<void> {
     "app_request_tier2_unlock",
     "metric_agg",
     "keep_entity_tier_monotonic",
+    "keep_entity_tier_guarded",
     "cascade_entity_tier_to_aliases",
     "set_entity_alias_tier",
     "person_has_nonworking_relation",
