@@ -112,6 +112,35 @@ describe("W4-10: bare 9+ digit rule is context-gated", () => {
     expect(out).toContain("555666777");
     expect(out).not.toContain("[REDACTED:account]");
   });
+
+  test("a standalone context-flagged number still redacts even when its digits recur inside an earlier, already-redacted Luhn card span", () => {
+    // Regression: recovering a bare-digit match's position in the original string via
+    // `original.indexOf(value, cursor)` picks the WRONG occurrence whenever the matched digit
+    // *value* also appears embedded inside an earlier IBAN/card match. Here "123456789" (9
+    // digits) is both the standalone, context-flagged number near "account" AND the leading 9
+    // digits of the 13-digit Luhn-valid card number earlier in the string — a value-based
+    // indexOf latches onto the embedded (already-redacted) occurrence and tests context around
+    // the wrong window, silently letting the real, context-flagged number survive.
+    const card = "1234567890003"; // Luhn-valid; first 9 digits are "123456789"
+    const padding = "x".repeat(45); // > BARE_DIGIT_CONTEXT_RADIUS: no context leaks across it
+    const out = redactString(`card on file ${card} ${padding} account 123456789`);
+    expect(out).toContain("[REDACTED:card]");
+    expect(out).toContain("[REDACTED:account]");
+    expect(out).not.toContain("123456789");
+  });
+
+  test("a standalone number with no genuine context nearby survives even when its digits recur inside an earlier, context-flagged Luhn card span", () => {
+    // Mirror-image of the regression above: context sits next to the card, not the standalone
+    // digits. A value-based indexOf recovery finds the embedded occurrence (right next to
+    // "account") for the standalone match too, and wrongly redacts a number with zero genuine
+    // context nearby — reintroducing the over-redaction bug W4-10 was written to fix.
+    const card = "1234567890003";
+    const padding = "x".repeat(45);
+    const out = redactString(`account ${card} ${padding} 123456789`);
+    expect(out).toContain("[REDACTED:card]");
+    expect(out).not.toContain("[REDACTED:account]");
+    expect(out).toContain("123456789");
+  });
 });
 
 describe("W4-10: owner allowlist (REDACT_ALLOWLIST) exempts declared numbers from every rule", () => {

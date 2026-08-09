@@ -79,52 +79,71 @@ export function redactStringCounted(s: string): Counted<string> {
 
 function redactSecretsCounted(s: string): Counted<string> {
   let count = 0;
-  let out = s;
-  // Pristine copy for the bare-digit context check below. `out` gets mutated by the IBAN and
-  // card passes first, and its placeholder text must never leak into that check (see comment
-  // at the bare-digit pass for why).
   const original = s;
 
+  // A same-length working copy of `original`. Every span an earlier pass redacts gets
+  // overwritten in place with '#' filler (never a digit or letter), so a later pass can neither
+  // re-match its digits nor be gated by trigger words leaking in from placeholder text (the
+  // literal "[REDACTED:iban]" contains "iban" — see the "unrelated bare digit run near a
+  // redacted IBAN survives" test below). Because the filler is exactly as long as what it
+  // replaces, `masked` and `original` share the same coordinates at every step: a match's
+  // `.index` against `masked` IS its offset in `original`, nothing to derive.
+  //
+  // An earlier version of this function let each pass shrink a working string with the real
+  // "[REDACTED:*]" text instead, then recovered the bare-digit pass's true offset afterwards via
+  // `original.indexOf(match, cursor)`. That silently finds the WRONG occurrence whenever the
+  // matched digit *value* recurs — once inside an already-redacted IBAN/card span and once
+  // standalone (e.g. a message that states an IBAN and later separately quotes that IBAN's own
+  // account-number digits) — so it could evaluate ACCOUNT_CONTEXT_WORDS against a completely
+  // unrelated window, both missing a genuinely context-flagged number and wrongly flagging an
+  // unrelated one. Tracking every span by position, never by re-deriving it from value, removes
+  // that whole class of bug.
+  let masked = original;
+  const edits: { start: number; end: number; text: string }[] = [];
+  const consume = (start: number, end: number, text: string) => {
+    edits.push({ start, end, text });
+    masked = masked.slice(0, start) + "#".repeat(end - start) + masked.slice(end);
+  };
+
   // IBAN: 2 letters + 2 digits + 11-30 alphanumerics. Unconditional — no context word needed.
-  out = out.replace(/\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b/g, (m) => {
-    if (isAllowlisted(m)) return m;
+  for (const m of masked.matchAll(/\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b/g)) {
+    const text = m[0]!;
+    if (isAllowlisted(text)) continue;
     count++;
-    return "[REDACTED:iban]";
-  });
+    consume(m.index!, m.index! + text.length, "[REDACTED:iban]");
+  }
 
   // card numbers: 13-19 digits, possibly separated by spaces/dashes, Luhn-valid. Unconditional.
-  out = out.replace(/\b(?:\d[ -]?){13,19}\b/g, (m) => {
-    const digits = m.replace(/[ -]/g, "");
-    if (digits.length < 13 || digits.length > 19 || !luhnValid(digits)) return m;
-    if (isAllowlisted(digits)) return m;
+  for (const m of masked.matchAll(/\b(?:\d[ -]?){13,19}\b/g)) {
+    const text = m[0]!;
+    const digits = text.replace(/[ -]/g, "");
+    if (digits.length < 13 || digits.length > 19 || !luhnValid(digits)) continue;
+    if (isAllowlisted(digits)) continue;
     count++;
-    return "[REDACTED:card]";
-  });
+    consume(m.index!, m.index! + text.length, "[REDACTED:card]");
+  }
 
   // bare 9+ digit account-like numbers — context-gated (W4-10, ACCOUNT_CONTEXT_WORDS above).
-  // The context window is tested against `original` (this function's pristine input), never
-  // against `out`: by this point `out` may already carry [REDACTED:iban]/[REDACTED:card]
-  // placeholders from the two passes above, and the literal text "[REDACTED:iban]" contains the
-  // trigger substring "iban" — testing against `out` let an unrelated bare digit run that merely
-  // landed within the radius of an already-redacted IBAN get falsely swept into
-  // [REDACTED:account], even though the original text had no genuine context word anywhere near
-  // it (verified regression: "Sent DE89370400440532013000 for rent, fyi order 555666777 shipped
-  // separately" destroyed the unrelated order number). Neither placeholder ever contains a
-  // digit, so every `\d{9,}` match still found in `out` is a literal, untouched substring of
-  // `original`; since a global regex visits matches strictly left-to-right, a monotonically
-  // advancing cursor recovers each match's true offset in `original` with one indexOf, with no
-  // need to reason about how much the earlier placeholder substitutions shifted lengths.
-  let cursor = 0;
-  out = out.replace(/\b\d{9,}\b/g, (m: string) => {
-    if (isAllowlisted(m)) return m;
-    const trueStart = original.indexOf(m, cursor);
-    cursor = trueStart + m.length;
-    const start = Math.max(0, trueStart - BARE_DIGIT_CONTEXT_RADIUS);
-    const end = Math.min(original.length, trueStart + m.length + BARE_DIGIT_CONTEXT_RADIUS);
-    if (!ACCOUNT_CONTEXT_WORDS.test(original.slice(start, end))) return m;
+  // The window is read from `original`, not `masked`: `masked` exists only to keep offsets
+  // aligned across passes, and the real question is whether genuine surrounding text mentions
+  // an account.
+  for (const m of masked.matchAll(/\b\d{9,}\b/g)) {
+    const text = m[0]!;
+    if (isAllowlisted(text)) continue;
+    const start = Math.max(0, m.index! - BARE_DIGIT_CONTEXT_RADIUS);
+    const end = Math.min(original.length, m.index! + text.length + BARE_DIGIT_CONTEXT_RADIUS);
+    if (!ACCOUNT_CONTEXT_WORDS.test(original.slice(start, end))) continue;
     count++;
-    return "[REDACTED:account]";
-  });
+    consume(m.index!, m.index! + text.length, "[REDACTED:account]");
+  }
+
+  // Materialize the real placeholder text over `original`, right to left (descending start) so
+  // applying one edit never shifts the recorded offset of an edit still waiting to be applied.
+  // `edits` isn't naturally in that order — IBAN, card, and bare-digit run as three separate
+  // left-to-right passes, not one merged scan.
+  edits.sort((a, b) => b.start - a.start);
+  let out = original;
+  for (const e of edits) out = out.slice(0, e.start) + e.text + out.slice(e.end);
 
   return { value: out, count };
 }
