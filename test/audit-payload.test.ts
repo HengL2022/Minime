@@ -141,6 +141,7 @@ describe("audit payload boundary", () => {
     const { auditPayload } = (await import("../src/util/audit-payload")) as any;
     expect(Object.keys(auditPayload).sort()).toEqual([
       "cliHealthList",
+      "cliMetricAdd",
       "cliTxList",
       "correctAmend",
       "correctRetier",
@@ -474,6 +475,34 @@ describe("audit payload boundary", () => {
     expect(() => assertAuditPayloadForVerb("cli:tx:list", healthPayload)).toThrow(
       "invalid_audit_payload",
     );
+  });
+
+  test("cliMetricAdd (W4-8) carries only {metric, template}, never the --kind/--category/--merchant-pattern value", async () => {
+    const { auditPayload, assertAuditPayloadForVerb } = (await import(
+      "../src/util/audit-payload"
+    )) as any;
+
+    const payload = auditPayload.cliMetricAdd({
+      metric: "dining_spend",
+      template: "spend-by-merchant",
+      merchantPattern: SENTINEL,
+      kind: SENTINEL,
+    });
+    expect(payload).toEqual({ metric: "dining_spend", template: "spend-by-merchant" });
+    expect(JSON.stringify(payload)).not.toContain(SENTINEL);
+    expect(() => assertAuditPayloadForVerb("cli:metric:add", payload)).not.toThrow();
+    expect(() =>
+      auditPayload.cliMetricAdd({ metric: "Not Valid Name", template: "health-sum" }),
+    ).toThrow("invalid_audit_payload");
+    expect(() =>
+      auditPayload.cliMetricAdd({ metric: "dining_spend", template: "not-a-template" }),
+    ).toThrow("invalid_audit_payload");
+    expect(() =>
+      assertAuditPayloadForVerb(
+        "cli:metric:add",
+        auditPayload.cliHealthList({ kind: "steps", rowCount: 0, matchUsed: false }),
+      ),
+    ).toThrow("invalid_audit_payload");
   });
 });
 

@@ -11,6 +11,7 @@ import {
   approveTier2UnlockRequest,
   eventsSince,
   getInboxItem,
+  insertMetricDef,
   listHealthSamples,
   listTransactions,
   logEvent,
@@ -40,6 +41,14 @@ import {
 } from "./serve";
 import { auditPayload } from "./util/audit-payload";
 import { REPO_ROOT, config, repositoryInstallPendingState } from "./util/config";
+import {
+  METRIC_TEMPLATE_DEFAULT_DESCRIPTION,
+  METRIC_TEMPLATE_IDS,
+  type MetricTemplateId,
+  type MetricTemplateParams,
+  generateMetricTemplate,
+  isMetricTemplateId,
+} from "./util/metric-templates";
 import { ollamaPreflight } from "./util/ollama-url";
 import { parseLocalPostgresUrl, samePostgresServer } from "./util/postgres-url";
 
@@ -64,6 +73,9 @@ const USAGE = `minime <command>
                                     print tier-0 transactions for one month (owner terminal only)
   health list --kind <kind> [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--limit N]
                                     print tier-0 health samples of one kind (owner terminal only)
+  metric:add --name <name> --template <health-sum|health-avg|health-count|spend-by-category|spend-by-merchant> --unit <unit>
+              [--kind K] [--category C] [--merchant-pattern P] [--description D]
+                                    create a metric_defs row from a vetted template (owner terminal only; no --sql flag)
   serve                            MCP server (stdio) + inbox watcher + dream cron
   review                           list open inbox_unfiled/duplicate items with full text (owner; no unlock needed)
   audit --since <Nd>               show what left the box (events), default 7d
@@ -76,6 +88,35 @@ const USAGE = `minime <command>
 function arg(flag: string): string | undefined {
   const i = process.argv.indexOf(flag);
   return i >= 0 ? process.argv[i + 1] : undefined;
+}
+
+type MetricTemplateFlagResolution =
+  | { params: MetricTemplateParams }
+  | { missingFlag: "--kind" | "--category" | "--merchant-pattern" };
+
+// Maps `metric:add --template <id>` to the one scalar flag that template needs, reading it
+// straight off process.argv the same way every other flag in this file does via arg(). The
+// switch is exhaustive over MetricTemplateId with no default arm on purpose: adding a sixth
+// template without updating this function is a compile error, not a silent runtime gap.
+function metricTemplateParamsFromFlags(template: MetricTemplateId): MetricTemplateFlagResolution {
+  switch (template) {
+    case "health-sum":
+    case "health-avg":
+    case "health-count": {
+      const kind = arg("--kind");
+      return kind ? { params: { template, kind } } : { missingFlag: "--kind" };
+    }
+    case "spend-by-category": {
+      const category = arg("--category");
+      return category ? { params: { template, category } } : { missingFlag: "--category" };
+    }
+    case "spend-by-merchant": {
+      const merchantPattern = arg("--merchant-pattern");
+      return merchantPattern
+        ? { params: { template, merchantPattern } }
+        : { missingFlag: "--merchant-pattern" };
+    }
+  }
 }
 
 function formatDoctorCheck(check: DoctorCheck): string {
@@ -405,6 +446,92 @@ async function main(): Promise<number> {
       }
       throw error;
     }
+  }
+  // Owner-terminal-only vetted-template metric creation (W4-8): never reachable through MCP —
+  // metric_defs is owner-curated, minime_app has SELECT only (007_rls.sql:44). Placed ahead of
+  // the ollamaPreflight gate below, same as unlock:approve/entity:restore-tier, so it works
+  // without Ollama running. There is deliberately no --sql flag: every generated agg_sql comes
+  // from one of src/util/metric-templates.ts's five fixed skeletons. (Kept ahead of the tx/health
+  // list handlers below, not after them, so test/tier0-cli-read.test.ts's source-slice check that
+  // only renderTier0Lines ever prints between those two handlers stays about tx/health alone.)
+  if (cmd === "metric:add") {
+    const name = arg("--name");
+    const templateArg = arg("--template");
+    const unit = arg("--unit");
+    const description = arg("--description");
+    if (!name || !templateArg || !unit) {
+      console.error("ERROR: --name, --template, and --unit are required");
+      console.error(
+        `FIX: metric:add --name <name> --template <${METRIC_TEMPLATE_IDS.join("|")}> --unit <unit> ...`,
+      );
+      return 2;
+    }
+    if (!isMetricTemplateId(templateArg)) {
+      console.error(`ERROR: --template must be one of: ${METRIC_TEMPLATE_IDS.join(", ")}`);
+      console.error("FIX: free-form SQL is migration-only — there is no --sql flag");
+      return 2;
+    }
+    const resolved = metricTemplateParamsFromFlags(templateArg);
+    if ("missingFlag" in resolved) {
+      console.error(`ERROR: ${resolved.missingFlag} is required for --template ${templateArg}`);
+      console.error(`FIX: pass ${resolved.missingFlag} <value>`);
+      return 2;
+    }
+    let generated: ReturnType<typeof generateMetricTemplate>;
+    try {
+      generated = generateMetricTemplate(resolved.params);
+    } catch (error) {
+      if (error instanceof Error && error.message === "metric_template_value_invalid") {
+        console.error("ERROR: template value contains characters outside the allowed set");
+        console.error("FIX: use letters, numbers, spaces, and '_.-' only, 1-64 characters");
+        return 2;
+      }
+      throw error;
+    }
+    try {
+      await assertSchemaCurrent();
+    } catch (error) {
+      if (error instanceof Error && error.message === "schema_not_current") {
+        console.error("ERROR: schema is not current");
+        console.error("FIX: run make migrate, or rerun make update");
+        return 50;
+      }
+      throw error;
+    }
+    try {
+      await withAdminDbTransaction(() =>
+        insertMetricDef({
+          name,
+          unit,
+          description: description ?? METRIC_TEMPLATE_DEFAULT_DESCRIPTION[templateArg],
+          aggSql: generated.aggSql,
+          rollup: generated.rollup,
+        }),
+      );
+    } catch (error) {
+      if (error instanceof Error && error.message === "metric_name_invalid") {
+        console.error("ERROR: --name must be lowercase snake_case");
+        console.error("FIX: pass a name matching /^[a-z][a-z0-9_]{1,63}$/, e.g. dining_spend");
+        return 2;
+      }
+      if (error instanceof Error && error.message === "metric_name_exists") {
+        console.error(`ERROR: a metric named '${name}' already exists`);
+        console.error("FIX: choose a different --name, or query the existing metric");
+        return 1;
+      }
+      console.error("ERROR: the generated metric failed its dry run and was not saved");
+      console.error(`FIX: ${error instanceof Error ? error.message : String(error)}`);
+      return 1;
+    }
+    // Audited only on success (mirrors tx/health list's own ordering) — a rejected value or
+    // duplicate name never reached the database, so there is nothing to leave a trail for.
+    await logEvent({
+      actor: "owner:cli",
+      verb: "cli:metric:add",
+      payload: auditPayload.cliMetricAdd({ metric: name, template: templateArg }),
+    });
+    console.log(`created metric '${name}' (template=${templateArg}, rollup=${generated.rollup})`);
+    return 0;
   }
   // Owner-terminal-only tier-0 read surface (W4-5): never reachable through MCP — see the
   // section header above listTransactions/listHealthSamples (src/db/repo.ts) and

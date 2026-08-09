@@ -4313,6 +4313,46 @@ export async function runMetricAgg(
   }));
 }
 
+// metric:add (W4-8, src/cli.ts): the owner-CLI-only path that mints a new metric_defs row from a
+// vetted template (src/util/metric-templates.ts). name/agg_sql/rollup are already trusted by the
+// time they reach here (the CLI ran the template generator's own validation first), but this
+// function re-validates the name shape and re-checks for a collision itself rather than trusting
+// the caller — the same defense-in-depth stance insertTransaction/insertHealthSample take on
+// their own inputs.
+const METRIC_DEF_NAME_RE = /^[a-z][a-z0-9_]{1,63}$/;
+
+export async function metricDefExists(name: string): Promise<boolean> {
+  const rows = await db()`select 1 from metric_defs where name = ${name} limit 1`;
+  return rows.length > 0;
+}
+
+/**
+ * Insert one owner-curated metric_defs row, then prove the freshly inserted agg_sql actually
+ * executes by dry-running it through metric_agg() for a single day (today, in the configured
+ * owner zone) before returning. Must run inside an existing transaction (the CLI wraps this call
+ * in withAdminDbTransaction): a dry-run failure throws here and propagates out through that
+ * transaction, which rolls back the whole insert — a broken template can never persist in
+ * metric_defs, only ever a def already proven to run. The dry run's result value is discarded;
+ * an empty series (no rows for today) is a legitimate pass — it only has to execute without
+ * error.
+ */
+export async function insertMetricDef(def: {
+  name: string;
+  unit: string;
+  description: string;
+  aggSql: string;
+  rollup: MetricRollup;
+}): Promise<void> {
+  if (!hasDbTransaction()) throw new Error("metric_def_transaction_required");
+  if (!METRIC_DEF_NAME_RE.test(def.name)) throw new Error("metric_name_invalid");
+  if (await metricDefExists(def.name)) throw new Error("metric_name_exists");
+  await db()`
+    insert into metric_defs (name, unit, description, agg_sql, rollup)
+    values (${def.name}, ${def.unit}, ${def.description}, ${def.aggSql}, ${def.rollup})`;
+  const today = todayStr();
+  await runMetricAgg(def.name, today, today, configuredTimeZone());
+}
+
 export async function upsertMetricValue(
   name: string,
   periodStart: string,

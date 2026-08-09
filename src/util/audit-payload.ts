@@ -6,6 +6,7 @@ export type AuditPayload = Readonly<Record<string, unknown>> & {
 
 type AuditPayloadKind =
   | "cliHealthList"
+  | "cliMetricAdd"
   | "cliTxList"
   | "correctAmend"
   | "correctRetier"
@@ -170,6 +171,27 @@ function yearMonth(value: unknown): string {
 function healthKind(value: unknown): string {
   if (typeof value !== "string" || !METRIC_ID.test(value)) invalidPayload();
   return value;
+}
+
+// cli:metric:add's own metric name field. src/db/repo.ts's insertMetricDef validates the name
+// against a stricter shape (/^[a-z][a-z0-9_]{1,63}$/ — at least two characters) before it can
+// ever reach this payload, so METRIC_ID's slightly looser 1-64-char class is never actually
+// exercised at its lower bound here; reusing it keeps one lowercase-snake-case identifier shape
+// across every payload that names a metric, matching healthKind's own precedent above.
+function metricId(value: unknown): string {
+  if (typeof value !== "string" || !METRIC_ID.test(value)) invalidPayload();
+  return value;
+}
+
+// cli:metric:add's template field — the closed vocabulary src/util/metric-templates.ts defines.
+function metricTemplateId(value: unknown): string {
+  return fixed(value, [
+    "health-sum",
+    "health-avg",
+    "health-count",
+    "spend-by-category",
+    "spend-by-merchant",
+  ]);
 }
 
 function fixed<T extends string>(value: unknown, allowed: readonly T[]): T {
@@ -699,6 +721,17 @@ function cliHealthList(input: {
   });
 }
 
+// cli:metric:add (W4-8, src/cli.ts `metric:add`): the owner-CLI-only vetted-template metric
+// creation path's own audit trail. Carries only the fixed template id and the newly minted
+// metric name — never the --kind/--category/--merchant-pattern value the owner typed, matching
+// cliTxList/cliHealthList's "count/identifier, never the searched-for text" posture above.
+function cliMetricAdd(input: { metric: string; template: string }): AuditPayload {
+  return construct("cliMetricAdd", {
+    metric: metricId(input.metric),
+    template: metricTemplateId(input.template),
+  });
+}
+
 function inboxClosedExistingTask(input: { taskId: string; score: number }): AuditPayload {
   return construct("inboxClosedExistingTask", {
     task_id: uuid(input.taskId),
@@ -785,6 +818,7 @@ function inboxLegacyDuplicate(): AuditPayload {
 
 export const auditPayload = Object.freeze({
   cliHealthList,
+  cliMetricAdd,
   cliTxList,
   correctAmend,
   correctRetier,
@@ -855,6 +889,7 @@ function expectedPayloadKind(verb: string, payload: AuditPayload): AuditPayloadK
   const fixedKinds: Readonly<Record<string, AuditPayloadKind>> = {
     "backup:restic-check": "resticCheck",
     "cli:health:list": "cliHealthList",
+    "cli:metric:add": "cliMetricAdd",
     "cli:tx:list": "cliTxList",
     "correct:amend": "correctAmend",
     "correct:retier": "correctRetier",

@@ -3670,3 +3670,68 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   importer's admin-scoped collision lookup are conservative, invariant-preserving implementation
   details needed to make that exact design work under minime_app's real insert-only grant — not a
   scope change in themselves.
+
+## 2026-08-10 — W4-8: `metric:add` CLI — vetted templates are the only non-migration path onto the agg_sql aggregate door
+
+- **Context:** Every metric_defs row before this task was seeded by a migration (006, 026, 027,
+  030, 035) — a human-reviewed, committed SQL file. That is safe but heavyweight: an owner who
+  wants one more day-bucketed aggregate (a body-mass trend, spend at one merchant) had no way to
+  add it without hand-writing a migration. metric_defs.agg_sql is I3's one legal window onto
+  tier-0 content (`transactions`, `health_samples`), so any new way to populate it has to inherit
+  that same care without requiring a migration for every single metric.
+- **Decision:** `metric:add` (`src/cli.ts`, owner-terminal-only, placed ahead of the
+  `ollamaPreflight` gate like `unlock:approve`/`entity:restore-tier`/`tx list`/`health list`) mints
+  a new `metric_defs` row from one of five fixed templates in `src/util/metric-templates.ts`:
+  `health-sum`, `health-avg`, `health-count` (health_samples, filtered by `--kind`, exact match)
+  and `spend-by-category` (transactions, filtered by `--category`, exact match) / `spend-by-
+  merchant` (transactions, filtered by `--merchant-pattern`, substring ILIKE — raw bank merchant
+  text is messy enough that exact match would be impractical there, unlike the already-clean
+  category vocabulary `config/tx-categories.json`'s rules assign). Every template is a fixed
+  skeleton returning exactly `(period_start date, value numeric, label text)`, group-by-day,
+  matching the current 026/027 agg_sql contract ($1/$2 inclusive local dates, $3 the explicitly
+  requested IANA zone): health_samples templates bucket via `(at at time zone $3)::date` (the
+  026/027 timestamp contract); the two transactions templates reference no $3 at all, because
+  `occurred_at` is already a plain `date` — the same split 026_time_semantics.sql's own comment
+  documents ("date-backed transactions need no conversion; timestamp-backed metrics do"), and the
+  same shape `spend_total`/`spend_by_category` have kept, unmodified, since 006. Neither source
+  table is in repo.ts's PARENTS supersession map (028_correction_supersede.sql) — both are
+  read-only import mirrors, not owner-authored content — so no template adds a `superseded_at`
+  filter; there is nothing to filter. The one owner-supplied scalar a template accepts (a health
+  kind, a category, or a merchant substring) is validated against `/^[\p{L}\p{N} _.-]{1,64}$/u`
+  (no quote, percent, backslash, semicolon, or other SQL punctuation survives that class) and
+  SQL-literal-escaped (quotes doubled) before being spliced into the skeleton text — defense in
+  depth, since the class already rejects anything an escape step would need to touch.
+  `spend-by-merchant` additionally backslash-escapes any literal `%`/`_` before wrapping the value
+  in its own `%...%` wildcards, so an owner-typed substring containing `_` can never be misread as
+  a LIKE any-one-character wildcard (test-verified: an unescaped literal `_` would have inflated a
+  fictional merchant-spend sum by matching an unrelated row). There is deliberately no `--sql`
+  flag and no other way to reach this file's skeletons — free-form SQL stays migration-only, same
+  as always. `repo.insertMetricDef` (owner DSN; `minime_app` has SELECT-only on `metric_defs`
+  since 007_rls.sql:44) validates `--name` against `/^[a-z][a-z0-9_]{1,63}$/`, rejects an existing
+  name, inserts the row, and then — inside that same `withAdminDbTransaction` — dry-runs the fresh
+  def through `runMetricAgg(name, today, today, configuredTimeZone())`: any error (a template bug,
+  an unexpected schema mismatch) throws out through the transaction and rolls back the insert, so
+  a broken definition can never persist — only one already proven to execute once. Each successful
+  add audits verb `cli:metric:add` with `{metric, template}` only — never the kind/category/
+  pattern value — the same content-free posture `cli:tx:list`/`cli:health:list` (2026-08-10)
+  already established.
+- **Why:** The safety property that matters is structural, not procedural: every string this
+  feature can ever write into `agg_sql` is one of five fixed, reviewed skeletons with exactly one
+  substitution point, so no combination of CLI flags can produce a row-returning query or reach a
+  table other than `health_samples`/`transactions` — the shape is fixed at review time, not at
+  runtime. The transaction-scoped dry run is a second, independent backstop: even if a future
+  template were subtly wrong, its def is provably unable to reach any caller (owner or agent)
+  without first executing cleanly once, inside the same transaction that would otherwise have
+  persisted it. Restricting matching to exact-value (kind, category) plus one substring template
+  (merchant) keeps the vetted set small and each shape auditable by inspection, rather than
+  growing toward a general filter language.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W4 workstream
+  — task W4-8's own spec named the vetted-template design, the character-class-plus-escape
+  splicing, and the transaction-scoped dry-run rollback up front and required this entry; the
+  design here implements exactly that, with no broadening. The spec's own migration half (seeding
+  `body_mass`/`hr_resting` defs, provisionally numbered 036) was dropped from this task's scope by
+  the program's cross-check dedup: 027_life_metrics_seed.sql already seeded both, matching the
+  exact 026 agg_sql contract, before this task began — confirmed here by a direct
+  `minime_query_metric`-shaped test over fixture data, closing the same UNKNOWN_METRIC repro the
+  spec cited without adding a redundant migration.
