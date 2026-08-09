@@ -174,6 +174,21 @@ export async function hybridSearch(opts: {
   /** IANA time zone for from/to day boundaries; defaults to the owner's configured tz. */
   timeZone?: string | null;
 }): Promise<Hit[]> {
+  return (await runHybridSearch(opts)).hits;
+}
+
+// Core pipeline shared by hybridSearch (above) and hybridSearchDetailed (below). Returns the
+// query embedding alongside the ranked hits purely so hybridSearchDetailed can reuse it for
+// suppressedCandidateCount instead of calling embedQuery a second time for the identical query
+// text (review finding, 2026-08-09: embedQuery has no cache, so a second, independently-issued
+// call duplicated embedding-provider cost, latency, and audited-egress call volume on every
+// locked search — I3's default state — for no ranking or count benefit). hybridSearch itself
+// discards queryVec and keeps its own plain Promise<Hit[]> signature, so every Hit[]-only caller
+// (eval harness, pmb/longmemeval scripts, m3/m5 tests) needs no changes.
+async function runHybridSearch(opts: Parameters<typeof hybridSearch>[0]): Promise<{
+  hits: Hit[];
+  queryVec: number[] | null;
+}> {
   const { query } = opts;
   const types = opts.types?.length ? opts.types : null;
   const limit = opts.limit ?? 10;
@@ -187,12 +202,18 @@ export async function hybridSearch(opts: {
   // they've said so directly, temporal-intent guess or not (spec W3-4).
   if (from || to) nudge.recencyScale = 1.0;
 
-  // candidates = top-50 cosine ∪ top-50 fts (each already tier-filtered in repo)
+  // candidates = top-50 cosine ∪ top-50 fts (each already tier-filtered in repo). queryVec is
+  // captured (not just inlined into the vectorCandidates call) so hybridSearchDetailed can reuse
+  // this exact embedding below — same combined try/catch as before, so any failure (embedQuery OR
+  // vectorCandidates) still degrades identically to FTS-only.
+  let queryVec: number[] | null = null;
   let vec: Candidate[] = [];
   try {
-    vec = await vectorCandidates(await embedQuery(query), types, scope, opts.actor);
+    queryVec = await embedQuery(query);
+    vec = await vectorCandidates(queryVec, types, scope, opts.actor);
   } catch {
     // embeddings unavailable (e.g. Ollama down): degrade to FTS-only
+    queryVec = null;
   }
   const fts = await ftsCandidates(query, types, scope, opts.actor);
 
@@ -211,7 +232,7 @@ export async function hybridSearch(opts: {
     }
   }
   const candidates = [...byId.values()];
-  if (candidates.length === 0) return [];
+  if (candidates.length === 0) return { hits: [], queryVec };
 
   // parent metadata (recency, derived, title) — batch per type, tier-filtered again
   const idsByType = new Map<ParentType, string[]>();
@@ -248,7 +269,7 @@ export async function hybridSearch(opts: {
           const day = localDateStr(new Date(m.event_at), windowTz);
           return (!from || day >= from) && (!to || day <= to);
         });
-  if (dated.length === 0) return [];
+  if (dated.length === 0) return { hits: [], queryVec };
 
   // graph boost: parent within 1 edge hop of an entity literally named in the query
   const boosted = await oneHopNeighbors(await entitiesNamedIn(query, opts.actor), opts.actor);
@@ -311,18 +332,21 @@ export async function hybridSearch(opts: {
   const ranked = [...bestByParent.values()].sort((a, b) => b.score - a.score);
   const { ordered, cut } = await rerankStage(query, ranked, limit, opts.autocut ?? false);
 
-  return ordered.slice(0, cut).map((s) => ({
-    type: s.c.parent_type,
-    id: s.c.parent_id,
-    title: s.m.title,
-    snippet: snippet(s.c.text, query),
-    score: Number(s.score.toFixed(4)),
-    updated_at: s.m.updated_at,
-    derived: s.derived,
-    created_by: s.m.created_by,
-    superseded: s.superseded,
-    ...(s.superseded ? { superseded_by: s.m.superseded_by as string } : {}),
-  }));
+  return {
+    hits: ordered.slice(0, cut).map((s) => ({
+      type: s.c.parent_type,
+      id: s.c.parent_id,
+      title: s.m.title,
+      snippet: snippet(s.c.text, query),
+      score: Number(s.score.toFixed(4)),
+      updated_at: s.m.updated_at,
+      derived: s.derived,
+      created_by: s.m.created_by,
+      superseded: s.superseded,
+      ...(s.superseded ? { superseded_by: s.m.superseded_by as string } : {}),
+    })),
+    queryVec,
+  };
 }
 
 // W4-4: minime_search's envelope gap wants a bare "N tier-2 matches are locked" count alongside
@@ -330,19 +354,24 @@ export async function hybridSearch(opts: {
 // ceiling that hides it from ftsCandidates/vectorCandidates also drops its parent out of
 // parentMeta (both gate on the same tier value; corrections keep a parent's own row tier and its
 // chunks' tier in sync — setPageTier/setPageChunkTiers, repo.ts) — so the two numbers never
-// double-count the same row. This deliberately re-runs hybridSearch unchanged (rather than
-// threading a second return value through its internals) so hybridSearch's own signature, and
-// every caller that only wants Hit[] (the eval harness, pmb/longmemeval scripts, m3/m5 tests),
-// needs no changes. It DOES thread opts.types through to suppressedCandidateCount (review
-// finding, 2026-08-09) so a type-scoped locked search's count only reflects the types the caller
-// actually asked for — the same types predicate ftsCandidates/vectorCandidates apply to the real
-// hits above (opts.types is used at vectorCandidates/ftsCandidates just below). from/to stay
-// unmirrored (DECISIONS.md): unlike types, no date predicate exists in ftsCandidates'/
-// vectorCandidates' own candidate SQL for suppressed_candidate_count to mirror in the first place.
+// double-count the same row. Shares runHybridSearch's core pipeline with hybridSearch (rather
+// than calling exported hybridSearch and separately re-deriving a query embedding) so
+// hybridSearch's own signature, and every caller that only wants Hit[] (the eval harness,
+// pmb/longmemeval scripts, m3/m5 tests), needs no changes — while this function pays for exactly
+// one embedQuery call per search, not two (review finding, 2026-08-09: an earlier version called
+// embedQuery here a second time, independently of runHybridSearch's own identical call, doubling
+// embedding-provider cost/latency/audited-egress on every locked search — I3's default state —
+// for no ranking or count benefit). It DOES thread opts.types through to suppressedCandidateCount
+// (review finding, 2026-08-09) so a type-scoped locked search's count only reflects the types the
+// caller actually asked for — the same types predicate ftsCandidates/vectorCandidates apply to
+// the real hits above (opts.types is used at vectorCandidates/ftsCandidates inside
+// runHybridSearch). from/to stay unmirrored (DECISIONS.md): unlike types, no date predicate
+// exists in ftsCandidates'/vectorCandidates' own candidate SQL for suppressed_candidate_count to
+// mirror in the first place.
 export async function hybridSearchDetailed(
   opts: Parameters<typeof hybridSearch>[0],
 ): Promise<{ hits: Hit[]; suppressedTier2Count: number }> {
-  const hits = await hybridSearch(opts);
+  const { hits, queryVec } = await runHybridSearch(opts);
 
   // suppressedCandidateCount's own definer function already returns 0 once unlocked (no content
   // tier exceeds 2), so this gate is purely to skip its extra top-k scan on the common unlocked
@@ -355,16 +384,12 @@ export async function hybridSearchDetailed(
   // on both the hits path and the count path.
   const types = opts.types?.length ? opts.types : null;
 
-  let vec: number[] | null = null;
-  try {
-    vec = await embedQuery(opts.query);
-  } catch {
-    // embeddings unavailable (e.g. Ollama down): the fts arm alone still answers the count,
-    // same fts-only degrade hybridSearch itself applies above.
-  }
+  // queryVec is runHybridSearch's own embedQuery(opts.query) result, reused as-is rather than
+  // re-embedding: null means embedding was unavailable, same fts-only degrade semantics
+  // suppressedCandidateCount already applies for the hits path above.
   const suppressedTier2Count = await suppressedCandidateCount(
     opts.query,
-    vec,
+    queryVec,
     config.rerankTopIn,
     types,
     opts.actor,
