@@ -867,6 +867,29 @@ function entityDerivationTier(tier: number | undefined): 1 | 2 {
   throw new Error("entity tier must be 1 or 2");
 }
 
+export type EntityKind = "person" | "org";
+
+// W4-2 "returns tier 1 when independently evidenced" hook: a tier-1-sourced resolve
+// (ensurePerson/ensureOrg below, called with the default/explicit requested tier of 1) that
+// finds an EXISTING identity still sitting at tier 2 -- almost always a row the pre-037 monotonic
+// rule swallowed before 037_identity_content_tier_split.sql stopped that from happening to new
+// resolves -- gets flagged for owner review. This never changes the row's own tier (that stays
+// owner-CLI-only, entity:restore-tier/restoreEntityTier below); it only surfaces the mismatch,
+// deduped against any already-open item for the same entity. readable_source_tier bypasses RLS
+// (same helper sourceTierForParent below calls) so a locked tier-1 caller can still detect that
+// the identity it just resolved is sitting above its own request, without that read itself ever
+// returning the row's content to the caller.
+async function flagEntityPromotionIfStillTierTwo(
+  entityType: EntityKind,
+  entityId: string,
+): Promise<void> {
+  const table = entityType === "person" ? "people" : "orgs";
+  const [row] = await db()`select readable_source_tier(${table}, ${entityId}::uuid)::int as tier`;
+  if (Number(row?.tier) !== 2) return;
+  if (await reviewItemExists("entity_promotion", "entity_id", entityId)) return;
+  await insertReviewItem("entity_promotion", { entity_type: entityType, entity_id: entityId });
+}
+
 /** Exact structural guard for extraction; returns no hidden person fields. */
 export async function personHasNonWorkingRelation(id: string): Promise<boolean> {
   const [row] = await db()`
@@ -894,7 +917,9 @@ export async function ensurePerson(
       ${derivation.derivedFrom ?? null}::uuid
     )`;
   if (!row) throw new Error("entity_resolver_returned_no_row");
-  return { id: row.id as string, created: row.created as boolean };
+  const result = { id: row.id as string, created: row.created as boolean };
+  if (tier === 1 && !result.created) await flagEntityPromotionIfStillTierTwo("person", result.id);
+  return result;
 }
 
 export async function ensureExtractedPerson(
@@ -1099,7 +1124,9 @@ export async function ensureOrg(
       ${derivation.derivedFrom ?? null}::uuid
     )`;
   if (!row) throw new Error("entity_resolver_returned_no_row");
-  return { id: row.id as string, created: row.created as boolean };
+  const result = { id: row.id as string, created: row.created as boolean };
+  if (tier === 1 && !result.created) await flagEntityPromotionIfStillTierTwo("org", result.id);
+  return result;
 }
 
 export async function ensureExtractedOrg(
@@ -3459,6 +3486,111 @@ export async function resolveOpenReviewItemsForInbox(inboxItemId: string): Promi
       and payload ->> 'inbox_item_id' = ${inboxItemId}
     returning id`;
   return rows.map((row) => String(row.id));
+}
+
+// ---------------------------------------------------------------- entity tier restore (W4-2)
+
+export interface PendingEntityPromotion {
+  id: string;
+  entityType: EntityKind;
+  entityId: string;
+  name: string;
+  createdAt: Date;
+}
+
+/**
+ * Owner-terminal-only listing (`entity:restore-tier --list`, src/cli.ts) — resolves each open
+ * entity_promotion item's CURRENT name directly, unlike the MCP tool (review-queue.ts), which
+ * masks it behind the caller's own tier. Never call this from an MCP tool handler. An item whose
+ * entity has since been removed/retyped out from under it is skipped, not crashed on, so one
+ * stale row can never break the whole listing.
+ */
+export async function pendingEntityPromotions(): Promise<PendingEntityPromotion[]> {
+  const out: PendingEntityPromotion[] = [];
+  for (const item of await openReviewItems("entity_promotion")) {
+    const entityType = item.payload?.entity_type;
+    const entityId = item.payload?.entity_id;
+    if (entityType !== "person" && entityType !== "org") continue;
+    if (typeof entityId !== "string") continue;
+    const table = entityType === "person" ? "people" : "orgs";
+    const [row] = await db()`
+      select canonical_name from ${db()(table)} where id = ${entityId}::uuid`;
+    if (!row) continue;
+    out.push({
+      id: String(item.id),
+      entityType,
+      entityId,
+      name: String(row.canonical_name),
+      createdAt: new Date(item.created_at),
+    });
+  }
+  return out;
+}
+
+export interface EntityTierRestoreResult {
+  entityType: EntityKind;
+  entityId: string;
+  resolvedReviewItemId: string | null;
+}
+
+/**
+ * Owner-CLI-only 2->1 demotion (`entity:restore-tier`, src/cli.ts — never exposed through any
+ * MCP tool: demotion approval lives in the owner terminal, DECISIONS.md 2026-08-09). Sets the
+ * transaction-local `minime.allow_tier_demotion` GUC the guarded trigger
+ * (037_identity_content_tier_split.sql's keep_entity_tier_guarded) requires, then demotes ONLY
+ * the person/org row's own tier — any alias or edge minted BY a tier-2 extraction stays tier 2.
+ * That is a deliberate limitation, not a bug: a demoted identity card becomes tier-1-readable
+ * again, but content genuinely derived from tier-2 prose about it does not silently follow.
+ * Resolves the matching open entity_promotion item, if any, and audits with the entity id only —
+ * never its name.
+ *
+ * Wraps its own transaction (withDbTransaction), so it composes correctly whether called bare
+ * (opens a fresh one on whatever pool is ambient) or nested inside an outer
+ * withAdminDbTransaction (the CLI's own wrap, reused transparently). Either way this must
+ * actually run on the owner/control-plane connection to succeed: the SQL trigger itself refuses
+ * a minime_app-role demotion attempt even with the GUC set, so a caller that skipped the CLI's
+ * admin wrap fails closed at the database — entity_tier_demotion_forbidden — rather than
+ * silently succeeding as the app role.
+ */
+export async function restoreEntityTier(
+  entityType: EntityKind,
+  entityId: string,
+  restoredBy = "owner:cli",
+): Promise<EntityTierRestoreResult> {
+  if (entityType !== "person" && entityType !== "org") throw new Error("entity_kind_invalid");
+  const table = entityType === "person" ? "people" : "orgs";
+  return withDbTransaction(async (tx) => {
+    const [existing] = await tx`select tier from ${tx(table)} where id = ${entityId}::uuid`;
+    if (!existing) throw new Error("entity_not_found");
+    if (Number(existing.tier) !== 2) throw new Error("entity_not_tier_two");
+
+    await tx`select set_config('minime.allow_tier_demotion', '1', true)`;
+    const demoted = await tx`
+      update ${tx(table)} set tier = 1
+      where id = ${entityId}::uuid and tier = 2
+      returning id`;
+    // Defensive: the precheck above already refuses anything but a live tier-2 row, so this can
+    // only fire on a genuine concurrent change between the two statements.
+    if (demoted.length === 0) throw new Error("entity_not_tier_two");
+
+    const [openItem] = await tx`
+      select id from review_queue
+      where kind = 'entity_promotion' and status = 'open'
+        and payload ->> 'entity_id' = ${entityId}
+      order by created_at limit 1`;
+    let resolvedReviewItemId: string | null = null;
+    if (openItem) {
+      await resolveReviewItem(String(openItem.id), "resolved");
+      resolvedReviewItemId = String(openItem.id);
+    }
+
+    await logEvent({
+      actor: restoredBy,
+      verb: "entity:tier:restored",
+      payload: auditPayload.entityTierRestored({ entityType, entityId }),
+    });
+    return { entityType, entityId, resolvedReviewItemId };
+  });
 }
 
 // ---------------------------------------------------------------- state snapshot

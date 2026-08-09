@@ -9,6 +9,7 @@ type AuditPayloadKind =
   | "correctRetier"
   | "correctRetract"
   | "dreamSummary"
+  | "entityTierRestored"
   | "importMalformed"
   | "importSummary"
   | "inboxClosedExistingTask"
@@ -619,6 +620,20 @@ function personUpsert(input: {
   });
 }
 
+// entity:restore-tier (W4-2, src/cli.ts): the owner-CLI-only 2->1 identity demotion. Carries
+// only the target's type/id -- never its canonical name, the same id-only shape as personUpsert
+// above -- because this verb's own payload could otherwise become the one place a tier-2 name
+// leaks into a tier-1-readable audit trail (`minime audit`, no unlock gate).
+function entityTierRestored(input: {
+  entityType: PersonUpsertEntityType;
+  entityId: string;
+}): AuditPayload {
+  return construct("entityTierRestored", {
+    entity_type: personUpsertEntityType(input.entityType),
+    entity_id: uuid(input.entityId),
+  });
+}
+
 function inboxClosedExistingTask(input: { taskId: string; score: number }): AuditPayload {
   return construct("inboxClosedExistingTask", {
     task_id: uuid(input.taskId),
@@ -708,6 +723,7 @@ export const auditPayload = Object.freeze({
   correctRetier,
   correctRetract,
   dreamSummary,
+  entityTierRestored,
   importMalformed,
   importSummary,
   inboxClosedExistingTask,
@@ -778,6 +794,7 @@ function expectedPayloadKind(verb: string, payload: AuditPayload): AuditPayloadK
     "egress:classify:outcome": "llmClassifyOutcome",
     "egress:embed": "llmEmbedEgress",
     "egress:embed:outcome": "llmEmbedOutcome",
+    "entity:tier:restored": "entityTierRestored",
     "import:malformed": "importMalformed",
     "import:rrule-unsupported": "importMalformed",
     "inbox:closed-existing-task": "inboxClosedExistingTask",

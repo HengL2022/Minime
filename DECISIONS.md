@@ -3392,3 +3392,63 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   (new, provisional number)") only because 032-036 were already taken by other tasks landing first
   on this branch — the same numbering-deviation precedent 030/031/034/035/036 each already
   documented; not a product or scope decision in itself.
+
+## 2026-08-09 — Entity demotion path: owner-CLI-only restore, entity_promotion review kind, migration 038 backfill
+
+- **Context:** 037_identity_content_tier_split.sql (W4-1) stopped NEW entity resolves from
+  raising an existing person/org's stored tier, and built the guarded `keep_entity_tier_guarded`
+  trigger that allows a 2→1 demotion only on a non-app connection with the transaction-local
+  `minime.allow_tier_demotion` GUC explicitly set — but nothing yet used that mechanism, and every
+  row the pre-037 monotonic rule had already swallowed into tier 2 stayed there, deliberately left
+  as "a review/backfill pass over history is W4-2, out of scope here" (037's own header comment).
+- **Decision:** Three pieces close that gap. (1) Migration 038 recreates `review_queue`'s kind
+  check constraint to add `'entity_promotion'` (strict superset of 035's list) and backfills one
+  deduped review item per "previously swallowed" tier-2 person/org — owner-created (`created_by
+  = 'human'` or `source in ('onboard','manual')`) OR tier-1-evidenced (at least one tier-1 edge
+  touches it, or it carries a tier-1 alias) — payload `{entity_type, entity_id}` only; no schema
+  change beyond the constraint, no grant change. (2) Ongoing detection: `ensurePerson`/`ensureOrg`
+  (`src/db/repo.ts`) now flag the identical situation live — a tier-1-requested resolve (the
+  default) that finds an EXISTING identity still reading tier 2 via `readable_source_tier`
+  (bypassing RLS the same way `sourceTierForParent` already does) inserts a deduped
+  `entity_promotion` item and otherwise changes nothing; this never runs for extraction's own
+  `ensureExtractedPerson`/`ensureExtractedOrg`, only the owner-facing resolve path
+  (`minime_log_interaction`, onboarding, the watcher's auto-filed interaction path). (3) The owner
+  CLI `entity:restore-tier <person|org> <id>` (`src/cli.ts`, placed ahead of the `ollamaPreflight`
+  gate like `unlock:approve`) wraps a new `restoreEntityTier` (`src/db/repo.ts`) in
+  `withAdminDbTransaction`: it sets the demotion GUC, demotes ONLY that person/org row's own
+  tier — any alias or edge minted BY a tier-2 extraction stays tier 2, stated in the CLI's own
+  output — resolves the matching open review item, and audits verb `entity:tier:restored` via a
+  new fixed-allowlist `auditPayload.entityTierRestored` constructor carrying the entity id only,
+  never its name. `entity:restore-tier --list` prints pending items WITH names (owner-terminal
+  read, `pendingEntityPromotions`, unmasked like the existing `minime review` CLI listing).
+  `minime_review_queue` (`src/mcp/tools/review-queue.ts`) gains the `entity_promotion` kind,
+  masked through the same tier-filtered `visibleTitle` pattern as `phantom_person`/`goal_review`
+  — the name reads `[above current tier]` until the caller's own tier covers it. There is no MCP
+  tool, and no change to any MCP tool, that can move a tier: `restoreEntityTier` is never called
+  from `src/mcp/tools/`. `review-triage.md`/`evening-review.md` are updated to surface the flag
+  and point at the CLI command, never to claim the agent can show the masked name or perform the
+  restore itself.
+- **Ratified (owner boundary):** (1) Demotion approval lives in the owner terminal — the CLI
+  command running on the owner/control-plane connection — never in MCP tool resolution; an agent
+  can surface an `entity_promotion` flag and, once unlocked, read the name it resolves to, but no
+  tool call can execute the privacy downgrade itself. (2) The backfill heuristic — owner-created
+  OR tier-1-evidenced — is the definition of "previously swallowed" for migration 038's one-time
+  history pass.
+- **Why:** A demotion is the first sanctioned tier-DOWN write in the system, so it gets the
+  narrowest legitimate path available: a local, owner-authenticated terminal session, gated a
+  second time by a GUC only that connection can set, auditable by id without ever writing the
+  now-more-exposed name into the durable log. Flagging is cheap and reversible (an open queue
+  item); executing a downgrade is not something worth trusting to an automated heuristic or an
+  agent's judgment, however well-evidenced — the owner reads the name and decides. Confining
+  restoration to the identity row itself (not cascading to extraction-derived aliases/edges) keeps
+  the same identity/content boundary 037 drew: restoring a card to tier 1 discloses that the
+  contact exists again, never what tier-2 prose said about them.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W4 workstream
+  — task W4-2, implemented as specified, including both boundary questions the spec flagged for
+  ratification (demotion-lives-in-the-CLI-never-MCP; the owner-created-OR-tier-1-evidenced
+  backfill heuristic) within that same upfront authorization. Migration numbered 038 (the spec's
+  own file list named it "033_entity_promotion_backfill.sql (new, provisional number)") only
+  because 033-037 were already taken by other tasks landing first on this branch — the same
+  numbering-deviation precedent 030/031/034/035/036/037 each already documented; not a product or
+  scope decision in itself.

@@ -83,6 +83,18 @@ auto-resolve).
      retiring the *org* side and keeping or creating the *person* — pointed at this case it would
      retire the correct org and entrench the wrong person no matter whose id is passed. Tell the
      owner there's no safe automated fix today and leave the item open rather than guess.
+   - **entity_promotion** — a person/org whose own identity card is still stuck at tier 2 even
+     though it looks owner-known or is already independently tier-1-evidenced (payload:
+     `entity_type`, `entity_id` only — no name, ever, in the payload itself; masked like any
+     other title if locked, so at tier 1 you cannot read who this is, and even with an active
+     tier-2 unlock you can only VIEW the now-visible name, never act on it). Demotion is
+     owner-terminal-only — there is no tool call that can do it, and you must never claim
+     otherwise. Tell the owner there's a name-restricted item and have them run
+     `bun run src/cli.ts entity:restore-tier --list` locally to see who it is, then
+     `bun run src/cli.ts entity:restore-tier <person|org> <id>` to restore that one identity
+     card to tier 1 (aliases/edges genuinely derived from tier-2 content stay tier 2 — the CLI
+     says so in its own output). The CLI resolves the queue item automatically on success, so you
+     never call `resolve` for this kind yourself.
 3. Resolve each handled item: `minime_review_queue` action `resolve`, status `resolved`
    (handled) or `dismissed` (owner says ignore) — skip this when `minime_refile` or a person
    merge already resolved it for you. Confirm with IDs, one line each.
@@ -91,7 +103,8 @@ auto-resolve).
 
 - Triage order: ops_failure (the pipeline producing every other flag may itself be broken) →
   unfiled (quick wins) → decision reviews (time-sensitive) → contradictions → stale →
-  goal reviews (lowest urgency — nothing broke, a goal just went quiet). Offer to stop after 5
+  goal reviews → entity promotions (lowest urgency of all — no data is at risk either way, this
+  is purely a visibility fix the owner runs in their own terminal). Offer to stop after 5
   minutes; report what remains.
 - Resolving a flag (`minime_review_queue` action `resolve`) never by itself touches the flagged
   rows. Changing content is always a separate, explicit, owner-approved write —

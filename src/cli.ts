@@ -4,12 +4,15 @@ import { join } from "node:path";
 import { closeDb, withAdminDbTransaction } from "./db/client";
 import { assertSchemaCurrent, migrate, parseMigrationCliContext } from "./db/migrate";
 import {
+  type EntityKind,
   type PendingTier2UnlockRequest,
   approveTier2UnlockRequest,
   eventsSince,
   getInboxItem,
   openReviewItems,
+  pendingEntityPromotions,
   pendingTier2UnlockRequests,
+  restoreEntityTier,
 } from "./db/repo";
 import { importCalendar } from "./importers/calendar";
 import { importEmailMeta } from "./importers/email-meta";
@@ -48,6 +51,9 @@ const USAGE = `minime <command>
   backup:pre-update                take the fail-closed pre-update db snapshot
   unlock:approve <request-id>      approve one pending tier-2 request for its MCP connection
   unlock:approve --latest          approve the single pending request (refuses if more than one)
+  entity:restore-tier --list       list pending entity_promotion review items, with names
+  entity:restore-tier <person|org> <id>
+                                    demote one person/org identity from tier 2 back to tier 1
   serve                            MCP server (stdio) + inbox watcher + dream cron
   review                           list open inbox_unfiled/duplicate items with full text (owner; no unlock needed)
   audit --since <Nd>               show what left the box (events), default 7d
@@ -246,6 +252,95 @@ async function main(): Promise<number> {
       if (error instanceof Error && error.message === "unlock_request_not_approvable") {
         console.error("ERROR: unlock request is not pending and eligible");
         console.error("FIX: ask the agent to create a fresh minime_unlock request");
+        return 1;
+      }
+      throw error;
+    }
+  }
+  // Owner-terminal-only demotion path (W4-2): never reachable through MCP — demotion approval
+  // lives here, not in agent-facing tool surface (DECISIONS.md 2026-08-09). Placed ahead of the
+  // ollamaPreflight gate below, same as unlock:approve, so --list works without Ollama running.
+  if (cmd === "entity:restore-tier") {
+    if (process.argv[3] === "--list") {
+      if (process.argv.length !== 4) {
+        console.error("ERROR: entity:restore-tier --list takes no further arguments");
+        console.error("FIX: run `bun run src/cli.ts entity:restore-tier --list` on its own");
+        return 2;
+      }
+      try {
+        await assertSchemaCurrent();
+      } catch (error) {
+        if (error instanceof Error && error.message === "schema_not_current") {
+          console.error("ERROR: schema is not current");
+          console.error("FIX: run make migrate, or rerun make update");
+          return 50;
+        }
+        throw error;
+      }
+      const pending = await pendingEntityPromotions();
+      for (const item of pending) {
+        const ageMinutes = Math.max(
+          0,
+          Math.floor((Date.now() - item.createdAt.getTime()) / 60_000),
+        );
+        console.log(
+          `${item.id}  [${item.entityType}]  ${item.entityId}  ${item.name}  flagged ${ageMinutes}min ago`,
+        );
+      }
+      console.log(`-- ${pending.length} pending entity_promotion item(s)`);
+      return 0;
+    }
+
+    const kindArg = process.argv[3];
+    const idArg = process.argv[4];
+    const isEntityKind = kindArg === "person" || kindArg === "org";
+    const isUuid =
+      typeof idArg === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idArg);
+    if (!isEntityKind || !isUuid || process.argv.length !== 5) {
+      console.error("ERROR: entity:restore-tier requires <person|org> <id>, or --list");
+      console.error(
+        "FIX: run `bun run src/cli.ts entity:restore-tier --list` to find a pending id",
+      );
+      return 2;
+    }
+    try {
+      await assertSchemaCurrent();
+    } catch (error) {
+      if (error instanceof Error && error.message === "schema_not_current") {
+        console.error("ERROR: schema is not current");
+        console.error("FIX: run make migrate, or rerun make update");
+        return 50;
+      }
+      throw error;
+    }
+    try {
+      const kind = kindArg as EntityKind;
+      const result = await withAdminDbTransaction(() => restoreEntityTier(kind, idArg));
+      console.log(`restored ${result.entityType} ${result.entityId} to tier 1`);
+      console.log(
+        "NOTE: only this identity's own tier changed — any alias or graph edge minted by a " +
+          "tier-2 extraction about it stays tier 2.",
+      );
+      console.log(
+        result.resolvedReviewItemId
+          ? `resolved review item ${result.resolvedReviewItemId}`
+          : "no matching open entity_promotion review item was found",
+      );
+      return 0;
+    } catch (error) {
+      if (error instanceof Error && error.message === "entity_not_found") {
+        console.error("ERROR: no such person/org id");
+        console.error(
+          "FIX: run `bun run src/cli.ts entity:restore-tier --list` to find a pending id",
+        );
+        return 1;
+      }
+      if (error instanceof Error && error.message === "entity_not_tier_two") {
+        console.error("ERROR: that identity is not currently at tier 2");
+        console.error(
+          "FIX: nothing to restore — it is already tier 1, or tier-0 quarantined and not eligible",
+        );
         return 1;
       }
       throw error;

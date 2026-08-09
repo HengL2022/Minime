@@ -144,6 +144,7 @@ describe("audit payload boundary", () => {
       "correctRetier",
       "correctRetract",
       "dreamSummary",
+      "entityTierRestored",
       "importMalformed",
       "importSummary",
       "inboxClosedExistingTask",
@@ -394,6 +395,34 @@ describe("audit payload boundary", () => {
           phase: "failed",
           code: "repair_module_failed",
         }),
+      ),
+    ).toThrow("invalid_audit_payload");
+  });
+
+  test("entityTierRestored (W4-2) carries only entity_type/entity_id, never a name", async () => {
+    const { auditPayload, assertAuditPayloadForVerb } = (await import(
+      "../src/util/audit-payload"
+    )) as any;
+    const entityId = crypto.randomUUID();
+    const payload = auditPayload.entityTierRestored({
+      entityType: "person",
+      entityId,
+      canonical_name: SENTINEL,
+      name: SENTINEL,
+    });
+    expect(payload).toEqual({ entity_type: "person", entity_id: entityId });
+    expect(JSON.stringify(payload)).not.toContain(SENTINEL);
+    expect(() => assertAuditPayloadForVerb("entity:tier:restored", payload)).not.toThrow();
+    expect(() => auditPayload.entityTierRestored({ entityType: "team", entityId })).toThrow(
+      "invalid_audit_payload",
+    );
+    expect(() =>
+      auditPayload.entityTierRestored({ entityType: "person", entityId: SENTINEL }),
+    ).toThrow("invalid_audit_payload");
+    expect(() =>
+      assertAuditPayloadForVerb(
+        "entity:tier:restored",
+        auditPayload.personUpsert({ entityType: "person", entityId, action: "rename" }),
       ),
     ).toThrow("invalid_audit_payload");
   });

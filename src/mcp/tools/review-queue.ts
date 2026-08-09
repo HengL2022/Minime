@@ -23,6 +23,7 @@ const KINDS = [
   "extract_suspect",
   "ops_failure",
   "goal_review",
+  "entity_promotion",
 ] as const;
 const HIDDEN = "[above current tier]";
 // Distinct from HIDDEN: the tier check passed but the archived bytes could not be proven
@@ -147,6 +148,28 @@ async function maskReviewPayload(item: any, actor: string): Promise<any> {
     }
   }
 
+  // Entity-promotion payloads store entity_type + entity_id ONLY (W4-2 backfill/ensurePerson-
+  // ensureOrg detection) — never a name, since the queue is read at tier 1 and the flagged
+  // identity is still sitting at tier 2. Re-resolve the current name fresh through visibleTitle
+  // exactly like phantom_person's canonical_name above, so it stays masked until the caller's own
+  // tier covers it. Demoting the row is owner-CLI-only (entity:restore-tier) regardless of what
+  // this read shows — an unlocked caller can see the name, but no MCP tool can act on it.
+  if (
+    item.kind === "entity_promotion" &&
+    (item.payload?.entity_type === "person" || item.payload?.entity_type === "org") &&
+    typeof item.payload?.entity_id === "string"
+  ) {
+    try {
+      payload = {
+        ...payload,
+        name:
+          (await visibleTitle(item.payload.entity_type, item.payload.entity_id, actor)) ?? HIDDEN,
+      };
+    } catch {
+      payload = { ...payload, name: HIDDEN };
+    }
+  }
+
   // Suspect-edge payloads hold the full triple (rel + endpoint names). Gate it on the EDGE's
   // tier (edges inherit their source parent's tier): invisible → mask rel + names, keep
   // edge_id/rule_key/verdict/entity_type for post-unlock triage; visible → still re-resolve
@@ -224,7 +247,7 @@ async function maskStaleLabel(item: any, actor: string): Promise<any> {
 export const reviewQueueTool: ToolDef = {
   name: "minime_review_queue",
   description:
-    "List open review-queue items (contradiction | stale | duplicate | decision_review | inbox_unfiled | phantom_person | extract_suspect | ops_failure | goal_review), or resolve one as 'resolved' | 'dismissed'. inbox_unfiled/duplicate items carry the classifier's type/confidence guess (always visible) under payload.capture; its reason and a ~500-char capture text excerpt require an approved tier-2 unlock (minime_unlock) and read '[above current tier]' until then. ops_failure carries only fixed dream-step identifiers and a timestamp (payload.failed_steps, payload.since) — always visible, no unlock needed; run `bun run src/cli.ts doctor` locally for the full maintenance checklist. goal_review flags an active goal untouched (and with no linked task touched) for 90+ days; update it with minime_upsert_goal. The queue is flag-only: resolving never edits the flagged rows themselves.",
+    "List open review-queue items (contradiction | stale | duplicate | decision_review | inbox_unfiled | phantom_person | extract_suspect | ops_failure | goal_review | entity_promotion), or resolve one as 'resolved' | 'dismissed'. inbox_unfiled/duplicate items carry the classifier's type/confidence guess (always visible) under payload.capture; its reason and a ~500-char capture text excerpt require an approved tier-2 unlock (minime_unlock) and read '[above current tier]' until then. ops_failure carries only fixed dream-step identifiers and a timestamp (payload.failed_steps, payload.since) — always visible, no unlock needed; run `bun run src/cli.ts doctor` locally for the full maintenance checklist. goal_review flags an active goal untouched (and with no linked task touched) for 90+ days; update it with minime_upsert_goal. entity_promotion flags a person/org whose identity is still tier 2 though it looks owner-known or independently tier-1-evidenced; its name reads '[above current tier]' until an approved tier-2 unlock, and only the owner's own terminal (`bun run src/cli.ts entity:restore-tier`) can actually restore it to tier 1 — this tool can surface the flag but never execute that change. The queue is flag-only: resolving never edits the flagged rows themselves.",
   schema: {
     action: z.enum(["list", "resolve"]).default("list"),
     kind: z.enum(KINDS).optional(),

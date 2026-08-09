@@ -84,3 +84,8 @@ Run as a short conversation, not a form — write as you go:
 - Keep it short: if the owner goes deep on one question, drop the rest and say
   what was skipped.
 - Do not expose secret values or internal implementation details.
+- If the review queue includes an `entity_promotion` item, do not try to identify or name the
+  entity yourself — it reads `[above current tier]` at tier 1 and you cannot act on it even
+  unlocked. Mention it briefly and point the owner at
+  `bun run src/cli.ts entity:restore-tier --list` in their own terminal (full mechanics:
+  `review-triage.md`); this is not worth working through in a quick evening review.
