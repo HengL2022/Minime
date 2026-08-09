@@ -30,7 +30,7 @@ describe("entity tier restore (W4-2)", () => {
     await resetDb();
   });
 
-  test("(1) migration 038 backfills an owner-created tier-2 person, not a purely-extraction-born one with no tier-1 evidence", async () => {
+  test("(1) migration 038 backfills owner-created and tier-1-evidenced tier-2 people/orgs on both branches of the UNION ALL, not a purely-extraction-born one with no tier-1 evidence", async () => {
     const [ownerPerson] = await testSql`
       insert into people (canonical_name, tier, created_by, source)
       values ('Fictional Backfill Owner Person', 2, 'human', 'manual')
@@ -39,6 +39,70 @@ describe("entity tier restore (W4-2)", () => {
       insert into people (canonical_name, tier, created_by, source)
       values ('Fictional Backfill Extraction Person', 2, 'system:extract', 'extract')
       returning id`;
+
+    // Org mirror of the pair above (review finding, 2026-08-09): the migration's org branch
+    // (the UNION ALL half over orgs/edges/org_aliases) previously had zero test coverage.
+    const [ownerOrg] = await testSql`
+      insert into orgs (canonical_name, tier, created_by, source)
+      values ('Fictional Backfill Owner Org', 2, 'human', 'manual')
+      returning id`;
+    const [extractionOrg] = await testSql`
+      insert into orgs (canonical_name, tier, created_by, source)
+      values ('Fictional Backfill Extraction Org', 2, 'system:extract', 'extract')
+      returning id`;
+
+    // The migration's OTHER OR-arm, on both branches (review finding, 2026-08-09): not
+    // owner-created, but a tier-1 edge already touches the tier-2 identity -- e.g. extraction
+    // ran over a readable (tier-1) page and recorded a graph edge sourced from it, which
+    // inherits the PAGE's own tier (edge_source_tier, 022_entity_derivation_tiers.sql)
+    // independent of whatever tier the referenced person/org row itself sits at. This is the
+    // realistic "previously swallowed" case the heuristic's second OR-arm targets, and mirrors
+    // test (3) below (which sources a tier-2 edge from a tier-2 page the same way) with a
+    // tier-1 page instead. Deliberately NOT exercised here via a tier-1 person_alias/org_alias:
+    // 022's set_entity_alias_tier BEFORE INSERT trigger floors every alias write at its
+    // parent's CURRENT tier, and cascade_entity_tier_to_aliases re-floors every existing alias
+    // whenever the parent is later raised -- so an alias sitting strictly below its tier-2
+    // parent's tier cannot be produced by any ordinary trigger-respecting write post-022 (only
+    // conceivably by genuinely pre-022 historical data). That EXISTS arm is structurally
+    // parallel to, and was reviewed line-for-line against, the edges arm exercised below.
+    const [evidencedPerson] = await testSql`
+      insert into people (canonical_name, tier, created_by, source)
+      values ('Fictional Backfill Tier1Evidenced Person', 2, 'system:extract', 'extract')
+      returning id`;
+    const [evidencedOrg] = await testSql`
+      insert into orgs (canonical_name, tier, created_by, source)
+      values ('Fictional Backfill Tier1Evidenced Org', 2, 'system:extract', 'extract')
+      returning id`;
+    const evidenceSource = await upsertPage({
+      path: "entity-tier-restore/backfill-tier1-evidence-source.md",
+      title: "Backfill tier-1 evidence source",
+      bodyMd: "fictional tier-1 extraction source text",
+      contentHash: "entity-tier-restore-backfill-evidence-hash",
+      tier: 1,
+      source: "test",
+    });
+    await insertEdge({
+      srcType: "page",
+      srcId: evidenceSource.id,
+      rel: "mentions",
+      dstType: "person",
+      dstId: evidencedPerson!.id,
+      sourceTable: "pages",
+      sourceId: evidenceSource.id,
+      extractedBy: "system:extract",
+      source: "extract",
+    });
+    await insertEdge({
+      srcType: "page",
+      srcId: evidenceSource.id,
+      rel: "mentions",
+      dstType: "org",
+      dstId: evidencedOrg!.id,
+      sourceTable: "pages",
+      sourceId: evidenceSource.id,
+      extractedBy: "system:extract",
+      source: "extract",
+    });
 
     // Replay the backfill migration's raw SQL against the now-populated fixtures — the same
     // technique entity-tier-provenance.test.ts uses for 022's own historical backfill. Safe to
@@ -50,16 +114,26 @@ describe("entity tier restore (W4-2)", () => {
       ).text(),
     );
 
-    const owned = await testSql`
-      select payload from review_queue
-      where kind = 'entity_promotion' and payload ->> 'entity_id' = ${ownerPerson!.id}`;
-    expect(owned).toHaveLength(1);
-    expect(owned[0]!.payload).toEqual({ entity_type: "person", entity_id: ownerPerson!.id });
+    const expectFlagged = async (entityType: "person" | "org", entityId: string) => {
+      const rows = await testSql`
+        select payload from review_queue
+        where kind = 'entity_promotion' and payload ->> 'entity_id' = ${entityId}`;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.payload).toEqual({ entity_type: entityType, entity_id: entityId });
+    };
+    const expectNotFlagged = async (entityId: string) => {
+      const rows = await testSql`
+        select id from review_queue
+        where kind = 'entity_promotion' and payload ->> 'entity_id' = ${entityId}`;
+      expect(rows).toHaveLength(0);
+    };
 
-    const extracted = await testSql`
-      select id from review_queue
-      where kind = 'entity_promotion' and payload ->> 'entity_id' = ${extractionPerson!.id}`;
-    expect(extracted).toHaveLength(0);
+    await expectFlagged("person", ownerPerson!.id);
+    await expectNotFlagged(extractionPerson!.id);
+    await expectFlagged("person", evidencedPerson!.id);
+    await expectFlagged("org", ownerOrg!.id);
+    await expectNotFlagged(extractionOrg!.id);
+    await expectFlagged("org", evidencedOrg!.id);
 
     // Replaying it again inserts nothing further for the same id (dedup against the open item).
     await testSql.unsafe(
