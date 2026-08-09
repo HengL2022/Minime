@@ -3184,6 +3184,164 @@ export async function tableCount(
   return r!.n;
 }
 
+// ---------------------------------------------------------------- owner-CLI tier-0 reads (W4-5)
+// Every function below is reachable ONLY from src/cli.ts (`tx list` / `health list`), never from
+// src/mcp/tools/ — I2's "one door" plus I3's tier-0 floor mean raw transaction/health rows must
+// never reach agent/MCP context on any path. Callers run these inside withAdminDbTransaction so
+// db() resolves to the owner DSN (config.databaseUrl) — the exact connection insertTransaction/
+// insertHealthSample above already write through — and the owner role bypasses RLS, so unlike
+// every MCP-facing read in this file there is no tier predicate to append (both tables are tier 0
+// unconditionally; there is no ceiling to filter against). src/cli.ts alone is responsible for
+// ever printing a row either function returns, and only to a real interactive terminal —
+// DECISIONS.md 2026-08-10, a recorded, narrowly-scoped exception to CLAUDE.md's "never log,
+// print, or snapshot tier-0 contents".
+
+export interface Tier0TransactionRow {
+  id: string;
+  occurredAt: string;
+  amountCents: string;
+  currency: string;
+  merchant: string | null;
+  category: string | null;
+}
+
+export interface Tier0HealthSampleRow {
+  id: string;
+  kind: string;
+  at: string;
+  value: string;
+  unit: string;
+}
+
+const TIER0_CLI_YEAR_MONTH_RE = /^\d{4}-\d{2}$/;
+const TIER0_CLI_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const TIER0_CLI_HEALTH_KIND_RE = /^[a-z][a-z0-9_]{0,63}$/;
+const TIER0_CLI_MAX_LIMIT = 500;
+const TIER0_CLI_DEFAULT_LIMIT = 100;
+// Any real, valid date works here — it is only ever bound on the dead side of a boolean-gated
+// OR (see listHealthSamples), never actually compared against.
+const TIER0_CLI_DUMMY_DATE = "1970-01-01";
+
+function tier0CliMonthRange(month: string): { start: string; end: string } {
+  if (!TIER0_CLI_YEAR_MONTH_RE.test(month)) throw new Error("month_invalid");
+  const year = Number(month.slice(0, 4));
+  const monthNum = Number(month.slice(5, 7));
+  if (monthNum < 1 || monthNum > 12) throw new Error("month_invalid");
+  const start = `${month}-01`;
+  const end =
+    monthNum === 12 ? `${year + 1}-01-01` : `${year}-${String(monthNum + 1).padStart(2, "0")}-01`;
+  return { start, end };
+}
+
+function tier0CliLimit(limit: number | undefined): number {
+  if (limit === undefined) return TIER0_CLI_DEFAULT_LIMIT;
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("limit_invalid");
+  return Math.min(limit, TIER0_CLI_MAX_LIMIT);
+}
+
+// A real calendar-valid "YYYY-MM-DD", not just the right shape — rejects e.g. "2026-02-30" by
+// round-tripping through Date.UTC and checking the components survived, so a typo'd --from/--to
+// fails cleanly here rather than reaching a `::date` cast and echoing the owner's own (harmless,
+// but ugly) typo back through an uncaught Postgres error.
+function tier0CliValidDate(value: string): boolean {
+  if (!TIER0_CLI_DATE_RE.test(value)) return false;
+  const [y, m, d] = value.split("-").map(Number) as [number, number, number];
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+
+// Escapes LIKE/ILIKE metacharacters so e.g. a literal "100%_off" search string matches that exact
+// substring instead of "%"/"_" being read as wildcards. Postgres's default LIKE escape character
+// is backslash, so no explicit ESCAPE clause is needed alongside this.
+function tier0CliEscapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+/**
+ * Owner-terminal-only tier-0 read (`tx list`, src/cli.ts) — see section header above. `month` is
+ * "YYYY-MM"; `match` filters merchant/category by case-insensitive substring (rows with a null
+ * merchant AND category still pass a limit-only call — the boolean-gated predicate below never
+ * evaluates the ilike side of the OR at all when no match was requested, so nullable columns
+ * cannot silently drop a row from the unfiltered listing); `limit` defaults to 100 and is clamped
+ * to 500.
+ */
+export async function listTransactions(opts: {
+  month: string;
+  match?: string;
+  limit?: number;
+}): Promise<Tier0TransactionRow[]> {
+  const { start, end } = tier0CliMonthRange(opts.month);
+  const limit = tier0CliLimit(opts.limit);
+  const noMatchFilter = opts.match === undefined;
+  const pattern = noMatchFilter ? "" : `%${tier0CliEscapeLikePattern(opts.match!)}%`;
+  const rows = await db()`
+    select id::text as id, occurred_at::text as occurred_at, amount_cents::text as amount_cents,
+           currency, merchant, category
+    from transactions
+    where occurred_at >= ${start}::date and occurred_at < ${end}::date
+      and (${noMatchFilter} or merchant ilike ${pattern} or category ilike ${pattern})
+    order by occurred_at asc, id asc
+    limit ${limit}`;
+  // postgres.js never auto-camelCases column names (matches pendingTier2UnlockRequests' own
+  // explicit .map() above) — occurred_at/amount_cents must be renamed by hand, not cast blind.
+  return rows.map((row) => ({
+    id: String(row.id),
+    occurredAt: String(row.occurred_at),
+    amountCents: String(row.amount_cents),
+    currency: String(row.currency),
+    merchant: row.merchant === null ? null : String(row.merchant),
+    category: row.category === null ? null : String(row.category),
+  }));
+}
+
+/**
+ * Owner-terminal-only tier-0 read (`health list`, src/cli.ts) — see section header above. `kind`
+ * is an exact match against health_samples.kind; `from`/`to` are inclusive local-calendar-date
+ * bounds in the configured owner time zone (the same "(at at time zone $tz)::date" convention
+ * 027_life_metrics_seed.sql's metric_defs.agg_sql already uses); `limit` defaults to 100 and is
+ * clamped to 500.
+ */
+export async function listHealthSamples(opts: {
+  kind: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+}): Promise<Tier0HealthSampleRow[]> {
+  if (!TIER0_CLI_HEALTH_KIND_RE.test(opts.kind)) throw new Error("kind_invalid");
+  const limit = tier0CliLimit(opts.limit);
+  const noFromFilter = opts.from === undefined;
+  if (!noFromFilter && !tier0CliValidDate(opts.from!)) throw new Error("from_invalid");
+  const noToFilter = opts.to === undefined;
+  if (!noToFilter && !tier0CliValidDate(opts.to!)) throw new Error("to_invalid");
+  // The boolean gate below means this value is never actually compared against when unset, but
+  // it still has to bind as SOME real date: the placeholder sits directly under an explicit
+  // ::date cast, so Postgres's parameter-type inference marks it `date` regardless of what value
+  // is bound, and postgres.js's date serializer throws (RangeError: Invalid Date) on an empty
+  // string rather than passing it through as literal text.
+  const fromBound = opts.from ?? TIER0_CLI_DUMMY_DATE;
+  const toBound = opts.to ?? TIER0_CLI_DUMMY_DATE;
+  const tz = configuredTimeZone();
+  const rows = await db()`
+    select id::text as id, kind, (at at time zone ${tz})::text as at, value::text as value, unit
+    from health_samples
+    where kind = ${opts.kind}
+      and (${noFromFilter} or (at at time zone ${tz})::date >= ${fromBound}::date)
+      and (${noToFilter} or (at at time zone ${tz})::date <= ${toBound}::date)
+    order by at asc, id asc
+    limit ${limit}`;
+  // postgres.js never auto-camelCases column names — this cast is trivially correct today only
+  // because none of these columns needed a rename, and is written explicitly (not a blind cast)
+  // so a future added column here fails loudly instead of silently mismatching, as
+  // listTransactions above just needed to be fixed to do.
+  return rows.map((row) => ({
+    id: String(row.id),
+    kind: String(row.kind),
+    at: String(row.at),
+    value: String(row.value),
+    unit: String(row.unit),
+  }));
+}
+
 // ---------------------------------------------------------------- inbox & review queue
 
 export type InboxStatus = "pending" | "processing" | "filed" | "rejected";

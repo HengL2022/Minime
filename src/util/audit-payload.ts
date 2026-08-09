@@ -5,6 +5,8 @@ export type AuditPayload = Readonly<Record<string, unknown>> & {
 };
 
 type AuditPayloadKind =
+  | "cliHealthList"
+  | "cliTxList"
   | "correctAmend"
   | "correctRetier"
   | "correctRetract"
@@ -64,6 +66,7 @@ const DECIMAL_EVENT_ID = /^[1-9]\d*$/;
 const METRIC_ID = /^[a-z][a-z0-9_]{0,63}$/;
 const MODEL_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,199}$/;
 const HASH = /^[a-f0-9]{16}$/;
+const YEAR_MONTH = /^\d{4}-\d{2}$/;
 
 function invalidPayload(): never {
   throw new Error("invalid_audit_payload");
@@ -147,6 +150,21 @@ function routeTier(value: unknown): 1 | 2 {
 
 function modelIdentifier(value: unknown): string {
   if (typeof value !== "string" || !MODEL_IDENTIFIER.test(value)) invalidPayload();
+  return value;
+}
+
+// cli:tx:list's month filter — "YYYY-MM", the exact shape src/db/repo.ts's listTransactions
+// itself validates before ever building a date range from it.
+function yearMonth(value: unknown): string {
+  if (typeof value !== "string" || !YEAR_MONTH.test(value)) invalidPayload();
+  return value;
+}
+
+// cli:health:list's kind filter. health_samples.kind uses the identical lowercase-snake-case
+// shape metric ids already validate against (METRIC_ID) — named separately here so the field's
+// own meaning (a health sample kind, not a metric id) is clear at call sites.
+function healthKind(value: unknown): string {
+  if (typeof value !== "string" || !METRIC_ID.test(value)) invalidPayload();
   return value;
 }
 
@@ -634,6 +652,33 @@ function entityTierRestored(input: {
   });
 }
 
+// cli:tx:list / cli:health:list (W4-5, src/cli.ts `tx list` / `health list`): the owner-terminal
+// tier-0 read surface's own audit trail — DECISIONS.md 2026-08-10, a recorded exception to "never
+// log, print, or snapshot tier-0 contents" scoped to owner-TTY rendering with count-only audit.
+// Every field is a bounded count, a fixed identifier (month/kind — never a merchant, category, or
+// sample value), or a boolean; the match/from/to text the owner typed never reaches either
+// payload. health list has no --match flag today, so its match_used is always false — kept in the
+// shape anyway so both verbs share one vocabulary should health gain a match filter later.
+function cliTxList(input: { month: string; rowCount: number; matchUsed: boolean }): AuditPayload {
+  return construct("cliTxList", {
+    month: yearMonth(input.month),
+    row_count: nonNegativeInteger(input.rowCount),
+    match_used: boolean(input.matchUsed),
+  });
+}
+
+function cliHealthList(input: {
+  kind: string;
+  rowCount: number;
+  matchUsed: boolean;
+}): AuditPayload {
+  return construct("cliHealthList", {
+    kind: healthKind(input.kind),
+    row_count: nonNegativeInteger(input.rowCount),
+    match_used: boolean(input.matchUsed),
+  });
+}
+
 function inboxClosedExistingTask(input: { taskId: string; score: number }): AuditPayload {
   return construct("inboxClosedExistingTask", {
     task_id: uuid(input.taskId),
@@ -719,6 +764,8 @@ function inboxLegacyDuplicate(): AuditPayload {
 }
 
 export const auditPayload = Object.freeze({
+  cliHealthList,
+  cliTxList,
   correctAmend,
   correctRetier,
   correctRetract,
@@ -786,6 +833,8 @@ function expectedPayloadKind(verb: string, payload: AuditPayload): AuditPayloadK
 
   const fixedKinds: Readonly<Record<string, AuditPayloadKind>> = {
     "backup:restic-check": "resticCheck",
+    "cli:health:list": "cliHealthList",
+    "cli:tx:list": "cliTxList",
     "correct:amend": "correctAmend",
     "correct:retier": "correctRetier",
     "correct:retract": "correctRetract",

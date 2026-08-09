@@ -140,6 +140,8 @@ describe("audit payload boundary", () => {
   test("the constructor surface is closed and validates identifier and code fields", async () => {
     const { auditPayload } = (await import("../src/util/audit-payload")) as any;
     expect(Object.keys(auditPayload).sort()).toEqual([
+      "cliHealthList",
+      "cliTxList",
       "correctAmend",
       "correctRetier",
       "correctRetract",
@@ -425,6 +427,53 @@ describe("audit payload boundary", () => {
         auditPayload.personUpsert({ entityType: "person", entityId, action: "rename" }),
       ),
     ).toThrow("invalid_audit_payload");
+  });
+
+  test("cliTxList/cliHealthList (W4-5) carry only {month|kind, row_count, match_used}, never a match string or row content", async () => {
+    const { auditPayload, assertAuditPayloadForVerb } = (await import(
+      "../src/util/audit-payload"
+    )) as any;
+
+    const txPayload = auditPayload.cliTxList({
+      month: "2026-08",
+      rowCount: 3,
+      matchUsed: true,
+      match: SENTINEL,
+      merchant: SENTINEL,
+    });
+    expect(txPayload).toEqual({ month: "2026-08", row_count: 3, match_used: true });
+    expect(JSON.stringify(txPayload)).not.toContain(SENTINEL);
+    expect(() => assertAuditPayloadForVerb("cli:tx:list", txPayload)).not.toThrow();
+    expect(() =>
+      auditPayload.cliTxList({ month: "2026-8", rowCount: 0, matchUsed: false }),
+    ).toThrow("invalid_audit_payload");
+    expect(() =>
+      auditPayload.cliTxList({ month: "2026-08", rowCount: -1, matchUsed: false }),
+    ).toThrow("invalid_audit_payload");
+    expect(() =>
+      auditPayload.cliTxList({ month: "2026-08", rowCount: 0, matchUsed: "yes" }),
+    ).toThrow("invalid_audit_payload");
+
+    const healthPayload = auditPayload.cliHealthList({
+      kind: "steps",
+      rowCount: 0,
+      matchUsed: false,
+      value: SENTINEL,
+    });
+    expect(healthPayload).toEqual({ kind: "steps", row_count: 0, match_used: false });
+    expect(JSON.stringify(healthPayload)).not.toContain(SENTINEL);
+    expect(() => assertAuditPayloadForVerb("cli:health:list", healthPayload)).not.toThrow();
+    expect(() =>
+      auditPayload.cliHealthList({ kind: "Not Valid Kind", rowCount: 0, matchUsed: false }),
+    ).toThrow("invalid_audit_payload");
+
+    // Bound to its own exact verb, same closed-surface guarantee every other constructor has.
+    expect(() => assertAuditPayloadForVerb("cli:health:list", txPayload)).toThrow(
+      "invalid_audit_payload",
+    );
+    expect(() => assertAuditPayloadForVerb("cli:tx:list", healthPayload)).toThrow(
+      "invalid_audit_payload",
+    );
   });
 });
 

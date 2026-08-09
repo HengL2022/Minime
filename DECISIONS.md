@@ -3540,3 +3540,68 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   access, and adds no new SECURITY DEFINER surface beyond one more parameter on the same function
   — so, like 028's own review-finding fix, it did not need separate ratification. The owner's
   end-of-program review before any publication remains the final gate.
+
+## 2026-08-10 — W4-5: owner-terminal tier-0 CLI reads (`tx list` / `health list`), a recorded exception to "never log, print, or snapshot tier-0 contents"
+
+- **Context:** CLAUDE.md's non-negotiable invariants close with a standalone rule — "Never log,
+  print, or snapshot the contents of tier-0 rows. Row IDs are fine." — enforced everywhere in the
+  system so far: no MCP tool reads `transactions`/`health_samples` content (I3), importers audit
+  only counts (`auditPayload.importSummary`), and `minime_query_metric` is the sole numeric path
+  (I6). That left the owner with no way to eyeball their own raw transaction or health rows short
+  of a manual `psql` session against the owner DSN — real friction for routine bookkeeping
+  ("did June's rent transaction import correctly?") that the product otherwise tries to keep
+  inside Minime's own tools.
+- **Decision:** Two new owner-terminal-only commands, `tx list --month YYYY-MM [--match text]
+  [--limit N]` and `health list --kind <kind> [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--limit N]`
+  (`src/cli.ts`, placed ahead of the `ollamaPreflight` gate like `unlock:approve`/
+  `entity:restore-tier` so reads work without Ollama running), print tier-0 rows directly to
+  stdout — the first place in the system that ever does. Three layers keep this narrow: (1) **TTY
+  gate**: a single function, `renderTier0Lines` (`src/cli.ts`), is the only call site in the file
+  allowed to print a transaction/health field, and its first statement refuses — fixed error,
+  fixed exit code 4 — unless `process.stdout.isTTY` is true, so an agent's Bash tool piping,
+  redirecting, or capturing either command's output gets a refusal instead of rows; both command
+  handlers build their output lines and call this one function rather than ever calling
+  `console.log` themselves (test/tier0-cli-read.test.ts (7) pins this at the source level).
+  `MINIME_ALLOW_NON_TTY_TIER0=1` is a test-only seam (a piped `Bun.spawn` child is deterministically
+  never a TTY) — documented as test-only everywhere it appears, never as an owner-facing setting.
+  (2) **Count-only audit**: every invocation that reaches a real read — whether or not the TTY
+  gate then lets it print — logs one `events` row (`cli:tx:list` / `cli:health:list`) via two new
+  fixed-allowlist `auditPayload` constructors (`src/util/audit-payload.ts`) carrying only
+  `{month|kind, row_count, match_used}` — never the `--match` text, a merchant, a category, or a
+  sample value. Auditing happens before the TTY check, not after, so a refused/piped attempt still
+  leaves a real, count-only forensic trace rather than none at all. (3) **Owner DSN, no new
+  grants**: `listTransactions`/`listHealthSamples` (`src/db/repo.ts`) run inside
+  `withAdminDbTransaction`, the same owner/control-plane connection (`config.databaseUrl`)
+  `insertTransaction`/`insertHealthSample` already write through; the owner role bypasses RLS and
+  007/018's "deliberately no grants" for `minime_app`/`minime_engineer_ro` on these two tables is
+  unchanged — no migration, no new grant, either engineer-RO or app role can still read zero rows
+  of either table. `match` filters merchant/category by case-insensitive substring with
+  LIKE-metachar escaping (a literal `100%_off` search does not become two wildcards); `from`/`to`
+  are inclusive local-calendar-date bounds in the configured owner time zone, the same
+  `(at at time zone $tz)::date` convention 027's `metric_defs.agg_sql` already uses.
+- **Ratified (owner boundary):** the owner-terminal, TTY-gated, count-only-audited surface
+  described above is the sanctioned exception to "never log, print, or snapshot tier-0 contents."
+  The invariant's scope is otherwise unchanged: it still binds every log line, every audit
+  payload, every error message, every snapshot/manifest, and every MCP-reachable surface in the
+  system — nothing about this task loosens what an agent, a log file, or a durable record may ever
+  contain. No MCP tool, and no change to any MCP tool, can reach `listTransactions`/
+  `listHealthSamples`; both are called only from `src/cli.ts`.
+- **Why:** A local, owner-authenticated terminal session is the same trust boundary the product
+  already carves out for `unlock:approve` and `entity:restore-tier` — the one place stricter than
+  "agent-readable" rules do not need to apply, because the reader is provably the owner sitting at
+  their own keyboard, not an agent acting on their behalf. The TTY gate is what makes that
+  provable in practice rather than aspirational: an agent's shell tool can invoke the command, but
+  cannot capture its output, because piped/redirected stdout is never a TTY. Auditing before the
+  render gate (rather than only on a successful print) was a deliberate choice over the cheaper
+  alternative of skipping audit on refusal: a non-interactive attempt is itself a signal worth a
+  durable, content-free record, not a silent no-op. Row counts and filter identifiers (month,
+  kind) are aggregate-shaped information the rest of the system already treats as safe to audit
+  (I3's own `metric_agg()` boundary is "aggregate is fine, raw content is not") — only the `tx
+  list`/`health list` stdout stream itself, gated to a real terminal, ever carries the raw fields.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W4 workstream
+  — task W4-5's own spec named the TTY gate, the count-only audit design, and the recorded
+  invariant exception up front and flagged the owner-ratification requirement explicitly
+  (`owner_decision` in the task spec); the design here implements exactly that, with no
+  broadening. `docs/GUIDE.md` documents both commands and the tier-0 exception inline next to the
+  existing "tier 0: no agent ever sees a row" text they now narrowly qualify.

@@ -128,7 +128,20 @@ bun run src/cli.ts import:email-meta ~/Maildir       # headers only, never bodie
 
 All idempotent — re-importing the same file changes nothing. Transactions and health are
 **tier 0**: no agent ever sees a row; they exist only as aggregates ("spend by category,
-last 3 months") through `minime_query_metric`.
+last 3 months") through `minime_query_metric`. From your own terminal only — never through
+chat or MCP — you can still browse the raw rows for bookkeeping:
+
+```
+bun run src/cli.ts tx list --month 2026-08 [--match text] [--limit N]
+bun run src/cli.ts health list --kind steps [--from 2026-08-01] [--to 2026-08-31] [--limit N]
+```
+
+Both refuse to print anything unless stdout is a real interactive terminal — piping, redirecting,
+or capturing either command's output (`| cat`, `> file`, backticks in a script) gets a fixed
+refusal instead of rows, so an agent's own Bash tool cannot casually read tier-0 data through your
+terminal on your behalf. Every call — shown or refused — is audited with the month/kind, a row
+count, and whether a match filter was used, never the filter text or any row's own content
+(`minime audit` shows the count, never what matched).
 
 Calendar imports preserve UTC and `TZID` timestamps. Floating times use Minime's configured
 owner timezone, and all-day `VALUE=DATE` events span local midnights even across daylight-saving
@@ -220,11 +233,13 @@ recorded there, on top of the log, never instead of it.
 
 ## Trust, privacy, maintenance
 
-- **Tiers**: 0 = money/health (never readable, aggregates only) · 1 = notes, tasks
+- **Tiers**: 0 = money/health (never agent-readable, aggregates only) · 1 = notes, tasks
   (agent-readable default) · 2 = journal, interactions, email metadata (owner-approved,
-  session-bound unlock-gated reads). Tier 0 is absorbing and never readable: prose
+  session-bound unlock-gated reads). Tier 0 is absorbing and never agent-readable: prose
   carrying explicit tier-0 evidence is never promoted into an agent-readable tier. Set
-  `CLOUD_MAX_TIER=1` in `.env` to keep tier 2 off cloud models too.
+  `CLOUD_MAX_TIER=1` in `.env` to keep tier 2 off cloud models too. The one narrow exception:
+  from your own terminal, `bun run src/cli.ts tx list` / `health list` (above) can print raw
+  tier-0 rows to a real interactive terminal — never through chat, MCP, a pipe, or a script.
 - **People and orgs split identity from content**: a person or org's own card —
   canonical name, relation, last-contact date — lives at that row's own tier,
   separately from whatever *mentions* them. Once someone is known at tier 1 (you

@@ -6,9 +6,14 @@ import { assertSchemaCurrent, migrate, parseMigrationCliContext } from "./db/mig
 import {
   type EntityKind,
   type PendingTier2UnlockRequest,
+  type Tier0HealthSampleRow,
+  type Tier0TransactionRow,
   approveTier2UnlockRequest,
   eventsSince,
   getInboxItem,
+  listHealthSamples,
+  listTransactions,
+  logEvent,
   openReviewItems,
   pendingEntityPromotions,
   pendingTier2UnlockRequests,
@@ -33,6 +38,7 @@ import {
   startOwnerMaintenanceSchedule,
   superviseRuntimeChild,
 } from "./serve";
+import { auditPayload } from "./util/audit-payload";
 import { REPO_ROOT, config, repositoryInstallPendingState } from "./util/config";
 import { ollamaPreflight } from "./util/ollama-url";
 import { parseLocalPostgresUrl, samePostgresServer } from "./util/postgres-url";
@@ -54,6 +60,10 @@ const USAGE = `minime <command>
   entity:restore-tier --list       list pending entity_promotion review items, with names
   entity:restore-tier <person|org> <id>
                                     demote one person/org identity from tier 2 back to tier 1
+  tx list --month YYYY-MM [--match text] [--limit N]
+                                    print tier-0 transactions for one month (owner terminal only)
+  health list --kind <kind> [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--limit N]
+                                    print tier-0 health samples of one kind (owner terminal only)
   serve                            MCP server (stdio) + inbox watcher + dream cron
   review                           list open inbox_unfiled/duplicate items with full text (owner; no unlock needed)
   audit --since <Nd>               show what left the box (events), default 7d
@@ -70,6 +80,50 @@ function arg(flag: string): string | undefined {
 
 function formatDoctorCheck(check: DoctorCheck): string {
   return `${check.status.padEnd(4)}  ${check.name}${check.detail ? ` — ${check.detail}` : ""}`;
+}
+
+// amount_cents comes back from repo.ts as a bigint-shaped string (postgres.js never widens
+// bigint to a JS number, to avoid silent precision loss) — format it as a decimal string using
+// only string/integer arithmetic, never a float.
+function formatCents(centsStr: string): string {
+  const negative = centsStr.startsWith("-");
+  const digits = negative ? centsStr.slice(1) : centsStr;
+  const padded = digits.padStart(3, "0");
+  const whole = padded.slice(0, -2);
+  const frac = padded.slice(-2);
+  return `${negative ? "-" : ""}${whole}.${frac}`;
+}
+
+function padColumns(headers: string[], rows: string[][]): string[] {
+  const widths = headers.map((h, i) => Math.max(h.length, ...rows.map((r) => (r[i] ?? "").length)));
+  const line = (cells: string[]) =>
+    cells
+      .map((c, i) => c.padEnd(widths[i]!))
+      .join("  ")
+      .trimEnd();
+  return [line(headers), ...rows.map(line)];
+}
+
+const TIER0_TTY_ERROR = "ERROR: tier-0 rows can only print to a real interactive terminal";
+const TIER0_TTY_FIX =
+  "FIX: run this command directly in a terminal — it refuses to be piped, redirected, or captured";
+
+/**
+ * The one function in this file allowed to print tier-0 row content (transactions/health_samples
+ * fields) to stdout — the owner-terminal tier-0 read surface (DECISIONS.md 2026-08-10), a
+ * recorded, narrowly-scoped exception to CLAUDE.md's "never log, print, or snapshot tier-0
+ * contents". Refuses outright unless stdout is a real interactive terminal, so an agent Bash
+ * session piping or capturing this command's output gets a refusal, never rows — the gate lives
+ * here, first line, so no future call site can reach the print loop without passing it.
+ * MINIME_ALLOW_NON_TTY_TIER0=1 is a test-only seam (bun test spawns children with piped stdout,
+ * which is never a TTY) — never set it in the owner's real environment, and it must never be
+ * documented as anything but test-only.
+ */
+function renderTier0Lines(lines: string[]): void {
+  if (!process.stdout.isTTY && process.env.MINIME_ALLOW_NON_TTY_TIER0 !== "1") {
+    throw new Error("tier0_requires_tty");
+  }
+  for (const line of lines) console.log(line);
 }
 
 /** Resident MCP must always use a distinct restricted app DSN, never owner fallback. */
@@ -351,6 +405,160 @@ async function main(): Promise<number> {
       }
       throw error;
     }
+  }
+  // Owner-terminal-only tier-0 read surface (W4-5): never reachable through MCP — see the
+  // section header above listTransactions/listHealthSamples (src/db/repo.ts) and
+  // renderTier0Lines above. Placed ahead of the ollamaPreflight gate below, same as
+  // unlock:approve/entity:restore-tier, so reads work without Ollama running.
+  if (cmd === "tx" && process.argv[3] === "list") {
+    const month = arg("--month");
+    const match = arg("--match");
+    const limitArg = arg("--limit");
+    if (!month) {
+      console.error("ERROR: --month is required");
+      console.error("FIX: pass --month YYYY-MM, e.g. tx list --month 2026-08");
+      return 2;
+    }
+    let limit: number | undefined;
+    if (limitArg !== undefined) {
+      limit = Number(limitArg);
+      if (!Number.isSafeInteger(limit) || limit < 1) {
+        console.error("ERROR: --limit must be a positive integer");
+        console.error("FIX: pass e.g. --limit 50");
+        return 2;
+      }
+    }
+    try {
+      await assertSchemaCurrent();
+    } catch (error) {
+      if (error instanceof Error && error.message === "schema_not_current") {
+        console.error("ERROR: schema is not current");
+        console.error("FIX: run make migrate, or rerun make update");
+        return 50;
+      }
+      throw error;
+    }
+    let rows: Tier0TransactionRow[];
+    try {
+      rows = await withAdminDbTransaction(() => listTransactions({ month, match, limit }));
+    } catch (error) {
+      if (error instanceof Error && error.message === "month_invalid") {
+        console.error("ERROR: --month must look like YYYY-MM");
+        console.error("FIX: pass e.g. --month 2026-08");
+        return 2;
+      }
+      throw error;
+    }
+    // Audited before the TTY-gated render below runs: "every invocation" (spec) means every
+    // real read, whether or not the terminal check afterward lets it actually print — a piped
+    // attempt still leaves a count-only forensic trace, it just never sees the rows.
+    await logEvent({
+      actor: "owner:cli",
+      verb: "cli:tx:list",
+      payload: auditPayload.cliTxList({
+        month,
+        rowCount: rows.length,
+        matchUsed: match !== undefined,
+      }),
+    });
+    const lines = padColumns(
+      ["date", "amount", "currency", "merchant", "category"],
+      rows.map((r) => [
+        r.occurredAt,
+        formatCents(r.amountCents),
+        r.currency,
+        r.merchant ?? "",
+        r.category ?? "",
+      ]),
+    );
+    lines.push(`-- ${rows.length} transaction(s)`);
+    try {
+      renderTier0Lines(lines);
+    } catch (error) {
+      if (error instanceof Error && error.message === "tier0_requires_tty") {
+        console.error(TIER0_TTY_ERROR);
+        console.error(TIER0_TTY_FIX);
+        return 4;
+      }
+      throw error;
+    }
+    return 0;
+  }
+  if (cmd === "health" && process.argv[3] === "list") {
+    const kind = arg("--kind");
+    const from = arg("--from");
+    const to = arg("--to");
+    const limitArg = arg("--limit");
+    if (!kind) {
+      console.error("ERROR: --kind is required");
+      console.error("FIX: pass --kind <kind>, e.g. health list --kind steps");
+      return 2;
+    }
+    let limit: number | undefined;
+    if (limitArg !== undefined) {
+      limit = Number(limitArg);
+      if (!Number.isSafeInteger(limit) || limit < 1) {
+        console.error("ERROR: --limit must be a positive integer");
+        console.error("FIX: pass e.g. --limit 50");
+        return 2;
+      }
+    }
+    try {
+      await assertSchemaCurrent();
+    } catch (error) {
+      if (error instanceof Error && error.message === "schema_not_current") {
+        console.error("ERROR: schema is not current");
+        console.error("FIX: run make migrate, or rerun make update");
+        return 50;
+      }
+      throw error;
+    }
+    let rows: Tier0HealthSampleRow[];
+    try {
+      rows = await withAdminDbTransaction(() => listHealthSamples({ kind, from, to, limit }));
+    } catch (error) {
+      if (error instanceof Error && error.message === "kind_invalid") {
+        console.error("ERROR: --kind is invalid");
+        console.error("FIX: pass a lowercase snake_case kind, e.g. --kind sleep_minutes");
+        return 2;
+      }
+      if (
+        error instanceof Error &&
+        (error.message === "from_invalid" || error.message === "to_invalid")
+      ) {
+        const flag = error.message === "from_invalid" ? "--from" : "--to";
+        console.error(`ERROR: ${flag} must be a real calendar date, YYYY-MM-DD`);
+        console.error("FIX: pass e.g. --from 2026-08-01 --to 2026-08-31");
+        return 2;
+      }
+      throw error;
+    }
+    // Same ordering rationale as tx list above: audited before the render gate, not after.
+    await logEvent({
+      actor: "owner:cli",
+      verb: "cli:health:list",
+      payload: auditPayload.cliHealthList({
+        kind,
+        rowCount: rows.length,
+        matchUsed: false, // health list has no --match flag today
+      }),
+    });
+    const lines = padColumns(
+      ["at", "kind", "value", "unit"],
+      rows.map((r) => [r.at, r.kind, r.value, r.unit]),
+    );
+    lines.push(`-- ${rows.length} health sample(s)`);
+    try {
+      renderTier0Lines(lines);
+    } catch (error) {
+      if (error instanceof Error && error.message === "tier0_requires_tty") {
+        console.error(TIER0_TTY_ERROR);
+        console.error(TIER0_TTY_FIX);
+        return 4;
+      }
+      throw error;
+    }
+    return 0;
   }
   const ollama = ollamaPreflight(config.ollamaUrl);
   if (!ollama.ok) {
