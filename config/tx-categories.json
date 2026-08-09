@@ -1,0 +1,8 @@
+[
+  { "match": "netflix", "category": "subscriptions" },
+  { "match": "spotify", "category": "subscriptions" },
+  { "match": "grab", "category": "transport", "force": true },
+  { "match": "ntuc fairprice", "category": "groceries" },
+  { "match": "starbucks", "category": "food" },
+  { "match": "guardian pharmacy", "category": "health" }
+]

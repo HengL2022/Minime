@@ -27,6 +27,7 @@ import {
 } from "../util/config";
 import { type MetricRollup, metricDateString } from "../util/metric-rollup";
 import { type RecurFreq, nextDue } from "../util/recurrence";
+import { type TxCategoryRule, applyCategoryRules } from "../util/tx-categories";
 import {
   type DbExecutor,
   type DbPool,
@@ -3203,6 +3204,50 @@ export async function findAgentLoggedTxMatch(
       and amount_cents = ${String(amountCents)}::bigint
     limit 1`;
   return row ? { id: String(row.id) } : null;
+}
+
+export interface TransactionRecategorizeResult {
+  scanned: number;
+  recategorized: number;
+}
+
+/**
+ * W4-7 recategorize-transactions repair (scripts/repairs/recategorize-transactions.ts). Re-applies
+ * config/tx-categories.json's current rules (src/util/tx-categories.ts -- pure rule matching, no
+ * SQL there) to existing rows: category-null rows only by default ("fill gaps"), or every row
+ * when includeAll is set (an owner-requested repass after editing the rules file). Only rows whose
+ * resolved category actually changes are written; `merchant` is read into process memory only
+ * long enough for applyCategoryRules to decide a match and is never placed in the returned result
+ * (I3: never log, print, or snapshot tier-0 row contents -- counts only, like findAgentLoggedTxMatch
+ * above stays id-only).
+ *
+ * Wraps its own transaction (withDbTransaction, same composing pattern as restoreEntityTier
+ * below), so it works whether called bare or nested inside scripts/repair.ts's own
+ * withAdminDbTransaction. Either way this must actually run on the owner/control-plane connection
+ * to succeed: minime_app has insert-only on `transactions` (see insertTransaction's doc above), so
+ * a caller that skipped the admin wrap fails closed at the database rather than silently
+ * SELECTing/UPDATEing as the restricted app role.
+ */
+export async function recategorizeTransactions(
+  rules: readonly TxCategoryRule[],
+  includeAll: boolean,
+): Promise<TransactionRecategorizeResult> {
+  return withDbTransaction(async (tx) => {
+    const rows = await tx`
+      select id::text as id, merchant, category from transactions
+      where category is null or ${includeAll}`;
+    let recategorized = 0;
+    for (const row of rows) {
+      const merchant = row.merchant === null ? null : String(row.merchant);
+      const current = row.category === null ? null : String(row.category);
+      const next = applyCategoryRules(merchant, current, rules);
+      if (next !== null && next !== current) {
+        await tx`update transactions set category = ${next} where id = ${row.id}`;
+        recategorized++;
+      }
+    }
+    return { scanned: rows.length, recategorized };
+  });
 }
 
 export async function insertHealthSample(h: {

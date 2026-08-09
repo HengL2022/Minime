@@ -7,6 +7,7 @@ import { z } from "zod";
 import { insertTransaction } from "../../db/repo";
 import { parseAmountCents } from "../../importers/transactions";
 import { config } from "../../util/config";
+import { applyCategoryRules, loadTxCategoryRules } from "../../util/tx-categories";
 import { ToolError, envelope } from "../envelope";
 import type { ToolDef } from "./registry";
 
@@ -79,6 +80,11 @@ export const logExpenseTool: ToolDef = {
       .digest("hex");
     const id = uuidFromHex(hashHex);
     const externalRef = hashHex.slice(24);
+    // W4-7: config/tx-categories.json fills a category the caller omitted entirely -- an
+    // explicit params.category (including "") always wins outright, never reconsidered against a
+    // rule (unlike the CSV importer, a force:true rule never overrides a caller's own deliberate
+    // choice here; loadTxCategoryRules only runs when there was no explicit choice to respect).
+    const category = params.category ?? applyCategoryRules(merchant, null, loadTxCategoryRules());
 
     const inserted = await insertTransaction({
       id,
@@ -86,7 +92,7 @@ export const logExpenseTool: ToolDef = {
       amountCents,
       currency,
       merchant,
-      category: params.category ?? null,
+      category,
       note,
       accountLabel: AGENT_LOG_ACCOUNT_LABEL,
       externalRef,

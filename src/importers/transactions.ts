@@ -6,6 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { withAdminDbScope } from "../db/client";
 import { findAgentLoggedTxMatch, insertReviewItem, insertTransaction, logEvent } from "../db/repo";
 import { auditPayload } from "../util/audit-payload";
+import { applyCategoryRules, loadTxCategoryRules } from "../util/tx-categories";
 import type { ImportStats } from "./calendar";
 
 export interface TxProfile {
@@ -92,6 +93,8 @@ export async function importTransactions(
   const stats: ImportStats = { total: 0, inserted: 0, updated: 0, skipped: 0 };
   const rows = parseCsv(csvText, profile.delimiter ?? ",");
   if (rows.length === 0) return stats;
+  // W4-7: loaded once per import call, not once per row (config/tx-categories.json, no SQL).
+  const categoryRules = loadTxCategoryRules();
 
   const hasHeader = profile.has_header ?? true;
   const header = hasHeader ? rows[0]!.map((h) => h.trim()) : [];
@@ -143,13 +146,18 @@ export async function importTransactions(
     // v4-shaped UUIDs); only used below when this row turns out to collide with an agent-logged
     // expense worth flagging.
     const id = randomUUID();
+    const merchant = idx.merchant >= 0 ? row[idx.merchant]?.trim() || null : null;
+    const csvCategory = idx.category >= 0 ? row[idx.category]?.trim() || null : null;
+    // W4-7: config/tx-categories.json fills a blank CSV category; a force:true rule can also
+    // override a CSV-provided one. No match, or no rules configured, leaves csvCategory as-is.
+    const category = applyCategoryRules(merchant, csvCategory, categoryRules);
     const inserted = await insertTransaction({
       id,
       occurredAt,
       amountCents: amount,
       currency: profile.currency,
-      merchant: idx.merchant >= 0 ? row[idx.merchant]?.trim() || null : null,
-      category: idx.category >= 0 ? row[idx.category]?.trim() || null : null,
+      merchant,
+      category,
       accountLabel: profile.account_label,
       externalRef,
     });

@@ -331,11 +331,16 @@ export const __preImageDumpForTest = preImageDump;
 
 // Fixed allowlist of summary count keys every repair module may report — never a free-form
 // key, so an arbitrary module can't smuggle row content through a made-up count name.
-type RepairSummaryCountKey = "edges_repointed" | "aliases_moved" | "interactions_repointed";
+type RepairSummaryCountKey =
+  | "edges_repointed"
+  | "aliases_moved"
+  | "interactions_repointed"
+  | "transactions_recategorized";
 const REPAIR_SUMMARY_COUNT_KEYS: readonly RepairSummaryCountKey[] = [
   "edges_repointed",
   "aliases_moved",
   "interactions_repointed",
+  "transactions_recategorized",
 ];
 function isRepairSummaryCountKey(key: string): key is RepairSummaryCountKey {
   return (REPAIR_SUMMARY_COUNT_KEYS as readonly string[]).includes(key);
@@ -399,6 +404,7 @@ type RepairAuditFailureCode = Extract<RepairAuditInput, { phase: "failed" }>["co
 const REPAIR_SCRIPTS = {
   "retype-org-to-person": "repair:retype-org-to-person",
   "merge-person": "repair:merge-person",
+  "recategorize-transactions": "repair:recategorize-transactions",
 } as const;
 type KnownRepairScript = keyof typeof REPAIR_SCRIPTS;
 
