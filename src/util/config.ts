@@ -236,6 +236,48 @@ export function parseDotenv(text: string): Record<string, string> {
   return out;
 }
 
+// W3-11: NTFY_URL is an optional local push-notification fallback for the morning-brief cron
+// (BRIEF_CRON). Unset/empty = disabled, same convention as RESTIC_REPOSITORY/BACKUP_CRON. When
+// set, it is validated HERE, at module load (like validateMinimeDatabasePair below), and FAILS
+// CLOSED on anything but an exact loopback literal -- unlike search/rerank.ts's RERANK_URL,
+// which fails open (silently disables the stage) because a flaky reranker must never break
+// search. A misconfigured push target has no such "must never break" caller to protect, and the
+// owner just tried to turn a new local surface on, so a loud startup refusal (I1: no new
+// external network dependency) is more useful than a notification that silently never arrives.
+export type NtfyUrlRule = "empty" | "syntax" | "scheme" | "non_loopback_host";
+
+export class NtfyUrlError extends Error {
+  readonly rule: NtfyUrlRule;
+  constructor(rule: NtfyUrlRule) {
+    super(`NTFY_URL is invalid (${rule}); refusing to start (I1: loopback-only).`);
+    this.name = "NtfyUrlError";
+    this.rule = rule;
+  }
+}
+
+const NTFY_LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+
+/** Loopback-only NTFY_URL, canonicalized. `new URL()` itself folds ambiguous numeric-IPv4
+ * spellings (hex/octal/decimal/short forms) to dotted-quad and userinfo/subdomain tricks
+ * resolve to their real authority host (verified against WHATWG's own URL parser), so exact
+ * Set membership on `.hostname` after stripping IPv6 brackets is sufficient here -- the same
+ * precedent tier postgres-url.ts's LOOPBACK_HOSTS and rerank.ts's rerankEnabled() already use
+ * for their own local-only settings, proportionate to an optional, off-by-default push target
+ * (unlike ollama-url.ts's hand-rolled parser, which guards the hot embed/classify path). */
+export function parseNtfyUrl(raw: string): string {
+  if (!raw.trim()) throw new NtfyUrlError("empty");
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new NtfyUrlError("syntax");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new NtfyUrlError("scheme");
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (!NTFY_LOOPBACK_HOSTS.has(hostname)) throw new NtfyUrlError("non_loopback_host");
+  return url.toString();
+}
+
 export type InstallPendingState = "ready" | "pending" | "invalid";
 
 /** Repository lifecycle state is authoritative for public migrate/serve entrypoints. */
@@ -290,6 +332,11 @@ const runtimeDatabaseUrl = env("MINIME_APP_DATABASE_URL", databaseUrl);
 // be the same exact loopback server/database. The parser's error is fixed and never contains a DSN.
 validateMinimeDatabasePair(databaseUrl, runtimeDatabaseUrl);
 
+const ntfyUrlRaw = process.env.NTFY_URL?.trim();
+// Validated at module load, same reasoning as validateMinimeDatabasePair above: a bad NTFY_URL
+// must fail serve startup immediately, not surface only once the brief cron first fires.
+const ntfyUrl = ntfyUrlRaw ? parseNtfyUrl(ntfyUrlRaw) : undefined;
+
 const providerEnvironment = parseProviderEnvironment(process.env);
 
 export const config = {
@@ -340,6 +387,13 @@ export const config = {
   // shared in-flight flag (backup.ts). It used to default to "0 4 * * 0", which sits exactly on
   // one of those ticks every Sunday -- see test/backup-preflight.test.ts's regression test.
   resticCheckCron: env("RESTIC_CHECK_CRON", "7 4 * * 0"),
+  // W3-11: opt-in counts-only morning-brief notification cron; empty string disables (default).
+  // See src/ops/push.ts. Scheduled the same way as backupCron/resticCheckCron above -- lock
+  // winner only, no owner-facing prerequisite beyond setting this pattern.
+  briefCron: env("BRIEF_CRON", ""),
+  // Optional local push fallback for the brief (in addition to the OS notifier); already
+  // loopback-validated above (parseNtfyUrl) -- undefined means "not configured", never invalid.
+  ntfyUrl,
   dataDir: resolveDataDir(process.env.MINIME_DATA_DIR),
   // Optional LOCAL cross-encoder reranker (llama-server --rerank). Unset = stage disabled.
   // Localhost-only by construction (I1): src/search/rerank.ts refuses non-local hosts.

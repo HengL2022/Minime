@@ -3135,3 +3135,83 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   adopted as planned; the NULL-uniqueness fix and the `minime_engineer_ro` grant are conservative,
   invariant-preserving implementation details within that same scope, not product-shape changes.
   The owner's end-of-program review before any publication remains the final gate.
+
+## 2026-08-09 — W3-11: local push channel for a counts-only morning-brief notification
+
+- **Context:** Livability-program task W3-11. Everything Minime has produced so far (minime_state,
+  minime_agenda, the morning-brief/evening-review skills) is pull-only — the owner has to open an
+  agent session to see it. This is the first PUSH surface: `serve` itself, unprompted, tells the
+  owner something. The task's own spec shipped with an `owner_decision` block still open (exactly
+  how much content the notification carries, and whether an optional network-adjacent fallback
+  target is wanted at all) — both resolved by the owner ahead of this task's execution as part of
+  the same upfront program ratification the other W3 entries cite (see Approved by), landing as
+  the adopted defaults below; this entry is called out for its own dedicated paragraph, not folded
+  silently into that blanket approval, because a push channel is a materially new class of surface
+  for this codebase regardless of how narrow its content is.
+- **Decision:** New `src/ops/push.ts` + `BRIEF_CRON`/`NTFY_URL` in `src/util/config.ts`.
+  (1) **Content is counts-only, by construction, not by discipline.** `buildBriefText` never reads
+  a title/question/name field off `stateSnapshot()` (`minime_state`'s underlying read) — it reads
+  only `.length` on five of its arrays and the raw `review_queue_open` integer, plus
+  `ops_health.failed_steps`
+  (W3-7's already-content-free fixed dream-step vocabulary) folded to the word `OK` or
+  `failed(<step,...>)`. The rendered line is fixed shape: `Minime: N events today, M tasks due, K
+  decision reviews, R review items, D upcoming dates; maintenance OK/failed(...)`. This is
+  deliberate for a channel whose whole point is rendering on a locked phone/desktop screen where
+  ordinary tier gating (I3) does not apply — a notification banner has no unlock prompt, so it
+  must be safe to show unconditionally, at every tier, at every screen-lock state, always. The
+  no-actor `stateSnapshot()` call this closure makes has a second, load-bearing consequence for
+  that same reason: `allowedTier()`'s SQL (`app_allowed_tier()`, migration 023) reads the
+  `minime.actor`/`minime.session_id` session GUCs to find a live tier-2 approval, and this call
+  sets neither, so it deterministically resolves tier 1 regardless of any real tier-2 unlock open
+  elsewhere at the instant the cron fires — the counts can never be inflated by, or hint at the
+  existence of, a coincidental unlock. (2) **Delivery is local-first, opt-in, off by default.**
+  `BRIEF_CRON` (empty string, default) gates a new cron registered inside
+  `startOwnerMaintenanceSchedule`'s `beginOwnedMaintenance` — same lock-winner-only pattern
+  `BACKUP_CRON`/`RESTIC_CHECK_CRON` already use (W3-5/W3-9), so exactly one resident `serve`
+  ever fires it. `deliverBrief` attempts every applicable channel independently rather than
+  falling back through a priority list — the OS notifier (macOS `osascript -e 'display
+  notification …'`, Linux `notify-send`, resolved via `Bun.which` and invoked as an execv array,
+  never a shell string) and, separately, an optional `NTFY_URL` POST — because they are different
+  destinations (this machine's screen vs. a subscribed phone) the owner may reasonably want both
+  firing, not one superseding the other. `NTFY_URL` is the one genuinely new decision, distinct
+  from the counts-only content question: it is validated once at config load
+  (`parseNtfyUrl`), FAIL CLOSED, to an exact loopback literal (`localhost`/`127.0.0.1`/`::1`,
+  after `new URL()`'s own ambiguous-numeric-IPv4 canonicalization) — unlike `RERANK_URL`
+  (`src/search/rerank.ts`), which fails OPEN (silently disables) because a flaky reranker must
+  never break search. A misconfigured push target protects no such caller, and the owner just
+  tried to turn a brand-new surface on, so a loud refusal at startup beats a notification that
+  silently never arrives. This keeps I1 intact: no external network dependency is introduced,
+  because everything NTFY_URL can ever reach is the owner's own loopback interface. (3) **Delivery
+  failure is local-only; the audit event is not.** A total delivery failure throws inside the
+  cron's `run()`-wrapped callback (the same wrapper dream/backup steps already use), which logs
+  the fixed label `"push brief"` plus `error.constructor.name` — never the message — to
+  `data/logs/ops.log` (W3-8) and swallows the rejection so the scheduler itself never crashes.
+  Independently, one `push:brief` audit event is written per delivery ATTEMPT regardless of
+  outcome, through a new `auditPayload.pushBrief` constructor (`src/util/audit-payload.ts`) —
+  six fields, five bounded non-negative integers and one boolean, the identical numbers that were
+  rendered into the notification text, nothing else; `expectedPayloadKind`'s closed verb→shape
+  map gained the one new `"push:brief"` entry this requires (the same allowlist that already
+  makes an unregistered verb/payload pairing a hard `invalid_audit_payload` throw, not a silent
+  gap). No new MCP tool, no schema/interface change on the agent-facing door (I2) — this is a
+  supervisor-only surface, invisible to and unreachable by any agent.
+- **Why:** The content-only-by-construction design (reading nothing but counts off the snapshot,
+  ever) is a stronger guarantee than "remember not to include titles" would have been, and matches
+  how tier-0/I3 boundaries are enforced elsewhere in this codebase — structurally, not by
+  convention. Deterministically pinning the read to tier 1 (by never setting the actor/session
+  GUCs) closes a subtle edge the spec text did not call out explicitly: without it, a brief that
+  happened to fire while the owner had a tier-2 session open elsewhere would silently carry
+  different, unlock-shaped numbers, which defeats the entire "safe on a lock screen, always" bar
+  the counts-only design was chosen for. Reusing the exact lock-winner cron pattern already proven
+  for backup/restic-check (W3-5/W3-9) rather than inventing a second scheduling mechanism keeps
+  the maintenance supervisor as the one place that owns timing decisions. Fail-closed for
+  `NTFY_URL` (the opposite of `RERANK_URL`'s fail-open) is not an inconsistency: the two settings
+  sit at different points on the same "does silence or refusal serve the owner better here"
+  question, and the reranker and the brief land on opposite sides of it because a search stage
+  that quietly degrades is safe while a push channel that quietly never arrives is not.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W3 workstream
+  and, within it, explicitly resolved this task's own open `owner_decision` (counts-only content;
+  optional loopback-only `NTFY_URL` wanted) as the adopted defaults implemented here — called out
+  in its own paragraph above rather than folded silently into that blanket approval, as the W3-8
+  ops-log entry did for the same reason, because this is a new class of surface (the first the
+  system pushes to the owner unprompted) even though its content is minimal by construction.

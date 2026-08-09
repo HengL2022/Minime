@@ -26,6 +26,7 @@ type AuditPayloadKind =
   | "llmEmbedOutcome"
   | "onboardComplete"
   | "personUpsert"
+  | "pushBrief"
   | "repair"
   | "resticCheck"
   | "tier2Unlock"
@@ -503,6 +504,29 @@ function resticCheck(input: { ok: boolean }): AuditPayload {
   return construct("resticCheck", { ok: boolean(input.ok) });
 }
 
+// W3-11: the counts-only morning-brief notification. Every field is a bounded count or a
+// boolean -- the exact same numbers buildBriefText (src/ops/push.ts) rendered into the
+// delivered notification text, never a row title/question/name. Logged once per delivery
+// attempt regardless of whether the delivery itself succeeded (that outcome is local-only,
+// src/ops/ops-log.ts's job, not this audited-events row's).
+function pushBrief(input: {
+  events: number;
+  tasksDue: number;
+  decisionReviews: number;
+  reviewItems: number;
+  upcomingDates: number;
+  maintenanceOk: boolean;
+}): AuditPayload {
+  return construct("pushBrief", {
+    events: nonNegativeInteger(input.events),
+    tasks_due: nonNegativeInteger(input.tasksDue),
+    decision_reviews: nonNegativeInteger(input.decisionReviews),
+    review_items: nonNegativeInteger(input.reviewItems),
+    upcoming_dates: nonNegativeInteger(input.upcomingDates),
+    maintenance_ok: boolean(input.maintenanceOk),
+  });
+}
+
 function classifierKind(value: unknown): ClassifierKind {
   return fixed(value, ["task", "journal", "interaction", "note", "decision_note", "unknown"]);
 }
@@ -695,6 +719,7 @@ export const auditPayload = Object.freeze({
   llmEgressOutcome,
   onboardComplete,
   personUpsert,
+  pushBrief,
   repair,
   resticCheck,
   tier2Unlock,
@@ -760,6 +785,7 @@ function expectedPayloadKind(verb: string, payload: AuditPayload): AuditPayloadK
     "inbox:unfiled": "inboxUnfiled",
     "onboard:complete": "onboardComplete",
     "person:upsert": "personUpsert",
+    "push:brief": "pushBrief",
     "unlock:tier2:approved": "tier2Unlock",
     "unlock:tier2:requested": "tier2Unlock",
   };

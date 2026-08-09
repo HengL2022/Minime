@@ -5,14 +5,18 @@ import {
   type MaintenanceLockHandle,
   insertReviewItem,
   lastEventAt,
+  logEvent,
   openReviewItems,
   recentEventsByVerb,
   releaseMaintenanceLock,
+  stateSnapshot,
   tryAcquireMaintenanceLock,
 } from "./db/repo";
 import { appendOpsLine } from "./ops/ops-log";
+import { briefCounts, buildBriefText, deliverBrief } from "./ops/push";
 import { dbSnapshot, resticCheck } from "./pipeline/backup";
 import { dream } from "./pipeline/dream";
+import { auditPayload } from "./util/audit-payload";
 import { REPO_ROOT, config, parseProviderEnvironment } from "./util/config";
 import { parseLocalPostgresUrl } from "./util/postgres-url";
 
@@ -351,6 +355,41 @@ async function beginOwnedMaintenance(
   } else {
     console.error(
       "[minime] restic check disabled (set RESTIC_REPOSITORY and RESTIC_PASSWORD_FILE to enable)",
+    );
+  }
+
+  // W3-11: opt-in local morning-brief notification (counts-only; src/ops/push.ts). Same
+  // lock-winner gating as the crons above, but no restic-style external prerequisite -- BRIEF_CRON
+  // alone is enough to arm it, since the OS notifier needs no configuration and NTFY_URL is
+  // optional.
+  if (config.briefCron) {
+    const brief = createCron(config.briefCron, { timezone: config.tz }, () =>
+      run("push brief", () =>
+        withAdminDbScope(async () => {
+          // No actor is passed: stateSnapshot()'s tier check (allowedTier -> app_allowed_tier())
+          // reads the minime.actor/minime.session_id GUCs, which are unset on this plain
+          // admin-pool call -- so this always resolves to tier 1, deterministically, regardless
+          // of any owner tier-2 unlock that happens to be active elsewhere at the moment the cron
+          // fires. That is exactly the safe behavior for a lock-screen-safe count: it can never
+          // be inflated by a coincidental unlock, and its magnitude never hints that one is open.
+          const snapshot = await stateSnapshot();
+          const text = buildBriefText(snapshot);
+          const delivery = await deliverBrief(text);
+          // Logged once per delivery attempt regardless of outcome -- counts only, never content
+          // (audit-payload.ts's pushBrief). Delivery success/failure itself is local-only,
+          // reported below via the thrown error -> run()'s ops.log path, not this audited row.
+          await logEvent({
+            actor: "system:push",
+            verb: "push:brief",
+            payload: auditPayload.pushBrief(briefCounts(snapshot)),
+          });
+          if (!delivery.ok) throw new Error("push_brief_delivery_failed");
+        }),
+      ),
+    );
+    crons.push(brief);
+    console.error(
+      `[minime] push brief scheduled: ${config.briefCron} (next: ${brief.nextRun()?.toISOString()})`,
     );
   }
 

@@ -333,6 +333,17 @@ something is actually broken (Postgres unreachable, dream never run or stale pas
 critically low disk) — a down Ollama or a missing/stale backup dump prints `WARN` but is not
 itself fatal. No secrets, URLs, or paths appear in its output.
 
+Set `BRIEF_CRON` (empty by default — opt in) to get a morning-brief notification wherever
+`serve` runs: a single fixed-shape, counts-only line — "N events today, M tasks due, K decision
+reviews, R review items, D upcoming dates; maintenance OK/failed" — never a task title, decision
+question, or anything else that could be read off a lock screen. Delivery is local: macOS
+Notification Center (`osascript`) or Linux `notify-send`, whichever applies, plus an optional
+second target, `NTFY_URL`, for forwarding the same line to a
+[ntfy](https://ntfy.sh) server running on this same machine (e.g. a Docker container that itself
+relays onward to your phone) — `NTFY_URL` must be a loopback address
+(e.g. `http://localhost:2586/minime`); anything else refuses to start (I1). A delivery failure
+never crashes `serve`; it lands as one line in `data/logs/ops.log`, same as a failed backup step.
+
 ## Three habits that make it work
 
 1. **Capture without ceremony.** If it takes more than ten seconds, you'll stop. Drop it
