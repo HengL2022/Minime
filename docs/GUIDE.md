@@ -88,7 +88,12 @@ when it reconnects.
 "Log that I called Dr. Tan about the knee" → `minime_log_interaction`. People get
 canonical names with aliases (Bob = Robert = 鲍勃), a relation ("my physiotherapist"),
 and a last-contact date. The nightly job also extracts people/org mentions from
-everything you write, so "who is Alice again?" works even if you never logged her.
+everything you write, so "who is Alice again?" works even if you never logged her —
+and once she's known this way, a later private journal mention never quietly hides
+her card again (see **Tiers**, below, for the identity/content split that makes that
+true). Someone who has so far only ever come up in private writing starts out private
+too, until you interact with them directly or approve the flagged suggestion in your
+evening review.
 
 "Alice's birthday is March 3" / "our anniversary is June 12" → `minime_set_person_date`
 (birthday, anniversary, or a custom recurring date with your own label, e.g. "mom's
@@ -215,11 +220,24 @@ recorded there, on top of the log, never instead of it.
 
 ## Trust, privacy, maintenance
 
-- **Tiers**: 0 = money/health (never readable, aggregates only) · 1 = notes, tasks,
-  people (agent-readable default) · 2 = journal, interactions, email metadata
-  (owner-approved, session-bound unlock-gated reads). Tier 0 is absorbing and never
-  readable: prose carrying explicit tier-0 evidence is never promoted into an agent-readable
-  tier. Set `CLOUD_MAX_TIER=1` in `.env` to keep tier 2 off cloud models too.
+- **Tiers**: 0 = money/health (never readable, aggregates only) · 1 = notes, tasks
+  (agent-readable default) · 2 = journal, interactions, email metadata (owner-approved,
+  session-bound unlock-gated reads). Tier 0 is absorbing and never readable: prose
+  carrying explicit tier-0 evidence is never promoted into an agent-readable tier. Set
+  `CLOUD_MAX_TIER=1` in `.env` to keep tier 2 off cloud models too.
+- **People and orgs split identity from content**: a person or org's own card —
+  canonical name, relation, last-contact date — lives at that row's own tier,
+  separately from whatever *mentions* them. Once someone is known at tier 1 (you
+  interacted with them directly, or onboarded them), a later private journal mention
+  never quietly drags their card into tier 2 — it only discloses that contact happened
+  and roughly when (their last-contact date moves), never what was said. A new alias
+  spelling, a graph connection, or an interaction record genuinely drawn from that
+  private mention still stays tier 2, same as the mention itself. Someone who has so
+  far only ever come up in private writing starts out tier 2 too, invisible until you
+  interact with them directly or promote them: the evening review flags an
+  `entity_promotion` item for anyone who looks owner-known but is still stuck at tier
+  2, and `bun run src/cli.ts entity:restore-tier` (your own terminal only, never an
+  agent tool call) is the one place that can move them to tier 1.
 - **Audit**: `bun run src/cli.ts audit --since 7d` shows every read, write, and byte of
   egress — which agent, when, which verb, and how many rows a call returned (never the row
   IDs or their content). The log is append-only; nothing can be quietly erased.

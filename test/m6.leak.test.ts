@@ -3,7 +3,14 @@
 // zero tier-2 content while locked; unlock expiry honored; RLS belt-and-braces present.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { accessCounts, allowedTier, insertJournal, insertTransaction } from "../src/db/repo";
+import {
+  accessCounts,
+  addAlias,
+  allowedTier,
+  ensurePerson,
+  insertJournal,
+  insertTransaction,
+} from "../src/db/repo";
 import {
   type AuditDisposition,
   type AuditSink,
@@ -22,6 +29,11 @@ import { requestAndApproveTier2, sessionToolCtx } from "./support/unlock";
 
 const TIER0_SENTINEL = "ZQX-TIER0-MERCHANT-SENTINEL";
 const TIER2_SENTINEL = "ZQX-TIER2-JOURNAL-SENTINEL";
+// W4-3: a tier-2-only identity (never resolved at tier 1 by anything), stress-testing the
+// identity/content split's new attack surface (037_identity_content_tier_split.sql) inside this
+// suite's existing 200-fuzz-call net -- complements test/tier-split-leak.test.ts's own deeper,
+// single-scenario coverage rather than duplicating it.
+const TIER2_PERSON_SENTINEL = "ZQX-TIER2-PERSON-SENTINEL";
 const PARAMETER_SENTINEL = "ZQX-PARAMETER-SENTINEL";
 const TITLE_SENTINEL = "ZQX-TITLE-SENTINEL";
 const SOURCE_SENTINEL = "ZQX-SOURCE-SENTINEL";
@@ -97,6 +109,17 @@ beforeAll(async () => {
     "Journal sentinel",
     2,
   );
+  const tier2Person = await ensurePerson(
+    `Sentinel Bearer ${TIER2_PERSON_SENTINEL}`,
+    "system:extract",
+    "extract",
+    { tier: 2 },
+  );
+  await addAlias(tier2Person.id, `Alias ${TIER2_PERSON_SENTINEL}`, {
+    tier: 2,
+    createdBy: "system:extract",
+    source: "extract",
+  });
 });
 
 afterAll(() => setNow(null));
@@ -139,6 +162,10 @@ function fuzzCases(): { tool: string; params: any }[] {
       params: { query: q, types: ["transactions", "health_samples"] },
     });
     cases.push({ tool: "minime_get_context", params: { person_name: q } });
+    cases.push({
+      tool: "minime_upsert_person",
+      params: { person_name: q, action: "add_alias", alias: q },
+    });
   }
   for (const m of evilMetrics) {
     cases.push({
@@ -161,6 +188,8 @@ function fuzzCases(): { tool: string; params: any }[] {
   }
   cases.push({ tool: "minime_unlock", params: { minutes: 99999 } });
   cases.push({ tool: "minime_unlock", params: { minutes: 10080 } });
+  cases.push({ tool: "minime_review_queue", params: { action: "list" } });
+  cases.push({ tool: "minime_review_queue", params: { action: "list", kind: "entity_promotion" } });
   while (cases.length < 200) {
     cases.push({ tool: "minime_state", params: {} });
   }
@@ -184,6 +213,9 @@ describe("leak suite (200 fuzzed calls, locked)", () => {
         `tier-0 leak via ${c.tool} ${JSON.stringify(c.params).slice(0, 80)}`,
       ).not.toContain(TIER0_SENTINEL);
       expect(text, `tier-2 leak while locked via ${c.tool}`).not.toContain(TIER2_SENTINEL);
+      expect(text, `tier-2 person leak while locked via ${c.tool}`).not.toContain(
+        TIER2_PERSON_SENTINEL,
+      );
       expect(text).not.toContain("amount_cents");
       if (result.ok === false && c.tool === "minime_unlock") {
         expect(result.error.code).toBe("UNLOCK_TOO_LONG");
@@ -222,6 +254,7 @@ describe("leak suite (200 fuzzed calls, locked)", () => {
     for (const sentinel of [
       TIER0_SENTINEL,
       TIER2_SENTINEL,
+      TIER2_PERSON_SENTINEL,
       PARAMETER_SENTINEL,
       TITLE_SENTINEL,
       SOURCE_SENTINEL,
