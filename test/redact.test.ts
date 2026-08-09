@@ -99,6 +99,19 @@ describe("W4-10: bare 9+ digit rule is context-gated", () => {
     expect(redactString("4111-1111-1111-1111")).not.toContain("4111-1111-1111-1111");
     expect(redactString("DE89370400440532013000")).toContain("[REDACTED:iban]");
   });
+
+  test("an unrelated bare digit run near a redacted IBAN survives — the [REDACTED:iban] placeholder's own 'iban' substring must not gate it", () => {
+    // Regression: the bare-digit context check used to test against the progressively-redacted
+    // string, so "[REDACTED:iban]" (which contains the trigger word "iban") falsely gated any
+    // unrelated 9+ digit run within 40 chars of a redacted IBAN, even with zero context words in
+    // the original text.
+    const out = redactString(
+      "Sent DE89370400440532013000 for rent, fyi order 555666777 shipped separately",
+    );
+    expect(out).toContain("[REDACTED:iban]");
+    expect(out).toContain("555666777");
+    expect(out).not.toContain("[REDACTED:account]");
+  });
 });
 
 describe("W4-10: owner allowlist (REDACT_ALLOWLIST) exempts declared numbers from every rule", () => {

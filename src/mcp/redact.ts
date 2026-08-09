@@ -80,6 +80,10 @@ export function redactStringCounted(s: string): Counted<string> {
 function redactSecretsCounted(s: string): Counted<string> {
   let count = 0;
   let out = s;
+  // Pristine copy for the bare-digit context check below. `out` gets mutated by the IBAN and
+  // card passes first, and its placeholder text must never leak into that check (see comment
+  // at the bare-digit pass for why).
+  const original = s;
 
   // IBAN: 2 letters + 2 digits + 11-30 alphanumerics. Unconditional — no context word needed.
   out = out.replace(/\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b/g, (m) => {
@@ -98,11 +102,26 @@ function redactSecretsCounted(s: string): Counted<string> {
   });
 
   // bare 9+ digit account-like numbers — context-gated (W4-10, ACCOUNT_CONTEXT_WORDS above).
-  out = out.replace(/\b\d{9,}\b/g, (m: string, offset: number, full: string) => {
+  // The context window is tested against `original` (this function's pristine input), never
+  // against `out`: by this point `out` may already carry [REDACTED:iban]/[REDACTED:card]
+  // placeholders from the two passes above, and the literal text "[REDACTED:iban]" contains the
+  // trigger substring "iban" — testing against `out` let an unrelated bare digit run that merely
+  // landed within the radius of an already-redacted IBAN get falsely swept into
+  // [REDACTED:account], even though the original text had no genuine context word anywhere near
+  // it (verified regression: "Sent DE89370400440532013000 for rent, fyi order 555666777 shipped
+  // separately" destroyed the unrelated order number). Neither placeholder ever contains a
+  // digit, so every `\d{9,}` match still found in `out` is a literal, untouched substring of
+  // `original`; since a global regex visits matches strictly left-to-right, a monotonically
+  // advancing cursor recovers each match's true offset in `original` with one indexOf, with no
+  // need to reason about how much the earlier placeholder substitutions shifted lengths.
+  let cursor = 0;
+  out = out.replace(/\b\d{9,}\b/g, (m: string) => {
     if (isAllowlisted(m)) return m;
-    const start = Math.max(0, offset - BARE_DIGIT_CONTEXT_RADIUS);
-    const end = Math.min(full.length, offset + m.length + BARE_DIGIT_CONTEXT_RADIUS);
-    if (!ACCOUNT_CONTEXT_WORDS.test(full.slice(start, end))) return m;
+    const trueStart = original.indexOf(m, cursor);
+    cursor = trueStart + m.length;
+    const start = Math.max(0, trueStart - BARE_DIGIT_CONTEXT_RADIUS);
+    const end = Math.min(original.length, trueStart + m.length + BARE_DIGIT_CONTEXT_RADIUS);
+    if (!ACCOUNT_CONTEXT_WORDS.test(original.slice(start, end))) return m;
     count++;
     return "[REDACTED:account]";
   });
