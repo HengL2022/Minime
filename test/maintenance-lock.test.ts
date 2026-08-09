@@ -74,6 +74,51 @@ describe("single maintenance owner (W3-5)", () => {
     return schedule;
   }
 
+  test("a failing cron job writes the fixed label and error class to ops.log — never the message (W3-8 review gap)", async () => {
+    // Drives run()'s .catch() branch for real: the brief cron's work fn rejects with an error
+    // whose message carries sentinel prose, and only {step, class} may reach the ops log.
+    const { __setDeliverForTest } = await import("../src/ops/push");
+    const { mkdtempSync, realpathSync, readFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+
+    const originalDataDir = config.dataDir;
+    const originalBriefCron = config.briefCron;
+    config.dataDir = realpathSync(mkdtempSync(join(tmpdir(), "minime-runcatch-test-")));
+    config.briefCron = "30 7 * * *";
+    class FixtureBriefBoom extends Error {}
+    __setDeliverForTest(async () => {
+      throw new FixtureBriefBoom("SENTINEL-private-prose should never reach ops.log");
+    });
+
+    try {
+      const f = fakeCronFactory();
+      track(await startOwnerMaintenanceSchedule(f.factory));
+      const brief = f.registrations.find((r) => r.pattern === "30 7 * * *");
+      expect(brief).toBeDefined();
+      brief!.fire();
+
+      const opsPath = join(config.dataDir, "logs", "ops.log");
+      let content = "";
+      for (let i = 0; i < 40; i++) {
+        try {
+          content = readFileSync(opsPath, "utf8");
+          if (content.includes("push brief")) break;
+        } catch {
+          /* not written yet */
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      expect(content).toContain("push brief");
+      expect(content).toContain("class=FixtureBriefBoom");
+      expect(content).not.toContain("SENTINEL-private-prose");
+    } finally {
+      __setDeliverForTest(undefined);
+      config.dataDir = originalDataDir;
+      config.briefCron = originalBriefCron;
+    }
+  });
+
   test("a second scheduler gets no dream/backup crons while the first holds the lock, and takes over once it closes", async () => {
     const a = fakeCronFactory();
     const scheduleA = track(await startOwnerMaintenanceSchedule(a.factory));

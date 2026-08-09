@@ -28,6 +28,7 @@ import {
   __setDumpDirForTest,
   __setInFlightForTest,
   __setManifestWriterForTest,
+  __setStatfsForTest,
   dbSnapshot,
 } from "../src/pipeline/backup";
 import { runDreamStep } from "../src/pipeline/dream";
@@ -52,6 +53,7 @@ afterEach(() => {
   __setCommandRunnerForTest(undefined);
   __setDumpDirForTest(undefined);
   __setManifestWriterForTest(undefined);
+  __setStatfsForTest(undefined);
   __setInFlightForTest(false);
 });
 
@@ -217,6 +219,37 @@ describe("backup command failures (backup.ts + ops-log integration)", () => {
     expect(content).not.toContain("PID 4242");
     expect(content).not.toContain("hostname");
     expect(content).not.toContain("2026-08-09 03:00:00");
+  });
+
+  test("disk-headroom preflight failure writes its ops.log line and never a path (W3-9 review gap)", async () => {
+    freshDataDir();
+    configureRestic();
+    isolatedDumpDir();
+    __setManifestWriterForTest(async () => {});
+    // Full disk: zero available blocks. pg_dump must never even be attempted.
+    __setStatfsForTest(() => ({ bavail: 0, bsize: 4096 }));
+    const commands: string[][] = [];
+    __setCommandRunnerForTest(async (cmd) => {
+      commands.push([...cmd]);
+      return { ok: true };
+    });
+
+    const result = await dbSnapshot();
+    expect(result).toEqual({
+      ran: false,
+      detail: "backup failed (disk_headroom) — see data/logs/ops.log",
+    });
+    // Version/dependency probes may run, but the actual dump (pg_dump -f …) and any restic
+    // snapshot work must never start once headroom fails.
+    expect(commands.some((cmd) => cmd[0] === "pg_dump" && cmd.includes("-f"))).toBe(false);
+    expect(commands.some((cmd) => cmd[0] === "restic" && cmd[1] === "backup")).toBe(false);
+
+    const content = readFileSync(opsLogPath(), "utf8");
+    expect(content).toContain("disk_headroom");
+    expect(content).toContain("disk_low");
+    // The line carries the fixed step + class only — never the dump dir or any filesystem path.
+    expect(content).not.toContain(config.dataDir);
+    expect(content).not.toContain(tmpdir());
   });
 
   test("adversarial: a fake secret/path in child stderr never reaches ops.log (mandatory no-leak case)", async () => {
