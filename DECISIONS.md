@@ -3798,3 +3798,68 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   that authorized this branch's fully autonomous, wave-by-wave execution across the W4 workstream,
   with an explicit same-day ratification of this specific default flip (program decision 3)
   superseding the 2026-06-11 "CLOUD_MAX_TIER default 2, owner's choice" recording.
+
+## 2026-08-10 — W4-10: bare-digit redaction context-gated; owner allowlist; redaction count disclosed in gaps
+
+- **Context:** Outbound redaction (spec §8, `src/mcp/redact.ts`) scrubs three shapes from every
+  string leaving the server: IBANs, Luhn-valid card numbers, and any bare 9+ digit run. That last
+  rule fired unconditionally, so real phone numbers, courier tracking numbers, and Unix epoch
+  timestamps — none of which are secrets — were silently mangled into `[REDACTED:account]`
+  whenever they happened to be 9+ digits long, alongside genuine account numbers. There was also
+  no way for the owner to declare a specific number safe, and no way for an agent to know a
+  returned value had been altered rather than reading it as the real number.
+- **Decision:** Three changes, IBAN and Luhn-card rules left fully intact and unconditional:
+  1. The bare `\d{9,}` rule now fires only when an account/card-context word appears within 40
+     characters of the match: `account`, `acct`, `a/c`, `iban`, `routing`, `swift`,
+     `acct.no`/`acct no`, `account number`, and the CJK terms 账号/账户/卡号 (the owner's own
+     content mixes English and Chinese — see `src/util/cjk.ts`'s existing bilingual handling).
+     The CJK terms are matched without a `\b` word-boundary wrapper — verified that JS's `\b` is
+     ASCII-`\w`-only and never matches adjacent to a Han character (`/\b账号\b/.test("账号
+     123456789")` is `false`), so wrapping them in `\b` the same way as the ASCII terms would have
+     silently made the CJK gate unreachable.
+  2. A new env var `REDACT_ALLOWLIST` (comma-separated exact digit strings, parsed once by
+     `parseRedactAllowlist` in `src/util/config.ts` into `config.redactAllowlist`) exempts an
+     owner-declared exact number from every redaction rule, including Luhn. It is env-sourced
+     only: no MCP tool schema anywhere takes a parameter that reaches `redact.ts`'s allowlist
+     check, so no agent request can add to, read, or otherwise influence it — the owner is the
+     only writer, by construction, not by convention. `src/serve.ts`'s `RUNTIME_SETTING_ENV` now
+     includes `REDACT_ALLOWLIST` so the scrubbed MCP-reachable runtime child — the only process
+     that actually redacts agent-facing tool output — still receives it; omitting that one line
+     would have made the setting silently inert for real traffic while still looking configured
+     in the supervisor's own environment.
+  3. `redact.ts` gained counting siblings of `redactString`/`redactDeep`
+     (`redactStringCounted`/`redactDeepCounted`); the public `redactString`/`redactDeep` exports
+     are unchanged in signature and behavior. `executeTool` (`src/mcp/tools/registry.ts`) now
+     calls `redactDeepCounted` on its success path and appends
+     `"outbound redaction replaced N number-like string(s)"` to the envelope's `gaps` when `N >
+     0`, alongside any gaps the handler itself set. The error path also calls
+     `redactDeepCounted` (so a `ToolError` message is still redacted the same as before) but
+     discards the count: `ToolResult`'s error shape (`{ code, message, retry? }`) has no `gaps`
+     array to disclose into.
+  `test/m2.tools.test.ts`'s existing redaction fixture ("...IBAN...re account 123456789012")
+  needed no change — its digit run already sits immediately next to the word "account" — and no
+  other fixture in the suite relies on unconditional bare-digit redaction; the search was a
+  repo-wide grep for `[REDACTED` literals and for 9+ digit / IBAN-shaped strings across
+  `test/**` and `fixtures/**`, cross-checked against every `.gaps).toEqual(` assertion in the
+  suite for accidental new-gap collisions.
+- **Why:** Redaction is spec §8's blunt server-side safety net, not judgment — the tier boundary
+  (I3), not redaction, is Minime's actual privacy backstop for content that reaches an agent at
+  all. An unconditional bare-digit rule was destroying non-secret, useful information (a phone
+  number the owner asked an agent to recall) for no privacy benefit, since anything sensitive
+  enough to need scrubbing is already the kind of number that shows up near the words that
+  describe it ("account", "iban", "卡号"). Gating on nearby context keeps the intended catch while
+  releasing the false positives, without touching the two rules (IBAN shape, Luhn validity) that
+  need no semantic hint to be confident about. The owner allowlist exists because even a
+  well-gated heuristic can still misfire — a personal reference number that happens to be
+  Luhn-valid, or that sits near a context word by coincidence — and letting the *owner*, never an
+  agent, declare a narrow exact exemption is strictly safer than disabling a rule outright.
+  Disclosing the redaction count in `gaps` follows the same principle every other gap in the
+  codebase already follows (search's tier-2-suppressed count, timeline's locked count, unlock's
+  locked notice): an agent must never present a `[REDACTED:*]` placeholder as if it were the real
+  number, and now it doesn't have to guess that one is there — it is told, as a bare count, never
+  which rule fired or what the original value was, matching I5/§8's disclose-rather-than-
+  confabulate contract without adding a second leak surface.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W4 workstream
+  — task W4-10's own spec named this narrowing, the allowlist, and the disclosure up front and
+  required this entry as a privacy/public-interface change to redaction semantics.

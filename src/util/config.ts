@@ -203,6 +203,25 @@ export function assertTier2UnlockApprovalWindowMinutes(value: number): void {
   }
 }
 
+// W4-10: owner-declared exact digit strings (their own phone/reference numbers) exempt from
+// every outbound redaction rule, including the Luhn card rule (src/mcp/redact.ts). Comma
+// separated; entries are trimmed and blanks dropped; no other validation -- an entry that
+// happens not to match anything is simply inert, never a startup error. This is the ONLY
+// source: no MCP tool schema takes a parameter that reaches redact.ts's allowlist check, so no
+// agent request can add to, see, or otherwise influence it (env-sourced only, agent-unsettable
+// by construction). Pure and separately unit-tested, same precedent as parseProviderEnvironment
+// above -- the runtime child only continues to honor it because serve.ts's RUNTIME_SETTING_ENV
+// explicitly passes REDACT_ALLOWLIST through the scrub.
+export function parseRedactAllowlist(raw: string | undefined): ReadonlySet<string> {
+  if (!raw) return new Set();
+  return new Set(
+    raw
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0),
+  );
+}
+
 // Parse a minimal KEY=VALUE .env (full-line comments, unquoted-inline ` #` comments, blank
 // lines, `export ` prefix, surrounding quotes). Intentionally simple — not a full dotenv: no
 // interpolation or multiline values, none of which Minime's .env uses. Pure (no side effects)
@@ -376,6 +395,10 @@ export const config = {
   // (BAD_INPUT) rather than guess a monetary unit. Format is validated at the tool call site
   // (src/mcp/tools/expense.ts), not here, matching bedrockModel's own lazy-validation precedent.
   defaultCurrency: process.env.MINIME_DEFAULT_CURRENCY,
+  // W4-10: see parseRedactAllowlist above -- owner-only, env-sourced exemption list for
+  // outbound redaction (src/mcp/redact.ts). Absent/empty means no exemptions, same convention
+  // as defaultCurrency just above.
+  redactAllowlist: parseRedactAllowlist(process.env.REDACT_ALLOWLIST),
   tz: env("TZ", "Asia/Singapore"),
   tier2UnlockMaxMinutes: parseTier2UnlockMaxMinutes(env("TIER2_UNLOCK_MAX_MINUTES", "60")),
   // Default stays 10 minutes; override for a wider or narrower blind-approval window.

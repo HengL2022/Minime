@@ -14,6 +14,7 @@ import {
   parseEmbedProviderName,
   parseProviderEnvironment,
   parseProviderName,
+  parseRedactAllowlist,
   parseTier2UnlockApprovalWindowMinutes,
   parseTier2UnlockMaxMinutes,
 } from "../src/util/config";
@@ -286,6 +287,33 @@ describe("tier-2 unlock approval window", () => {
     expect(loadConfigWith(database, database).code).toBe(0);
     expect(
       loadConfigWith(database, database, { TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES: "30" }).code,
+    ).toBe(0);
+  });
+});
+
+describe("redact allowlist parsing (W4-10)", () => {
+  test("splits on commas, trims whitespace, and drops blank entries", () => {
+    expect(parseRedactAllowlist("123456789012, 4111111111111111 ,, 9876543210")).toEqual(
+      new Set(["123456789012", "4111111111111111", "9876543210"]),
+    );
+  });
+
+  test("unset or blank input yields an empty set", () => {
+    expect(parseRedactAllowlist(undefined)).toEqual(new Set());
+    expect(parseRedactAllowlist("")).toEqual(new Set());
+    expect(parseRedactAllowlist("   ")).toEqual(new Set());
+  });
+
+  test("a single entry with no comma still parses", () => {
+    expect(parseRedactAllowlist("123456789012")).toEqual(new Set(["123456789012"]));
+  });
+
+  test("config load wires REDACT_ALLOWLIST through without rejecting it", () => {
+    const database = "postgres://owner:secret@localhost:5432/minime";
+    expect(
+      loadConfigWith(database, database, {
+        REDACT_ALLOWLIST: "123456789012,4111111111111111",
+      }).code,
     ).toBe(0);
   });
 });

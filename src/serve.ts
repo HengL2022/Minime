@@ -43,6 +43,10 @@ const RUNTIME_SETTING_ENV = new Set([
   "OPENROUTER_MODEL",
   "PROVIDER_ROUTE_TIER1",
   "PROVIDER_ROUTE_TIER2",
+  // W4-10: owner-only outbound-redaction exemption list (src/mcp/redact.ts). Must be forwarded
+  // or the MCP-reachable runtime child silently stops honoring an owner setting that exists
+  // specifically to affect that child's tool-call traffic.
+  "REDACT_ALLOWLIST",
   "RERANK_MODEL",
   "RERANK_TOP_IN",
   "RERANK_URL",

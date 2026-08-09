@@ -143,6 +143,20 @@ describe("resident serve authority split", () => {
     expect(() => assertRuntimeChildBoundary(child)).not.toThrow();
   });
 
+  test("REDACT_ALLOWLIST survives the runtime child scrub (W4-10)", () => {
+    // Owner-only outbound-redaction exemption list (src/mcp/redact.ts, src/util/config.ts).
+    // It must reach the MCP-reachable child unchanged -- that child is the only process that
+    // ever actually redacts agent-facing tool output -- or the owner's setting silently stops
+    // applying to real traffic despite still being present in the supervisor's own env.
+    const child = runtimeChildEnvironment({ REDACT_ALLOWLIST: "1234567890,9876543210" }, APP_URL);
+    expect(child.REDACT_ALLOWLIST).toBe("1234567890,9876543210");
+    expect(() => assertRuntimeChildBoundary(child)).not.toThrow();
+
+    const absent = runtimeChildEnvironment({}, APP_URL);
+    expect(absent.REDACT_ALLOWLIST).toBeUndefined();
+    expect(() => assertRuntimeChildBoundary(absent)).not.toThrow();
+  });
+
   test("test-only runtime knobs are admitted only as the exact test pair", () => {
     const testChild = runtimeChildEnvironment(
       { NODE_ENV: "test", MINIME_MOCK_OLLAMA: "1" },
