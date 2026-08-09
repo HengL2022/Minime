@@ -263,10 +263,12 @@ or a distributed rollback across Postgres, files, model providers, or indexes.
 - **Backup robustness**: every dump attempt first checks the db-dump/ filesystem has headroom —
   free space at least double the current `minime.sql` (or 256MB when there is no dump yet) — and
   fails closed with no partial file when it doesn't. Independently, a weekly
-  `restic check --read-data-subset=5%` (`RESTIC_CHECK_CRON`, default Sunday 4am, runs only once
-  `RESTIC_REPOSITORY`/`RESTIC_PASSWORD_FILE` are set) verifies the destination itself is still
-  readable; it does not create a new snapshot, and it shares the same in-process lock as the
-  frequent snapshot cron so the two never race restic's own repository lock. Each attempt logs one
+  `restic check --read-data-subset=5%` (`RESTIC_CHECK_CRON`, default Sunday 4:07am -- off the
+  frequent snapshot cron's default quarter-hour grid so the two shipped defaults never land on the
+  same instant, runs only once `RESTIC_REPOSITORY`/`RESTIC_PASSWORD_FILE` are set) verifies the
+  destination itself is still readable; it does not create a new snapshot, and it shares the same
+  in-process lock as the frequent snapshot cron so the two never race restic's own repository lock
+  if they are ever configured to coincide. Each attempt logs one
   content-free `backup:restic-check` event (`minime audit` shows it), and `minime doctor` reports
   both how long ago it last ran and whether that last attempt failed.
 - **Restore promotion**: `make promote-restore` is a separate, deliberate owner action. It refuses

@@ -612,11 +612,20 @@ export async function dbSnapshot(): Promise<{ ran: boolean; detail: string }> {
 // crons are only ever registered by serve.ts's startOwnerMaintenanceSchedule on the single
 // maintenance-lock-owning process (src/serve.ts's beginOwnedMaintenance), so the same in-process
 // flag runBackup already uses is sufficient to keep the two from ever colliding at the repository,
-// independent of how RESTIC_CHECK_CRON/BACKUP_CRON happen to be configured (the setup wizard's own
-// suggested defaults -- BACKUP_CRON="*/15 * * * *", RESTIC_CHECK_CRON="0 4 * * 0" -- coincide every
-// Sunday at 4:00 sharp). A caller that loses the race is skipped, not retried -- same as runBackup
-// skipping itself -- and logs no event, since no attempt was actually made; the next scheduled
-// tick tries again.
+// however RESTIC_CHECK_CRON/BACKUP_CRON happen to be configured.
+//
+// A caller that loses that race is skipped, not retried -- same as runBackup skipping itself --
+// and logs no event, since no attempt was actually made; the next scheduled tick tries again. For
+// dbSnapshot that's a 15-minute wait, negligible; for resticCheck it's a full week, so losing this
+// race regularly would quietly defeat the "weekly" guarantee. That is exactly what the shipped
+// defaults used to do (second review fix): RESTIC_CHECK_CRON defaulted to "0 4 * * 0", which sits
+// on the identical instant as one of BACKUP_CRON's default "*/15 * * * *" ticks every single
+// Sunday, and beginOwnedMaintenance always registers "db snapshot" first, so it silently won that
+// tie ~75-80% of weeks. RESTIC_CHECK_CRON's default minute is now 7, off BACKUP_CRON's default
+// quarter-hour grid entirely, so the two shipped defaults never coincide (regression test:
+// test/backup-preflight.test.ts). The shared flag above remains as defense-in-depth for an owner
+// who configures both crons to overlap anyway -- restic's own exclusive lock makes that a real
+// failure mode to guard against, just no longer the shipped-default one.
 //
 // Always logs one 'backup:restic-check' audit event (content-free: {ok} only) on an actual
 // attempt; a command failure also gets a sanitized ops.log line, same discipline as

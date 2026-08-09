@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, realpathSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Cron } from "croner";
 import {
   __setCommandRunnerForTest,
   __setDumpDirForTest,
@@ -252,6 +253,36 @@ describe("resticCheck (W3-9)", () => {
   });
 });
 
+describe("shipped cron defaults never collide (W3-9 review fix)", () => {
+  // Hardcoded to the literal shipped defaults (src/util/config.ts / .env.example) instead of
+  // reading config.backupCron/config.resticCheckCron -- other describe blocks in this file mutate
+  // those globals, so a literal here is the only way to pin down exactly what ships. Update both
+  // literals together if either shipped default ever changes.
+  //
+  // Regression for a review finding: RESTIC_CHECK_CRON used to default to "0 4 * * 0", which lands
+  // exactly on one of BACKUP_CRON's "*/15 * * * *" ticks every Sunday. Because resticCheck() and
+  // runBackup() share one in-flight flag (backup.ts:605-625) and beginOwnedMaintenance (serve.ts)
+  // always registers "db snapshot" before "restic check", the snapshot cron silently won that tie
+  // almost every week -- and the loser logs no event at all, since no attempt was actually made --
+  // so a "weekly" integrity check ran roughly 1 week in 4-5. Minute 7 keeps the weekly check off
+  // every quarter-hour tick the snapshot cron's default can land on.
+  test("RESTIC_CHECK_CRON's default never fires at the same instant as BACKUP_CRON's default", () => {
+    const dbSnapshotCron = new Cron("*/15 * * * *", { timezone: "UTC" });
+    const resticCheckCron = new Cron("7 4 * * 0", { timezone: "UTC" });
+    try {
+      const upcomingChecks = resticCheckCron.nextRuns(52); // a full year of weekly checks
+      expect(upcomingChecks).toHaveLength(52);
+      for (const checkRun of upcomingChecks) {
+        const justBefore = new Date(checkRun.getTime() - 1_000);
+        expect(dbSnapshotCron.nextRun(justBefore)?.getTime()).not.toBe(checkRun.getTime());
+      }
+    } finally {
+      dbSnapshotCron.stop();
+      resticCheckCron.stop();
+    }
+  });
+});
+
 describe("serve schedules the weekly restic check (W3-9)", () => {
   const original = {
     resticRepository: config.resticRepository,
@@ -287,14 +318,14 @@ describe("serve schedules the weekly restic check (W3-9)", () => {
 
   test("registers the restic-check cron only when restic is configured", async () => {
     config.tz = "Asia/Singapore";
-    config.resticCheckCron = "0 4 * * 0";
+    config.resticCheckCron = "7 4 * * 0";
 
     config.resticRepository = undefined;
     config.resticPasswordFile = undefined;
     const unconfigured = fakeCronFactory();
     const scheduleUnconfigured = await startOwnerMaintenanceSchedule(unconfigured.factory);
     try {
-      expect(unconfigured.registrations.some((r) => r.pattern === "0 4 * * 0")).toBe(false);
+      expect(unconfigured.registrations.some((r) => r.pattern === "7 4 * * 0")).toBe(false);
     } finally {
       await scheduleUnconfigured.close();
     }
@@ -304,21 +335,21 @@ describe("serve schedules the weekly restic check (W3-9)", () => {
     const configured = fakeCronFactory();
     const scheduleConfigured = await startOwnerMaintenanceSchedule(configured.factory);
     liveSchedules.push(scheduleConfigured);
-    expect(configured.registrations.some((r) => r.pattern === "0 4 * * 0")).toBe(true);
+    expect(configured.registrations.some((r) => r.pattern === "7 4 * * 0")).toBe(true);
   });
 
   test("registers the restic-check cron only for the maintenance-lock winner", async () => {
     config.tz = "Asia/Singapore";
-    config.resticCheckCron = "0 4 * * 0";
+    config.resticCheckCron = "7 4 * * 0";
     config.resticRepository = "test:repo";
     config.resticPasswordFile = "/test/pass";
 
     const winner = fakeCronFactory();
     liveSchedules.push(await startOwnerMaintenanceSchedule(winner.factory));
-    expect(winner.registrations.some((r) => r.pattern === "0 4 * * 0")).toBe(true);
+    expect(winner.registrations.some((r) => r.pattern === "7 4 * * 0")).toBe(true);
 
     const loser = fakeCronFactory();
     liveSchedules.push(await startOwnerMaintenanceSchedule(loser.factory));
-    expect(loser.registrations.some((r) => r.pattern === "0 4 * * 0")).toBe(false);
+    expect(loser.registrations.some((r) => r.pattern === "7 4 * * 0")).toBe(false);
   });
 });

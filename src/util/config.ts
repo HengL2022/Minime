@@ -334,8 +334,12 @@ export const config = {
   backupCron: env("BACKUP_CRON", "*/15 * * * *"),
   // weekly restic repository integrity check (`restic check --read-data-subset=5%`); empty
   // string disables the cron. Independent of BACKUP_CRON -- this verifies the repository already
-  // at the destination, it does not create a new snapshot.
-  resticCheckCron: env("RESTIC_CHECK_CRON", "0 4 * * 0"),
+  // at the destination, it does not create a new snapshot. Review fix: minute 7 (not :00/:15/:30/
+  // :45) is deliberate -- it keeps this off BACKUP_CRON's default "*/15 * * * *" grid, so the two
+  // shipped defaults never land on the identical instant and fight over resticCheck()/runBackup()'s
+  // shared in-flight flag (backup.ts). It used to default to "0 4 * * 0", which sits exactly on
+  // one of those ticks every Sunday -- see test/backup-preflight.test.ts's regression test.
+  resticCheckCron: env("RESTIC_CHECK_CRON", "7 4 * * 0"),
   dataDir: resolveDataDir(process.env.MINIME_DATA_DIR),
   // Optional LOCAL cross-encoder reranker (llama-server --rerank). Unset = stage disabled.
   // Localhost-only by construction (I1): src/search/rerank.ts refuses non-local hosts.

@@ -228,8 +228,11 @@ describe("minime doctor (src/ops/doctor.ts)", () => {
     }
   });
 
-  test("restic check WARNs (not FAILs) when restic is unconfigured or has never run", async () => {
+  test("restic check WARNs (not FAILs) when restic is unconfigured", async () => {
     await seedDreamSummary(new Date(), []);
+    // config.resticRepository/resticPasswordFile are left at their ambient (unconfigured) value
+    // here -- this exercises doctor.ts's "not configured" return specifically (doctor.ts:154-156),
+    // distinct from the "configured but has never run" branch covered just below.
     const result = await runDoctorChecks({
       statfs: HEALTHY_STATFS,
       fetchOllamaTags: async () => [],
@@ -242,6 +245,77 @@ describe("minime doctor (src/ops/doctor.ts)", () => {
       detail: "restic not configured",
     });
     expect(result.exitCode).toBe(0);
+  });
+
+  // Review fix: a prior version of this test was titled to also cover "has never run", but never
+  // configured restic, so it only ever exercised the "not configured" branch above -- the "has
+  // never run" branch (doctor.ts:163, reachable only when restic IS configured but zero
+  // backup:restic-check events exist yet, e.g. right after an owner enables restic, before the
+  // first Sunday) had no coverage anywhere. This test configures restic and deliberately does not
+  // seed a backup:restic-check event.
+  test("restic check WARNs when restic is configured but has never run", async () => {
+    await seedDreamSummary(new Date(), []); // no seedResticCheck() at all
+
+    const original = {
+      resticRepository: config.resticRepository,
+      resticPasswordFile: config.resticPasswordFile,
+    };
+    config.resticRepository = "test:repository";
+    config.resticPasswordFile = "/test/restic-password";
+    try {
+      const result = await runDoctorChecks({
+        statfs: HEALTHY_STATFS,
+        fetchOllamaTags: async () => [],
+        dumpDir: NO_DUMP_DIR,
+      });
+      const resticCheck = result.checks.find((c) => c.name === "restic check");
+      expect(resticCheck).toEqual({
+        name: "restic check",
+        status: "WARN",
+        detail: "has never run",
+      });
+      expect(result.exitCode).toBe(0);
+    } finally {
+      config.resticRepository = original.resticRepository;
+      config.resticPasswordFile = original.resticPasswordFile;
+    }
+  });
+
+  // Review fix: the staleness branch (doctor.ts:169-171) -- a *successful* last check that is
+  // older than RESTIC_CHECK_STALE_HOURS (192h, doctor.ts) -- had no coverage. This matters more
+  // than a typical missing branch: staleness is the safety net meant to surface a silently
+  // not-firing weekly cron (see the shipped-defaults collision regression test in
+  // test/backup-preflight.test.ts) to the owner via `minime doctor`, so a regression in the
+  // threshold, the comparison direction, or the message format here would ship undetected.
+  test("WARNs when the last restic check succeeded but is older than the staleness threshold", async () => {
+    await seedDreamSummary(new Date(), []);
+    // One hour past the 192h threshold, with ok:true, isolates staleness from the separate
+    // last-attempt-failed branch covered below.
+    await seedResticCheck(new Date(Date.now() - 193 * HOUR), true);
+
+    const original = {
+      resticRepository: config.resticRepository,
+      resticPasswordFile: config.resticPasswordFile,
+    };
+    config.resticRepository = "test:repository";
+    config.resticPasswordFile = "/test/restic-password";
+    try {
+      const result = await runDoctorChecks({
+        statfs: HEALTHY_STATFS,
+        fetchOllamaTags: async () => [],
+        dumpDir: NO_DUMP_DIR,
+      });
+      const resticCheck = result.checks.find((c) => c.name === "restic check");
+      expect(resticCheck).toEqual({
+        name: "restic check",
+        status: "WARN",
+        detail: "last run 193h ago",
+      });
+      expect(result.exitCode).toBe(0);
+    } finally {
+      config.resticRepository = original.resticRepository;
+      config.resticPasswordFile = original.resticPasswordFile;
+    }
   });
 
   // Review fix: checkResticCheck used to grade PASS purely from the audit event's recency, so a

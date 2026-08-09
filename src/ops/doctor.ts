@@ -43,7 +43,7 @@ export interface DoctorProbes {
 
 const DREAM_STALE_HOURS = 48;
 const DUMP_STALE_HOURS = 48;
-// Default cron is weekly (RESTIC_CHECK_CRON, "0 4 * * 0" = every Sunday) -- a bit over 8 days
+// Default cron is weekly (RESTIC_CHECK_CRON, "7 4 * * 0" = every Sunday) -- a bit over 8 days
 // tolerates one late/missed fire before this WARNs.
 const RESTIC_CHECK_STALE_HOURS = 24 * 8;
 const DISK_WARN_FREE_RATIO = 0.1;
