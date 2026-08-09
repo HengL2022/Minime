@@ -20,6 +20,7 @@ import {
 import { toolByName } from "../src/mcp/tools";
 import { invokeTool } from "../src/mcp/tools/registry";
 import { resetDb, testSql } from "./helpers";
+import { dropTestAppRole, mintTestAppRole } from "./support/app-role";
 import { requestAndApproveTier2, sessionToolCtx } from "./support/unlock";
 
 const HIDDEN = "[above current tier]";
@@ -266,16 +267,47 @@ describe("entity tier restore (W4-2)", () => {
     expect(unknown.code).toBe(1);
     expect(unknown.stderr).toContain("no such person/org id");
   });
+
+  // Review remediation (high-severity finding, 2026-08-09): --list used to run
+  // pendingEntityPromotions() on the bare runtime pool. In a real installed deployment that pool
+  // is the restricted minime_app role (scripts/install.sh writes MINIME_APP_DATABASE_URL into
+  // .env), and people/orgs both carry `tier_read ... using (tier <= app_allowed_tier())`
+  // (007_rls.sql/008_orgs.sql). Since every entity_promotion item points at a tier-2 identity and
+  // app_allowed_tier() is locked at 1 absent a live unlock, the per-item select silently returned
+  // zero rows for every item and `if (!row) continue` (repo.ts) dropped it — the owner would see
+  // "0 pending" no matter how many were actually queued. test (6) above cannot catch this: per
+  // test/setup.ts, MINIME_APP_DATABASE_URL is deleted before any test runs, so the runtime pool
+  // there falls back to the same owner DSN as adminSql and RLS never actually applies. This test
+  // uses the same mintTestAppRole/Bun.spawn pattern as timeline-restricted-role.test.ts to exercise
+  // the genuinely restricted role and prove the --list admin-scope wrap (src/cli.ts) fixes it.
+  test("(7) CLI subprocess --list: a pending item stays visible under the real restricted minime_app role", async () => {
+    const name = "Fictional Restricted Role List Person";
+    const { id: personId } = await ensurePerson(name, "human", "manual", { tier: 2 });
+    await ensurePerson(name, "agent:test", "capture", { tier: 1 }); // triggers the flag
+
+    const appRole = await mintTestAppRole(process.env.DATABASE_URL!);
+    try {
+      const listed = await spawnEntityRestoreTier(["--list"], {
+        MINIME_APP_DATABASE_URL: appRole.databaseUrl,
+      });
+      expect(listed.code).toBe(0);
+      expect(listed.stdout).toContain(personId);
+      expect(listed.stdout).toContain(name);
+    } finally {
+      await dropTestAppRole(appRole);
+    }
+  });
 });
 
 async function spawnEntityRestoreTier(
   args: string[],
+  envOverrides: Record<string, string> = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const child = Bun.spawn(
     [process.execPath, "--no-env-file", "run", "src/cli.ts", "entity:restore-tier", ...args],
     {
       cwd: new URL("..", import.meta.url).pathname,
-      env: { ...process.env, OLLAMA_URL: "http://example.test:11434" },
+      env: { ...process.env, OLLAMA_URL: "http://example.test:11434", ...envOverrides },
       stdout: "pipe",
       stderr: "pipe",
     },

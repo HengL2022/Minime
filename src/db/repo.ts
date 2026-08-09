@@ -3504,6 +3504,14 @@ export interface PendingEntityPromotion {
  * masks it behind the caller's own tier. Never call this from an MCP tool handler. An item whose
  * entity has since been removed/retyped out from under it is skipped, not crashed on, so one
  * stale row can never break the whole listing.
+ *
+ * MUST be called inside withAdminDbTransaction/withAdminDbScope (as the CLI does). Every item
+ * here points at a tier-2 person/org, and both tables' `tier_read` RLS policy (007_rls.sql,
+ * 008_orgs.sql) resolves app_allowed_tier() to 1 with no live unlock — on the restricted
+ * minime_app role (an installed deployment's default runtime pool) that makes each per-item
+ * select return zero rows, and `if (!row) continue` below drops it silently rather than erroring.
+ * Regression coverage: test/entity-tier-restore.test.ts's mintTestAppRole-based CLI-subprocess
+ * test.
  */
 export async function pendingEntityPromotions(): Promise<PendingEntityPromotion[]> {
   const out: PendingEntityPromotion[] = [];

@@ -277,7 +277,13 @@ async function main(): Promise<number> {
         }
         throw error;
       }
-      const pending = await pendingEntityPromotions();
+      // Admin-scope wrap (review finding, 2026-08-09): pendingEntityPromotions() reads
+      // people/orgs directly by id with no tier predicate of its own, relying on RLS. Every
+      // entity_promotion item points at a tier-2 identity, so on the restricted minime_app role
+      // (an ordinary installed deployment's default runtimePool) app_allowed_tier() is locked at
+      // 1 absent a live unlock and every row lookup is silently dropped — mirror the restore
+      // action's own wrap immediately below so this runs on the owner connection instead.
+      const pending = await withAdminDbTransaction(() => pendingEntityPromotions());
       for (const item of pending) {
         const ageMinutes = Math.max(
           0,
