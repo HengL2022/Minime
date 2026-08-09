@@ -5,7 +5,7 @@ import type { ToolDef } from "./registry";
 export const stateTool: ToolDef = {
   name: "minime_state",
   description:
-    "Snapshot of now: today/tomorrow calendar, due tasks, tasks moved (closed) today, captures filed today (type/confidence/title/tier), open commitments, decision reviews due, review-queue count, metric anomalies (from rollups only), and ops_health (nightly maintenance status: dream_last_at, failed_steps, ops_failure_open — content-free, same for every actor).",
+    "Snapshot of now: today/tomorrow calendar, due tasks, tasks moved (closed) today, captures filed today (type/confidence/title/tier), open commitments, decision reviews due, review-queue count, metric anomalies (from rollups only), upcoming_dates (birthdays/anniversaries/custom person dates recurring in the next 14 days, next occurrence only), and ops_health (nightly maintenance status: dream_last_at, failed_steps, ops_failure_open — content-free, same for every actor).",
   schema: {},
   handler: async (_params, ctx) => {
     const s = await stateSnapshot(ctx.actor, ctx.timeZone);
@@ -26,6 +26,11 @@ export const stateTool: ToolDef = {
         type: "decision",
         id: d.id,
         title: d.question,
+      })),
+      ...s.upcoming_dates.map((d: any) => ({
+        type: "person_date",
+        id: d.id,
+        title: d.canonical_name,
       })),
     ];
     return envelope(s, sources);

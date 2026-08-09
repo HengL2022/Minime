@@ -7,6 +7,7 @@ import { logInteractionTool } from "./interactions";
 import { journalTool } from "./journal";
 import { listMetricsTool, queryMetricTool } from "./metric";
 import { upsertPersonTool } from "./person";
+import { setPersonDateTool } from "./person-dates";
 import { refileTool } from "./refile";
 import type { ToolDef } from "./registry";
 import { reviewQueueTool } from "./review-queue";
@@ -34,6 +35,7 @@ export const ALL_TOOLS: ToolDef[] = [
   correctTool,
   unlockTool,
   upsertPersonTool,
+  setPersonDateTool,
   timelineTool,
 ];
 

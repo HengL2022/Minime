@@ -3059,3 +3059,79 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   from the blanket wave-execution approval used for the other W3 entries, because this task's own
   risk field flagged it as weakening a previously recorded privacy posture (H3) and required
   invariant review before merge.
+
+## 2026-08-09 — Important dates: person_dates table + 14-day lookahead + minime_set_person_date
+
+- **Context:** Livability-program task W3-10: the owner had no way to be reminded of a birthday
+  or anniversary ahead of time — `minime_state`/the morning brief only ever saw calendar events,
+  tasks, and commitments. Migration 034 adds `person_dates` (birthday/anniversary/custom, one row
+  per person per kind, `custom` distinguished by an owner-supplied label) and a new tool,
+  `minime_set_person_date`. The task's own spec text targeted migration 030, already taken by
+  `030_task_recurrence.sql`; 031/032/033 were also taken in the interim by W3-2/W3-3/W3-7 landing
+  on this branch first. This shipped as 034, the true next free number as of this migration —
+  noted here since it is a numbering deviation from the task's own spec, not because renumbering
+  itself is a contract decision (same convention as 030/031's own precedent).
+- **Decision:** (1) **Schema**: a separate tier-1 table, not columns on `people` — supports
+  multiple/custom dates and never touches the promotion-sensitive `people` row. `label` is
+  nullable (required only for `kind='custom'`, forbidden for `birthday`/`anniversary` — the CHECK
+  ties presence to kind in both directions); the unique index is on
+  `(person_id, kind, coalesce(label, ''))`, not a bare `unique(person_id, kind, label)`, because
+  Postgres never treats two NULLs as equal for uniqueness — a bare constraint would let a repeat
+  "set my birthday" call silently mint a duplicate row every time instead of updating the one row.
+  `repo.upsertPersonDate` names that same `coalesce(label, '')` expression as its `ON CONFLICT`
+  target. Grants/RLS mirror every other tier-1 content table (`tier >= 1 and tier <=
+  app_allowed_tier()`, post-021 predicate form) with SELECT/INSERT/UPDATE only — no DELETE grant;
+  this is an insert/update-only agent write path with no owner-facing delete tool. Deviation from
+  the task's own spec text: the spec said not to add this table to migration 024's frozen
+  engineer-grant list, read as "don't touch 024.sql itself" (migrations are historical and never
+  retroactively edited) — but `test/m15.roles.test.ts` has a live regression test asserting every
+  `tier_read` policy scoped to `minime_app` also covers `minime_engineer_ro`, with its own comment
+  describing catching exactly this omission. `person_dates` is ordinary tier-1 content, the same
+  engineer-readable default every other tier-1 table already has, so migration 034 grants
+  `minime_engineer_ro` SELECT directly (mirroring how `026_time_semantics.sql` extended engineer
+  access to `metric_cache_state` in its own migration, not by editing an earlier one), and the
+  three reviewed allowlists in `test/m15.roles.test.ts` gained `person_dates` alongside it. (2)
+  **Next-occurrence math**: `repo.upcomingPersonDates(today, days, actor)` computes, per row, the
+  earlier of this-year's and next-year's `(month, day)` that is `>= today`, clamping day-of-month
+  to the real last day of that candidate month/year (`least(day, last day of month)`) so a
+  Feb-29 birthday surfaces on Feb 28 in a non-leap year — never skipped, never rolled into March.
+  `minime_state`'s `upcoming_dates` calls this with a fixed 14-day window (`[today, today+13]`,
+  today counted as day one). Visibility is gated on BOTH the date row's own tier and its person's
+  tier — a person promoted to tier 2 makes their tier-1 dates drop out at tier 1 too, accepted as
+  consistent with how every other person-attached fact already behaves once its person is hidden,
+  not special-cased. (3) **Tool**: `minime_set_person_date` targets by `person_name` (resolved
+  like `minime_get_context`) or `person_id`; both branches use the same direct "not found or above
+  current access tier" wording (the id-branch's existing style elsewhere in this codebase), a
+  deliberate departure from `minime_get_context`/`minime_upsert_person`'s softer person-or-org
+  name-branch wording — this tool only ever targets a person, so the extra "a match may exist at
+  tier 2, consider an unlock" hedge those two carry for their org fallback doesn't apply. (4)
+  **Morning brief**: `agents/skills/morning-brief.md`'s existing "Coming up this week" section
+  (added W1-8, sourced from `minime_agenda`) is renamed "Coming up" and now explicitly instructs
+  merging `minime_agenda`'s task deadlines (7-day window) with `minime_state`'s `upcoming_dates`
+  (14-day window, already in hand from the existing `minime_state` call — no new tool call) into
+  one day-grouped, kind-labeled list, rather than adding a second near-identical "Coming up"
+  heading for dates alone. `envelope.ts`'s `DATE_ONLY_KEYS` gains `"date"` (the field name
+  `upcoming_dates` entries use) so it renders as a plain `YYYY-MM-DD`, not reformatted through the
+  caller's timezone the way an `_at` timestamp is — the same pitfall `stateSnapshot`'s own "today"
+  anchoring comment warns about, which would be actively wrong for a birthday.
+- **Why:** A dates table (not columns on `people`) is the conservative, reversible choice the task
+  itself called for: it supports the real shape of the data (a custom date needs a label to be
+  distinguishable; a person has at most one birthday) without ever writing to the row extraction
+  and merge/retype machinery already treats as sensitive. Fixing the NULL-uniqueness gap up front
+  (rather than shipping the bare `unique(person_id, kind, label)` the spec's approach text
+  literally described) was necessary for the spec's own stated acceptance bar — idempotent
+  upsert — to actually hold; the spec's literal column/constraint description and its own
+  behavioral requirement were in tension, and the requirement won. Extending `minime_engineer_ro`
+  access despite the spec's contrary instruction was the same kind of resolution: keeping an
+  existing, deliberately-designed regression test green (and not weakening its blanket rule with a
+  bespoke, untested exception) is more conservative than leaving one new table silently outside an
+  established, tested invariant. Reusing the existing "Coming up" section instead of adding a
+  second one (explicit programmatic instruction for this task) avoids the morning brief reading as
+  two disconnected forward-looking lists when the owner experiences them as one question ("what's
+  coming up").
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W3 workstream
+  — the `person_dates` table, `minime_set_person_date` tool, and morning-brief harmonization were
+  adopted as planned; the NULL-uniqueness fix and the `minime_engineer_ro` grant are conservative,
+  invariant-preserving implementation details within that same scope, not product-shape changes.
+  The owner's end-of-program review before any publication remains the final gate.

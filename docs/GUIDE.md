@@ -90,6 +90,11 @@ canonical names with aliases (Bob = Robert = 鲍勃), a relation ("my physiother
 and a last-contact date. The nightly job also extracts people/org mentions from
 everything you write, so "who is Alice again?" works even if you never logged her.
 
+"Alice's birthday is March 3" / "our anniversary is June 12" → `minime_set_person_date`
+(birthday, anniversary, or a custom recurring date with your own label, e.g. "mom's
+memorial"). One of each per person — re-setting it corrects the date rather than adding
+a duplicate. Anything landing in the next 14 days shows up in your morning brief.
+
 ### 5. Decisions — the part that compounds
 
 When you're weighing something: "log a decision: should I …" → question, options,
@@ -140,7 +145,8 @@ work becomes part of your searchable history with zero effort.
   `query` / `person-brief` skills in `agents/skills/` route through hybrid search and
   always cite source rows with staleness ("newest entry is 142 days old").
 - **Morning brief / evening review**: skills that pull today's calendar, due tasks, open
-  commitments, decision reviews due, and the review queue (`minime_state`).
+  commitments, decision reviews due, upcoming birthdays/anniversaries, and the review queue
+  (`minime_state`).
 - **Time periods**: "what happened in June" / "summarize last week" → `minime_timeline` walks
   calendar, closed tasks, and decisions across the range, plus journal/interactions once
   unlocked. A locked range still says how many tier-2 entries exist there, never their content.

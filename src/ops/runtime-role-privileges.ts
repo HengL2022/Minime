@@ -25,6 +25,7 @@ export const RUNTIME_ROLE_TABLE_PRIVILEGES = {
   review_queue: ["SELECT", "INSERT", "UPDATE"],
   inbox_items: ["SELECT", "INSERT", "UPDATE"],
   orgs: ["SELECT", "INSERT", "UPDATE"],
+  person_dates: ["SELECT", "INSERT", "UPDATE"],
   events: ["SELECT", "INSERT"],
   chunks: ["SELECT", "INSERT", "UPDATE", "DELETE"],
   edges: ["SELECT", "INSERT", "UPDATE", "DELETE"],

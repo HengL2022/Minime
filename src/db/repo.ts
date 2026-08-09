@@ -977,6 +977,97 @@ export async function peopleByFirstName(first: string): Promise<{ id: string }[]
       and superseded_at is null` as any;
 }
 
+// ---------------------------------------------------------------- person_dates (W3-10)
+
+export type PersonDateKind = "birthday" | "anniversary" | "custom";
+
+// Insert-or-update by (person_id, kind, label) — label coalesced to '' so a repeat "set my
+// birthday" call updates the one row instead of minting a duplicate (034_person_dates.sql's own
+// comment on why a bare unique(person_id, kind, label) can't do this: Postgres never treats two
+// NULLs as equal). The ON CONFLICT target below must name the exact same coalesce(label, '')
+// expression as the migration's unique index for Postgres to infer it as the arbiter.
+// created_by/source/derived_from are stamped once at creation and left alone on an update, same
+// as upsertCalendarEvent's content-columns-only SET list.
+export async function upsertPersonDate(d: {
+  personId: string;
+  kind: PersonDateKind;
+  label?: string | null;
+  month: number;
+  day: number;
+  year?: number | null;
+  createdBy?: string;
+  source?: string;
+  derivedFrom?: string | null;
+}): Promise<{ id: string }> {
+  const [row] = await db()`
+    insert into person_dates (person_id, kind, label, month, day, year, created_by, source, derived_from)
+    values (${d.personId}, ${d.kind}, ${d.label ?? null}, ${d.month}, ${d.day}, ${d.year ?? null},
+            ${d.createdBy ?? "human"}, ${d.source ?? "manual"}, ${d.derivedFrom ?? null})
+    on conflict (person_id, kind, (coalesce(label, '')))
+    do update set month = excluded.month, day = excluded.day, year = excluded.year, updated_at = now()
+    returning id`;
+  if (!row) throw new Error("person_date_upsert_returned_no_row");
+  return { id: row.id as string };
+}
+
+// Next occurrence (within [today, today + days - 1], both inclusive -- `days` calendar dates
+// starting at today) of every visible person_date, one row per date. "Next occurrence" picks the
+// earliest of this-year's and next-year's calendar date >= today for that (month, day) --
+// handling the year wrap (e.g. a Dec 28 "today" with a Jan 5 birthday: this year's Jan 5 already
+// passed, so next year's is picked, which lands inside a 14-day window from Dec 28).
+//
+// Documented choice for Feb 29: a birthday stored as month=2/day=29 is clamped to the LAST real
+// day of February in a candidate year that isn't a leap year, i.e. it surfaces on Feb 28 that
+// year (never skipped, never rolled into March) -- `least(day, last day of that candidate
+// month/year)` below. Same clamp applies to any other day that doesn't exist in a given month
+// (e.g. day=31 in a 30-day month).
+//
+// Tier-gated on BOTH the date row's own tier and its person's tier: a date is only visible when
+// both are within the caller's allowed tier. A person promoted to tier 2 (e.g. by
+// minime_log_interaction) makes their tier-1 dates drop out of this list at tier 1 too --
+// consistent with how every other person-attached fact behaves once its person is hidden, and
+// accepted rather than special-cased (W3-10 spec).
+export async function upcomingPersonDates(
+  today: string,
+  days: number,
+  actor?: AccessActor,
+): Promise<any[]> {
+  const allowed = await allowedTier(actor);
+  const thisYear = Number(today.slice(0, 4));
+  const nextYear = thisYear + 1;
+  return db()`
+    with candidate as (
+      select
+        pd.id, pd.person_id, pd.kind, pd.label,
+        make_date(${thisYear}, pd.month,
+          least(pd.day, extract(day from
+            (make_date(${thisYear}, pd.month, 1) + interval '1 month' - interval '1 day')
+          )::int)
+        ) as this_year_date,
+        make_date(${nextYear}, pd.month,
+          least(pd.day, extract(day from
+            (make_date(${nextYear}, pd.month, 1) + interval '1 month' - interval '1 day')
+          )::int)
+        ) as next_year_date
+      from person_dates pd
+      where pd.tier >= 1 and pd.tier <= ${allowed}
+    ),
+    occurrence as (
+      select
+        id, person_id, kind, label,
+        case when this_year_date >= ${today}::date then this_year_date else next_year_date end
+          as next_occurrence
+      from candidate
+    )
+    select o.id, o.person_id, p.canonical_name, o.kind, o.label, o.next_occurrence as date
+    from occurrence o
+    join people p on p.id = o.person_id
+    where p.tier >= 1 and p.tier <= ${allowed}
+      and p.superseded_at is null
+      and o.next_occurrence between ${today}::date and ${today}::date + (${days}::int - 1)
+    order by o.next_occurrence, p.canonical_name` as any;
+}
+
 // ---------------------------------------------------------------- orgs
 
 export async function resolveOrg(name: string, actor?: AccessActor): Promise<any | null> {
@@ -3410,6 +3501,7 @@ export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Pro
     movedToday,
     filedTodayRaw,
     opsHealthResult,
+    upcomingDates,
   ] = await Promise.all([
     db()`select id, uid, starts_at, ends_at, title, location from calendar_events
         where starts_at >= ${t}::timestamptz - interval '1 hour'
@@ -3452,6 +3544,11 @@ export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Pro
           and tier >= 1 and tier <= ${allowed}
         order by updated_at`,
     opsHealth(),
+    // Birthdays/anniversaries/custom dates due in the next 14 days (today counted as day one, so
+    // the window is [today, today+13]) — minime_state is otherwise entirely due/today-anchored
+    // and cannot warn about a Friday birthday before Friday, same gap minime_agenda closes for
+    // tasks.
+    upcomingPersonDates(today, 14, actor),
   ]);
   const filedToday = await resolveFiledToday(filedTodayRaw as unknown as FiledTodayRow[], actor);
   return {
@@ -3464,6 +3561,7 @@ export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Pro
     review_queue_open: openReview[0]?.n ?? 0,
     metric_anomalies: anomalies,
     ops_health: opsHealthResult,
+    upcoming_dates: upcomingDates,
   };
 }
 

@@ -100,7 +100,7 @@
   },
   {
     "name": "minime_state",
-    "description": "Snapshot of now: today/tomorrow calendar, due tasks, tasks moved (closed) today, captures filed today (type/confidence/title/tier), open commitments, decision reviews due, review-queue count, metric anomalies (from rollups only), and ops_health (nightly maintenance status: dream_last_at, failed_steps, ops_failure_open — content-free, same for every actor).",
+    "description": "Snapshot of now: today/tomorrow calendar, due tasks, tasks moved (closed) today, captures filed today (type/confidence/title/tier), open commitments, decision reviews due, review-queue count, metric anomalies (from rollups only), upcoming_dates (birthdays/anniversaries/custom person dates recurring in the next 14 days, next occurrence only), and ops_health (nightly maintenance status: dream_last_at, failed_steps, ops_failure_open — content-free, same for every actor).",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -983,6 +983,70 @@
       },
       "required": [
         "action"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_set_person_date",
+    "description": "Set a person's birthday, anniversary, or a custom recurring date (month/day, optional year). Target by person_name (resolved the same way as minime_get_context) or person_id -- a name or id matching nothing readable at this session's tier is NOT_FOUND, worded identically either way. kind=custom requires a label, used to tell multiple custom dates for the same person apart (e.g. \"mom's memorial\" vs \"house purchase\"); birthday/anniversary must not carry one -- a person has only one of each. Re-setting the same person+kind (or person+custom+label) updates month/day/year in place instead of creating a duplicate. year is optional (e.g. birth year) and not required for the date to recur. A date stored as Feb 29 surfaces on Feb 28 in a non-leap year, never skipped. Every date is tier 1; if the person themselves is tier 2 (locked), the date stays invisible until an owner-approved unlock, same as any other attribute of a locked person.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "person_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "person_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "birthday",
+            "anniversary",
+            "custom"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "month": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12
+        },
+        "day": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 31
+        },
+        "year": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9999
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "kind",
+        "month",
+        "day"
       ],
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"

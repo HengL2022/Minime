@@ -717,6 +717,7 @@ const AUDITED_TOOL_NAMES = new Set([
   "minime_review_decision",
   "minime_review_queue",
   "minime_search",
+  "minime_set_person_date",
   "minime_state",
   "minime_timeline",
   "minime_unlock",
