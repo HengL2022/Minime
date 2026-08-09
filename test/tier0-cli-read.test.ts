@@ -226,6 +226,58 @@ describe("tier-0 CLI reads (W4-5)", () => {
     expect(isTtyOffset).toBeGreaterThan(-1);
     expect(consoleLogOffset).toBeGreaterThan(isTtyOffset); // gate precedes the only print
   });
+
+  // W4-5 review finding: commit 2a420ab fixed the `audit` case (src/cli.ts) to actually render
+  // month=/kind=/count=/match_used= for cli:tx:list/cli:health:list events, because docs/
+  // GUIDE.md promises "minime audit shows the count, never what matched" — but nothing spawned
+  // `bun run src/cli.ts audit` to prove the renderer does that. Tests (2)/(3)/(5) above only
+  // assert the *stored* payload via direct SQL against `events`, never this render branch, so a
+  // future edit to the case "audit" format-string logic could silently drop these fields again
+  // with zero signal. This closes that gap end to end, through the real CLI subprocess.
+  test("(8) CLI subprocess: `minime audit` prints month=/kind=/count=/match_used= for cli:tx:list and cli:health:list events, never the match text", async () => {
+    await testSql`
+      insert into transactions
+        (occurred_at, amount_cents, currency, merchant, category, account_label, external_ref, created_by, source, tier)
+      values ('2026-03-12', -700, 'USD', 'Fictional Audit Render Sentinel', 'Shopping', 'Checking', 'tier0-cli-tx-audit-render', 'test', 'test', 0)`;
+    await testSql`
+      insert into health_samples (kind, at, value, unit, created_by, source, tier)
+      values ('resting_heart_rate', '2026-03-12 08:00:00+08', 58, 'bpm', 'test', 'test', 0)`;
+
+    const tx = await spawnTier0Cli(["tx", "list", "--month", "2026-03"], {
+      MINIME_ALLOW_NON_TTY_TIER0: "1",
+    });
+    expect(tx.code).toBe(0);
+
+    const health = await spawnTier0Cli(
+      [
+        "health",
+        "list",
+        "--kind",
+        "resting_heart_rate",
+        "--from",
+        "2026-03-01",
+        "--to",
+        "2026-03-31",
+      ],
+      { MINIME_ALLOW_NON_TTY_TIER0: "1" },
+    );
+    expect(health.code).toBe(0);
+
+    // `audit` (case "audit", src/cli.ts) sits after the ollamaPreflight gate at cli.ts:563,
+    // unlike tx/health list — it needs a syntactically valid loopback OLLAMA_URL to clear that
+    // gate, overriding spawnTier0Cli's default "http://example.test:11434" (a non-loopback host
+    // ollamaPreflight rejects with non_loopback_host); audit itself never talks to Ollama.
+    const audit = await spawnTier0Cli(["audit", "--since", "1d"], {
+      OLLAMA_URL: "http://localhost:11434",
+    });
+    expect(audit.code).toBe(0);
+    expect(audit.stdout).toContain("cli:tx:list");
+    expect(audit.stdout).toContain("month=2026-03 count=1 match_used=false");
+    expect(audit.stdout).toContain("cli:health:list");
+    expect(audit.stdout).toContain("kind=resting_heart_rate count=1 match_used=false");
+    // The exact GUIDE.md promise this test guards: the count shows, the match/row text never does.
+    expect(audit.stdout).not.toContain("Sentinel");
+  });
 });
 
 async function spawnTier0Cli(
