@@ -1,5 +1,6 @@
 import { agendaTool } from "./agenda";
 import { captureTool } from "./capture";
+import { upsertCommitmentTool } from "./commitments";
 import { getContextTool } from "./context";
 import { correctTool } from "./correct";
 import { logDecisionTool, reviewDecisionTool } from "./decisions";
@@ -39,6 +40,7 @@ export const ALL_TOOLS: ToolDef[] = [
   setPersonDateTool,
   timelineTool,
   upsertGoalTool,
+  upsertCommitmentTool,
 ];
 
 export function toolByName(name: string): ToolDef {

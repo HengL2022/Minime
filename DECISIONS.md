@@ -3260,3 +3260,73 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   — task W3-12, implemented as specified (migration renumbered 031→035 only because 031-034 were
   already taken by other W3 tasks landing first on this branch, the same numbering-deviation
   precedent 030/031/034 each already documented; not a product or scope decision in itself).
+
+## 2026-08-09 — Commitments live: promise capture on minime_log_interaction, minime_upsert_commitment close path, least-privilege commitments UPDATE
+
+- **Context:** Commitments (`002_core.sql`) existed since v1 but were populated only by the demo
+  seed: `insertCommitment` had no update counterpart, no MCP tool ever called it in production,
+  and it silently dropped `tier`/`derived_from` even though its own `Std` parameter type carried
+  both — while three tools (`minime_state`, `minime_get_context`, `minime_search`'s underlying
+  index) and four skills (morning-brief, person-brief, evening-review, decision-brief) narrated an
+  "open commitments" section that could never contain anything but seed rows, and evening-review's
+  own capture step routed a promise through `minime_upsert_task` instead — the wrong table, with
+  no `to_whom`. A review flagged this as a fork: implement the write path for real, or strip the
+  dead read surface. The owner chose to implement (Option A).
+- **Decision:** `minime_log_interaction` (`src/mcp/tools/interactions.ts`) gains an optional
+  `promise: {what, due?}` param: when present, the same call that logs the interaction also opens
+  a commitment via `insertCommitment`, with `to_whom` read back as the resolved subject's own
+  canonical name (not the caller's raw, possibly-aliased input) via a new `personCanonicalName`/
+  `orgCanonicalName` pair in `repo.ts`, resolved lazily — only when a promise is actually given,
+  never on a plain log-interaction call. Both route through a new security-definer SQL function,
+  `entity_canonical_name(entity_kind, id)` (migration 036, mirroring `person_has_nonworking_relation`/
+  `touch_person_last_contact`'s existing style: a fixed `'person'|'org'` `CASE`, floored to `tier
+  in (1,2)`), rather than a plain `select canonical_name from people/orgs where id = ...`: an
+  ordinary select is bound by the CALLER's own `tier_read` RLS policy and returns zero rows for a
+  locked caller reading back a brand-new tier-2 subject it just minted in this same call — caught
+  by `test/entity-tier-provenance.test.ts`'s restricted-role subprocess harness, which runs
+  `minime_log_interaction` through an actual RLS-bound connection rather than the owner connection
+  every other test uses. The new function is recorded in `src/ops/runtime-role-privileges.ts`'s
+  `applicationFunctions` allow-list alongside its siblings. `derived_from` is the interaction's id
+  (I5), and `tier` is 2 — matching the interaction itself, since a promise made
+  during a logged, relationship-tier contact is the same class of content as the contact that
+  carries it (tier-2 gating therefore applies identically: hidden from a locked `minime_state`/
+  `minime_get_context`, visible after the owner approves an unlock, same as any other tier-2 task
+  or decision already behaves). The write receipt stays byte-identical to the pre-existing
+  `{interaction_id}` shape when no promise is given; `commitment_id` (and its source entry) is
+  added only when one is. New MCP tool `minime_upsert_commitment` (`src/mcp/tools/commitments.ts`,
+  `id?`, `what`, `to_whom`, `due?`, `status?` open|kept|renegotiated|broken) creates a
+  commitment directly (tier 1, for a promise with no interaction to hang it on) or, id-only,
+  closes/reschedules one — `what`/`to_whom` are fixed at creation and not part of the update path,
+  the same "resend only what changed" ergonomic `upsertTask`/`upsertGoal` already established, via
+  a new `repo.ts` `updateCommitment(id, {status?, due?})` (`due` three-state: omit keeps, explicit
+  null clears). Both write paths call `indexParent("commitment", ...)` — previously never called
+  for a commitment at all, so none was ever searchable. Migration 036 grants `minime_app` ordinary
+  table-wide UPDATE on commitments — the `tier_update` RLS policy already existed and was already
+  correctly bounded (`007_rls.sql`, tightened by `021`/`028`); only the missing table-level grant
+  was blocking it, recorded in `src/ops/runtime-role-privileges.ts`'s reviewable allow-list, same
+  shape as `035_goal_review_kind.sql`'s identical goals fix. Separately, `stateSnapshot`'s
+  `commitments_open` and `openItemsFor`'s open-items query (`repo.ts`) gain the `superseded_at is
+  null` guard every other PARENTS-table read already carries (`028_correction_supersede.sql`
+  added the column to commitments along with the other eleven, but these two reads were never
+  updated) — dead code before this task since no writer could supersede a commitment, live now
+  that commitments have a real write path. evening-review.md's promise step now routes through
+  `minime_log_interaction`'s `promise` param (or `minime_upsert_commitment` directly) instead of
+  the wrong-table `minime_upsert_task` workaround; person-brief.md and morning-brief.md gain a
+  one-line mention of capturing/closing a commitment at the points where each skill already talks
+  to `minime_log_interaction`/reports on open items; GUIDE.md documents both paths under "People
+  and interactions". Classifier promise-kind detection (auto-recognizing a promise from inbox
+  capture text) is explicitly out of scope — a follow-up backlog item, not this task.
+- **Why:** Commitments were schema-complete but functionally inert in exactly the shape W3-12
+  found goals in — closing that gap with the identical, already-proven pattern (coalesce id-only
+  update, PARENTS-map indexing at write, a narrowly-scoped least-privilege grant expansion
+  recorded in the reviewable allow-list) rather than inventing a new one, but additionally wiring
+  the one integration point that makes a commitment's origin cheap to capture in the first place:
+  a promise is usually made ⁠— and therefore best recorded — in the middle of logging the contact
+  it was made during, not as a separate follow-up call.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W3 workstream
+  — task W3-13, Option A per the owner's explicit choice between the review's two spec'd
+  resolutions (implement vs. remove the read surface), implemented as specified (migration
+  renumbered 032→036 only because 032-035 were already taken by other W3 tasks landing first on
+  this branch, the same numbering-deviation precedent 030/031/034/035 each already documented; not
+  a product or scope decision in itself).

@@ -47,7 +47,9 @@ A brief, in this order:
    do not truncate `upcoming_dates` down to the shorter task window. Close with one **No due
    date, still open** line for whatever `include_undated:true` returned — open tasks that have no
    due date and would otherwise never resurface in a day-anchored view.
-3. **Needs attention** — tasks due/overdue and open commitments coming due.
+3. **Needs attention** — tasks due/overdue and open commitments coming due (each names who
+   it's to — `to_whom`). If the owner reports one already done, close it with
+   `minime_upsert_commitment` (`status: kept`) before moving on.
 4. **Decision reviews** — decisions whose review date has arrived (and open
    decisions with no choice yet).
 5. **Projects to keep in mind** — 1–3 active threads from context/search,

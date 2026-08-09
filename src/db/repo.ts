@@ -2158,6 +2158,10 @@ export async function insertPrinciple(
   return row as any;
 }
 
+// W3-13: insertCommitment's first production caller (minime_log_interaction's promise param)
+// needs full I5 provenance, so tier/derived_from are now persisted rather than silently dropped
+// -- the demo seed's own calls (fixtures/seed.ts) pass neither and keep defaulting to tier 1 /
+// no derivation, unchanged from before.
 export async function insertCommitment(
   c: {
     what: string;
@@ -2167,11 +2171,69 @@ export async function insertCommitment(
   } & Std,
 ): Promise<{ id: string }> {
   const [row] = await db()`
-    insert into commitments (what, to_whom, due, status, created_by, source)
+    insert into commitments (what, to_whom, due, status, created_by, source, derived_from, tier)
     values (${c.what}, ${c.toWhom}, ${c.due ?? null}, ${c.status ?? "open"},
-            ${c.createdBy ?? "human"}, ${c.source ?? "manual"})
+            ${c.createdBy ?? "human"}, ${c.source ?? "manual"}, ${c.derivedFrom ?? null},
+            ${c.tier ?? 1})
     returning id`;
   return row as any;
+}
+
+export class CommitmentNotFoundError extends Error {
+  constructor() {
+    super("commitment not found");
+  }
+}
+
+export interface CommitmentRow {
+  id: string;
+  what: string;
+  to_whom: string;
+  due: string | Date | null;
+  status: string;
+  tier: number;
+}
+
+// id-only update: status/due are the only patchable fields -- what/to_whom are set once at
+// creation and immutable via this path, mirroring updateGoal's own horizon-is-immutable design
+// just below it. due is three-state like upsertTask's own due handling: omit the key to keep
+// the existing due date, pass an explicit null to clear it (a promise renegotiated open-ended).
+export async function updateCommitment(
+  id: string,
+  c: { status?: string | null; due?: string | null },
+): Promise<CommitmentRow> {
+  const dueProvided = c.due !== undefined;
+  const [row] = await db()`
+    update commitments set
+      status = coalesce(${c.status ?? null}, status),
+      due = case when ${dueProvided} then ${c.due ?? null}::date else due end
+    where id = ${id}
+    returning id, what, to_whom, due, status, tier`;
+  if (!row) throw new CommitmentNotFoundError();
+  return row as any;
+}
+
+// Internal write-path lookups only: the canonical name of a person/org this SAME call just
+// ensured (ensurePerson/ensureOrg in minime_log_interaction's promise capture) -- this is
+// bookkeeping for a write this call already has authority over, not an agent-facing read. Routed
+// through the security-definer entity_canonical_name() (036_commitment_update_grant.sql), NOT a
+// plain `select canonical_name from people/orgs where id = ...`: an ordinary select is subject to
+// the CALLER's own tier_read RLS policy and would return zero rows for a locked caller reading
+// back a brand-new tier-2 subject it just minted in this very call (proven by
+// test/entity-tier-provenance.test.ts's restricted-role subprocess harness) -- resolvePerson/
+// resolveOrg have the identical problem for the same reason, one level up in application code.
+export async function personCanonicalName(id: string): Promise<string> {
+  const [row] = await db()`select entity_canonical_name('person', ${id}::uuid) as name`;
+  const name = row?.name as string | null | undefined;
+  if (name === null || name === undefined) throw new Error("person_not_found_for_canonical_name");
+  return name;
+}
+
+export async function orgCanonicalName(id: string): Promise<string> {
+  const [row] = await db()`select entity_canonical_name('org', ${id}::uuid) as name`;
+  const name = row?.name as string | null | undefined;
+  if (name === null || name === undefined) throw new Error("org_not_found_for_canonical_name");
+  return name;
 }
 
 export async function insertGoal(
@@ -3595,7 +3657,7 @@ export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Pro
           and tier >= 1 and tier <= ${allowed}
         order by due`,
     db()`select id, what, to_whom, due from commitments
-        where status = 'open' and tier >= 1 and tier <= ${allowed}
+        where status = 'open' and superseded_at is null and tier >= 1 and tier <= ${allowed}
         order by due nulls last`,
     db()`select id, question, review_at, choice from decisions
         where reviewed_at is null
@@ -3947,7 +4009,7 @@ export async function openItemsFor(
   const allowed = await allowedTier(actor);
   const commitments = await db()`
     select id, what, to_whom, due, status from commitments
-    where status = 'open' and lower(to_whom) = lower(${personName})
+    where status = 'open' and superseded_at is null and lower(to_whom) = lower(${personName})
       and tier >= 1 and tier <= ${allowed}`;
   const tasks = await db()`
     select id, title, status, due from tasks

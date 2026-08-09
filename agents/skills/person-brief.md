@@ -33,4 +33,6 @@ honest about recency.
 
 - Never fabricate warmth ("you two discussed…") without a cited interaction row.
 - After the meeting happens, offer `minime_log_interaction` — that is how this brief gets
-  better next time.
+  better next time. Promised them something during it? Pass `promise: {what, due?}` on that
+  same call to open a commitment attributed to them. Already fulfilling an old one? Close it —
+  `minime_upsert_commitment` with `status: kept` (or `renegotiated`/`broken`).

@@ -53,8 +53,13 @@ Run as a short conversation, not a form — write as you go:
    lightly cleaned; ask for `mood`/`energy` 1–5 only if natural).
 2. **Any decision made, or stuck pending one** → `minime_log_decision`
    (capture options even for open decisions; default review_in_days 90).
-3. **Any promise made** → `minime_upsert_task` (due date if stated), and the
-   people involved get `minime_log_interaction`.
+3. **Any promise made** → `minime_log_interaction` for the person (or org) it was made to,
+   with `promise: {what, due?}` on that same call — one write logs the contact and opens a
+   commitment attributed to them (`to_whom` resolves to their canonical name automatically).
+   No interaction to hang it on (a promise to yourself, or naming no one in particular)? Use
+   `minime_upsert_commitment` directly instead. Already fulfilled one mentioned in this
+   conversation? Close it — `minime_upsert_commitment` with `status: kept` (or
+   `renegotiated`/`broken`).
 4. **Inbox triage** → if `review_queue_open > 0`, list via `minime_review_queue`
    (kind `inbox_unfiled`) — each item's classifier `type`/`confidence` guess is always visible;
    the capture text itself needs either a short owner-approved `minime_unlock` or the owner

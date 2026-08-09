@@ -585,7 +585,7 @@
   },
   {
     "name": "minime_log_interaction",
-    "description": "Log a meeting/call/message/email/note with a person OR an org (vendor/institution). Resolves aliases, creates the subject if new, updates last-contact for people. subject_type defaults to 'auto': if the name already matches an existing org it attaches to that org, otherwise it attaches to a person. Pass subject_type='org' to force a vendor/institution (avoids minting a phantom person). Tier 2: writable now, reads require unlock.",
+    "description": "Log a meeting/call/message/email/note with a person OR an org (vendor/institution). Resolves aliases, creates the subject if new, updates last-contact for people. subject_type defaults to 'auto': if the name already matches an existing org it attaches to that org, otherwise it attaches to a person. Pass subject_type='org' to force a vendor/institution (avoids minting a phantom person). Tier 2: writable now, reads require unlock. Optional promise={what, due?} records a commitment made during this interaction — to_whom is the resolved subject's own canonical name, tier 2 like the interaction itself, and derived_from links back to it. Close or reschedule it later with minime_upsert_commitment.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -618,6 +618,23 @@
             "person",
             "org"
           ]
+        },
+        "promise": {
+          "type": "object",
+          "properties": {
+            "what": {
+              "type": "string",
+              "minLength": 1
+            },
+            "due": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+            }
+          },
+          "required": [
+            "what"
+          ],
+          "additionalProperties": false
         },
         "time_zone": {
           "type": "string",
@@ -1157,6 +1174,60 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_upsert_commitment",
+    "description": "Create or update a commitment — a promise made to a person or org (status: open|kept|renegotiated|broken, default open). what and to_whom are required when creating; omit them on an id-only update to change only status/due — e.g. close one as kept without resending what was promised. Open commitments appear in minime_state's commitments_open and in the subject's dossier (minime_get_context) when to_whom matches their canonical name. minime_log_interaction's own promise param is the usual way a commitment starts (to_whom resolved automatically); use this tool directly for one with no interaction to hang it on.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "what": {
+          "type": "string",
+          "minLength": 1
+        },
+        "to_whom": {
+          "type": "string",
+          "minLength": 1
+        },
+        "due": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "open",
+            "kept",
+            "renegotiated",
+            "broken"
           ]
         },
         "time_zone": {

@@ -402,8 +402,13 @@ describe("W2-1 correction/supersede columns", () => {
   // "already full before 028" set above and the "still column-limited" set below — it moved sets
   // (see the dedicated test just after "minime_app gets column-limited UPDATE...").
   const FULL_UPDATE_SINCE_035 = new Set(["goals"]);
+  // 036_commitment_update_grant.sql (W3-13) widened commitments the identical way, so
+  // minime_upsert_commitment/minime_log_interaction's promise param can set status/due. Same
+  // treatment as goals above: excluded from both sets below, own dedicated test just after it.
+  const FULL_UPDATE_SINCE_036 = new Set(["commitments"]);
   const COLUMN_LIMITED_UPDATE = SUPERSEDE_TABLES.filter(
-    (t) => !ALREADY_FULL_UPDATE.has(t) && !FULL_UPDATE_SINCE_035.has(t),
+    (t) =>
+      !ALREADY_FULL_UPDATE.has(t) && !FULL_UPDATE_SINCE_035.has(t) && !FULL_UPDATE_SINCE_036.has(t),
   );
 
   test("superseded_by/superseded_at exist, correctly typed, on all twelve content tables", async () => {
@@ -502,6 +507,17 @@ describe("W2-1 correction/supersede columns", () => {
       select 1 as ok from information_schema.role_table_grants
       where grantee = 'minime_app' and table_name = 'goals' and privilege_type = 'UPDATE'`;
     expect(row, "goals should have full table-wide UPDATE since migration 035").toBeDefined();
+  });
+
+  // W3-13 least-privilege expansion, identical shape to goals' own migration-035 test above:
+  // commitments only gained full table-wide UPDATE JUST NOW (migration 036) — it had
+  // column-limited UPDATE only until then, proven by its absence from COLUMN_LIMITED_UPDATE's
+  // loop above.
+  test("minime_app has full table-wide UPDATE on commitments (migration 036, W3-13)", async () => {
+    const [row] = await sql`
+      select 1 as ok from information_schema.role_table_grants
+      where grantee = 'minime_app' and table_name = 'commitments' and privilege_type = 'UPDATE'`;
+    expect(row, "commitments should have full table-wide UPDATE since migration 036").toBeDefined();
   });
 });
 

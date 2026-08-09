@@ -95,6 +95,15 @@ everything you write, so "who is Alice again?" works even if you never logged he
 memorial"). One of each per person — re-setting it corrects the date rather than adding
 a duplicate. Anything landing in the next 14 days shows up in your morning brief.
 
+Made a promise while logging that? Pass `promise: {what, due?}` on the same
+`minime_log_interaction` call — one write logs the contact and opens a **commitment** tied to
+that person or org (`to_whom` resolved to their canonical name, tiered the same as the
+interaction). No interaction to hang it on — a promise to yourself, or naming no one in
+particular? `minime_upsert_commitment` (`what`, `to_whom`, `due?`) creates one directly. Close
+or reschedule any commitment the same id-only-friendly way as tasks and goals:
+`minime_upsert_commitment` with just `id` and `status` (open/kept/renegotiated/broken) or
+`due`. Open commitments show up in `minime_state` and in that person's dossier.
+
 ### 5. Decisions — the part that compounds
 
 When you're weighing something: "log a decision: should I …" → question, options,
