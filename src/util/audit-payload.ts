@@ -372,6 +372,7 @@ const DREAM_STEPS = [
   "2_entity_link",
   "2b_compile_notes",
   "2c_compile_decision_digests",
+  "2d_goal_backlog_index",
   "3_contradictions",
   "3b_phantom_persons",
   "3c_validate_edges",
@@ -379,6 +380,7 @@ const DREAM_STEPS = [
   "5b_recurrence",
   "5_rollups",
   "6_decision_reviews",
+  "6b_goal_reviews",
   "7_backup",
 ] as const;
 
@@ -415,6 +417,7 @@ function dreamSummary(input: Record<string, unknown>): AuditPayload {
     ),
     decision_digest_compiled_count: nestedCount(input["2c_compile_decision_digests"], "compiled"),
     decision_digest_skipped_count: nestedCount(input["2c_compile_decision_digests"], "skipped"),
+    goal_backlog_indexed_count: summaryCount(input["2d_goal_backlog_index"]),
     contradiction_count: summaryCount(input["3_contradictions"]),
     phantom_person_count: summaryCount(input["3b_phantom_persons"]),
     edge_checked_count: nestedCount(input["3c_validate_edges"], "checked"),
@@ -426,6 +429,7 @@ function dreamSummary(input: Record<string, unknown>): AuditPayload {
     recurrence_materialized_count: summaryCount(input["5b_recurrence"]),
     metric_rollup_count: summaryCount(input["5_rollups"]),
     decision_review_count: summaryCount(input["6_decision_reviews"]),
+    goal_review_count: summaryCount(input["6b_goal_reviews"]),
     backup_ran: record(input["7_backup"]).ran === true,
   });
 }
@@ -746,6 +750,7 @@ const AUDITED_TOOL_NAMES = new Set([
   "minime_state",
   "minime_timeline",
   "minime_unlock",
+  "minime_upsert_goal",
   "minime_upsert_person",
   "minime_upsert_task",
   "unknown",

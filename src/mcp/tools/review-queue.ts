@@ -22,6 +22,7 @@ const KINDS = [
   "phantom_person",
   "extract_suspect",
   "ops_failure",
+  "goal_review",
 ] as const;
 const HIDDEN = "[above current tier]";
 // Distinct from HIDDEN: the tier check passed but the archived bytes could not be proven
@@ -122,6 +123,16 @@ async function maskReviewPayload(item: any, actor: string): Promise<any> {
     };
   }
 
+  // goal_review payloads carry goal_id only (dream.ts enqueueGoalReviews) — the statement is
+  // never stored in the queue row itself, always resolved fresh here at the caller's own tier,
+  // mirroring decision_review's question resolution just above.
+  if (item.kind === "goal_review" && typeof item.payload?.goal_id === "string") {
+    payload = {
+      ...payload,
+      statement: (await visibleTitle("goal", item.payload.goal_id, actor)) ?? HIDDEN,
+    };
+  }
+
   // Phantom-person payloads store canonical_name captured at dream time (system context) —
   // re-resolve through visibleTitle so a tier-2 person stays masked (a retracted-but-visible
   // person reads RETRACTED instead).
@@ -213,7 +224,7 @@ async function maskStaleLabel(item: any, actor: string): Promise<any> {
 export const reviewQueueTool: ToolDef = {
   name: "minime_review_queue",
   description:
-    "List open review-queue items (contradiction | stale | duplicate | decision_review | inbox_unfiled | phantom_person | extract_suspect | ops_failure), or resolve one as 'resolved' | 'dismissed'. inbox_unfiled/duplicate items carry the classifier's type/confidence guess (always visible) under payload.capture; its reason and a ~500-char capture text excerpt require an approved tier-2 unlock (minime_unlock) and read '[above current tier]' until then. ops_failure carries only fixed dream-step identifiers and a timestamp (payload.failed_steps, payload.since) — always visible, no unlock needed; run `bun run src/cli.ts doctor` locally for the full maintenance checklist. The queue is flag-only: resolving never edits the flagged rows themselves.",
+    "List open review-queue items (contradiction | stale | duplicate | decision_review | inbox_unfiled | phantom_person | extract_suspect | ops_failure | goal_review), or resolve one as 'resolved' | 'dismissed'. inbox_unfiled/duplicate items carry the classifier's type/confidence guess (always visible) under payload.capture; its reason and a ~500-char capture text excerpt require an approved tier-2 unlock (minime_unlock) and read '[above current tier]' until then. ops_failure carries only fixed dream-step identifiers and a timestamp (payload.failed_steps, payload.since) — always visible, no unlock needed; run `bun run src/cli.ts doctor` locally for the full maintenance checklist. goal_review flags an active goal untouched (and with no linked task touched) for 90+ days; update it with minime_upsert_goal. The queue is flag-only: resolving never edits the flagged rows themselves.",
   schema: {
     action: z.enum(["list", "resolve"]).default("list"),
     kind: z.enum(KINDS).optional(),

@@ -6,6 +6,8 @@ import {
   chunkPairsSharingPerson,
   clearDreamMetricRefreshWindow,
   decisionsNeedingReview,
+  goalsNeedingReview,
+  goalsWithoutChunks,
   insertReviewItem,
   listMetricDefs,
   logEvent,
@@ -21,7 +23,7 @@ import {
   upsertMetricValue,
 } from "../db/repo";
 import { appendOpsLine } from "../ops/ops-log";
-import { drainEmbedBacklog } from "../search/index-parent";
+import { drainEmbedBacklog, indexParent } from "../search/index-parent";
 import { auditPayload } from "../util/audit-payload";
 import { configuredTimeZone, todayStr } from "../util/clock";
 import { config } from "../util/config";
@@ -46,6 +48,29 @@ export async function entityLinkPass(limit = 500): Promise<number> {
     linked += stats?.edges ?? 0;
   }
   return linked;
+}
+
+// -- step 2d: goal search backfill -------------------------------------------
+//
+// insertGoal never indexes itself (unlike upsertTask/insertDecision, indexing is the caller's
+// job) -- this drains whatever a caller missed, chiefly onboarding-era goals written before
+// W3-12 and demo/fixture seed data, so they eventually become searchable. Bounded and
+// idempotent (goalsWithoutChunks, repo.ts): a goal drops off the list as soon as it's indexed.
+export async function goalBacklogIndex(limit = 200): Promise<number> {
+  let indexed = 0;
+  for (const goal of await goalsWithoutChunks(limit)) {
+    const ok = await indexParent(
+      "goal",
+      goal.id,
+      [goal.statement, goal.why ?? ""].filter(Boolean).join("\n\n"),
+      goal.statement,
+      goal.tier === 2 ? 2 : 1,
+    )
+      .then(() => true)
+      .catch(() => false);
+    if (ok) indexed++;
+  }
+  return indexed;
 }
 
 // -- step 3: contradiction scan --------------------------------------------
@@ -228,6 +253,21 @@ export async function enqueueDecisionReviews(asOfDate: string): Promise<number> 
   return queued;
 }
 
+// -- step 6b: goal reviews ----------------------------------------------------
+//
+// goal_review payload carries goal_id only (never the statement — review-queue.ts resolves it
+// fresh at read time via visibleTitle, the same tier-aware path decision_review's question
+// uses), so a locked-tier goal's wording is never written unmasked into review_queue.
+export async function enqueueGoalReviews(): Promise<number> {
+  let queued = 0;
+  for (const goal of await goalsNeedingReview()) {
+    if (await reviewItemExists("goal_review", "goal_id", goal.id)) continue;
+    await insertReviewItem("goal_review", { goal_id: goal.id });
+    queued++;
+  }
+  return queued;
+}
+
 // -- step 7: backup ----------------------------------------------------------
 
 // re-export for callers that import backup from this module. `backup` itself is
@@ -279,6 +319,7 @@ export async function dream(): Promise<Record<string, unknown>> {
     const { candidates, compiled, skipped } = await compileDecisionDigests();
     return { candidates, compiled, skipped };
   });
+  await step("2d_goal_backlog_index", () => goalBacklogIndex());
   await step("3_contradictions", () => contradictionScan());
   await step("3b_phantom_persons", () => phantomPersonScan());
   await step("3c_validate_edges", async () => {
@@ -289,6 +330,7 @@ export async function dream(): Promise<Record<string, unknown>> {
   await step("5b_recurrence", () => recurrenceBackfill());
   await step("5_rollups", () => rollupMetrics());
   await step("6_decision_reviews", () => enqueueDecisionReviews(todayStr(config.tz)));
+  await step("6b_goal_reviews", () => enqueueGoalReviews());
   await step("7_backup", () => backup());
 
   // step 8: the summary event

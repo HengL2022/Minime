@@ -37,6 +37,8 @@ describe("onboarding interview", () => {
       "", // life goals done
       "Publish the seagrass paper", // year goal 1
       "", // year goals done
+      "Ship the reef-survey grant proposal", // quarter goal 1
+      "", // quarter goals done
       "Sleep before deciding", // principle 1
       "", // principles done
       "Diego Tan", // person 1
@@ -52,7 +54,7 @@ describe("onboarding interview", () => {
     expect(counts).toEqual({
       profile: 1,
       values: 2,
-      goals: 2,
+      goals: 3,
       principles: 1,
       people: 1,
       tasks: 1,
@@ -69,7 +71,14 @@ describe("onboarding interview", () => {
     });
 
     const goals = await sql`select horizon, statement from goals order by horizon`;
-    expect(goals.map((g: any) => g.horizon).sort()).toEqual(["life", "year"]);
+    expect(goals.map((g: any) => g.horizon).sort()).toEqual(["life", "quarter", "year"]);
+
+    // W3-12: onboarding-created goals are indexed immediately, same as the profile page/task/
+    // journal entry below — previously goals were the one onboarding section never indexed.
+    const [goalChunks] = await sql`
+      select count(*)::int as n from chunks
+      where parent_type = 'goal' and text like '%coral reefs recover%'`;
+    expect(goalChunks!.n).toBeGreaterThan(0);
 
     const [person] = await sql`select canonical_name, relation, context from people
                                where canonical_name = 'Diego Tan'`;
@@ -95,7 +104,7 @@ describe("onboarding interview", () => {
     const [ev] = await sql`select payload from events where verb = 'onboard:complete'`;
     expect(ev!.payload.values).toBe(2);
 
-    expect(out()).toContain("Done — 9 entries seeded");
+    expect(out()).toContain("Done — 10 entries seeded");
   });
 
   test("re-run warns and adds; all-skip run writes nothing new", async () => {

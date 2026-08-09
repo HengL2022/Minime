@@ -14,9 +14,9 @@ make onboard
 ```
 
 Five minutes of questions that seed the foundation agents reason against: who you are
-(a profile page), your **values** in priority order, **goals** (life + this year),
-**principles** you live by, the **key people** around you, current **projects**, and an
-opening journal snapshot. Every question is skippable with Enter; re-running adds
+(a profile page), your **values** in priority order, **goals** (life, this year, and this
+quarter), **principles** you live by, the **key people** around you, current **projects**, and
+an opening journal snapshot. Every question is skippable with Enter; re-running adds
 entries rather than overwriting; everything is editable later. The point is that your
 very first "give me a morning brief" already knows what matters to you.
 
@@ -139,14 +139,24 @@ partial recurrence semantics.
 you asked, what happened, files touched) into the inbox as a tier-2 page. Your agent
 work becomes part of your searchable history with zero effort.
 
+### 8. Goals — life, year, quarter
+
+"Add a goal: ship the payments milestone this quarter" → `minime_upsert_goal` (horizon:
+life/year/quarter, status: active/achieved/dropped). Link a task to one with `goal_id`
+(`minime_upsert_task`) so `minime_state` can show each goal's open-task count and tell you
+which arcs have actually moved lately. Updating a goal is id-only friendly — "mark it
+achieved" changes just the status, never touches the statement. A goal that's gone 90+ days
+with no edit and no linked task activity surfaces as a `goal_review` item in the review
+queue: still true, or time to update it?
+
 ## Getting things out
 
 - **Ask anything**: "what do I know about X?", "when did I last talk to Alice?" — the
   `query` / `person-brief` skills in `agents/skills/` route through hybrid search and
   always cite source rows with staleness ("newest entry is 142 days old").
 - **Morning brief / evening review**: skills that pull today's calendar, due tasks, open
-  commitments, decision reviews due, upcoming birthdays/anniversaries, and the review queue
-  (`minime_state`).
+  commitments, decision reviews due, active goals with open-task counts, upcoming
+  birthdays/anniversaries, and the review queue (`minime_state`).
 - **Time periods**: "what happened in June" / "summarize last week" → `minime_timeline` walks
   calendar, closed tasks, and decisions across the range, plus journal/interactions once
   unlocked. A locked range still says how many tier-2 entries exist there, never their content.

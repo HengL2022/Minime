@@ -4,7 +4,7 @@ export type TablePrivilege = "SELECT" | "INSERT" | "UPDATE" | "DELETE";
 export const RUNTIME_ROLE_TABLE_PRIVILEGES = {
   schema_migrations: ["SELECT"],
   values_items: ["SELECT", "INSERT"],
-  goals: ["SELECT", "INSERT"],
+  goals: ["SELECT", "INSERT", "UPDATE"],
   principles: ["SELECT", "INSERT"],
   commitments: ["SELECT", "INSERT"],
   journal_entries: ["SELECT", "INSERT"],

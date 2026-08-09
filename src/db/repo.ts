@@ -2190,6 +2190,52 @@ export async function insertGoal(
   return row as any;
 }
 
+export class GoalNotFoundError extends Error {
+  constructor() {
+    super("goal not found");
+  }
+}
+
+export interface GoalRow {
+  id: string;
+  horizon: string;
+  statement: string;
+  why: string | null;
+  status: string;
+  parent_id: string | null;
+  tier: number;
+}
+
+// id-only update: every field is optional and, omitted, keeps its current value (plain
+// coalesce) -- the same "id-only means keep everything else" ergonomic upsertTask established,
+// so marking a goal achieved never requires resending its statement (do NOT replicate
+// upsertTask's own title-handling wart of indexing raw params instead of the stored row --
+// goals.ts reads the RETURNING values below back into indexParent, never params). horizon is
+// deliberately absent here: it is set once at creation and immutable via this path. parent_id is
+// the one three-state field (undefined keeps, explicit null clears), matching upsertTask's own
+// due/goal_id handling.
+export async function updateGoal(
+  id: string,
+  g: {
+    statement?: string | null;
+    why?: string | null;
+    status?: string | null;
+    parentId?: string | null;
+  },
+): Promise<GoalRow> {
+  const parentIdProvided = g.parentId !== undefined;
+  const [row] = await db()`
+    update goals set
+      statement = coalesce(${g.statement ?? null}, statement),
+      why = coalesce(${g.why ?? null}, why),
+      status = coalesce(${g.status ?? null}, status),
+      parent_id = case when ${parentIdProvided} then ${g.parentId ?? null}::uuid else parent_id end
+    where id = ${id}
+    returning id, horizon, statement, why, status, parent_id, tier`;
+  if (!row) throw new GoalNotFoundError();
+  return row as any;
+}
+
 // Onboarding re-run hint: a non-empty values table means the interview already ran once.
 export async function valuesCount(): Promise<number> {
   const [r] = await db()`select count(*)::int as n from values_items`;
@@ -3476,6 +3522,41 @@ export async function opsHealth(): Promise<OpsHealth> {
   };
 }
 
+export interface GoalOverviewRow {
+  id: string;
+  horizon: string;
+  statement: string;
+  open_task_count: number;
+  last_task_activity_at: Date | null;
+}
+
+// Active goals for minime_state's goals_active section (W3-12): horizon/statement plus an
+// open-task count (inbox/active/waiting only) and the most recent activity across ANY linked
+// task, open or closed -- the same "touched" signal goalsNeedingReview uses to judge staleness,
+// so what the owner sees here and what dream flags for review agree. Tasks above the caller's
+// tier contribute to neither figure (a hidden task's mere existence is not this endpoint's to
+// leak). superseded_at excludes a corrected-away goal (028_correction_supersede.sql);
+// dropped/achieved goals are deliberately absent -- this is a "what's still live" view, not a
+// full listing (minime_search covers ad hoc lookup of any goal by id/content).
+export async function goalsOverview(actor?: AccessActor): Promise<GoalOverviewRow[]> {
+  const allowed = await allowedTier(actor);
+  return db()`
+    select g.id, g.horizon, g.statement,
+           count(t.id) filter (
+             where t.status in ('inbox','active','waiting')
+               and t.tier >= 1 and t.tier <= ${allowed}
+           )::int as open_task_count,
+           max(t.updated_at) filter (where t.tier >= 1 and t.tier <= ${allowed})
+             as last_task_activity_at
+    from goals g
+    left join tasks t on t.goal_id = g.id
+    where g.status = 'active' and g.superseded_at is null
+      and g.tier >= 1 and g.tier <= ${allowed}
+    group by g.id, g.horizon, g.statement
+    order by (case g.horizon when 'life' then 0 when 'year' then 1 when 'quarter' then 2 else 3 end),
+             g.statement` as any;
+}
+
 export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Promise<any> {
   const t = now();
   const ownerTimeZone = configuredTimeZone(config.tz);
@@ -3502,6 +3583,7 @@ export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Pro
     filedTodayRaw,
     opsHealthResult,
     upcomingDates,
+    goalsActive,
   ] = await Promise.all([
     db()`select id, uid, starts_at, ends_at, title, location from calendar_events
         where starts_at >= ${t}::timestamptz - interval '1 hour'
@@ -3549,6 +3631,7 @@ export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Pro
     // and cannot warn about a Friday birthday before Friday, same gap minime_agenda closes for
     // tasks.
     upcomingPersonDates(today, 14, actor),
+    goalsOverview(actor),
   ]);
   const filedToday = await resolveFiledToday(filedTodayRaw as unknown as FiledTodayRow[], actor);
   return {
@@ -3562,6 +3645,7 @@ export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Pro
     metric_anomalies: anomalies,
     ops_health: opsHealthResult,
     upcoming_dates: upcomingDates,
+    goals_active: goalsActive,
   };
 }
 
@@ -4292,6 +4376,49 @@ export async function decisionsNeedingReview(asOfDate: string): Promise<any[]> {
   return db()`select id, question, review_at from decisions
              where tier >= 1 and review_at is not null
                and review_at <= ${asOfDate}::date and reviewed_at is null`;
+}
+
+// Stale-goal re-check window (dream step 6b, W3-12): an active goal is due for a "still true?"
+// review once BOTH it and every task linked to it have gone untouched for this long -- an
+// untouched-only bound would flag a goal the owner is actively working through via its tasks
+// even though the goal ROW itself hasn't been edited recently. Mirrors staleItems' own
+// untouched-AND-referenced shape (repo.ts above), just with the second signal inverted (no
+// recent activity, rather than "has" recent activity).
+const GOAL_REVIEW_STALE_DAYS = 90;
+
+export async function goalsNeedingReview(): Promise<{ id: string; statement: string }[]> {
+  const t = now();
+  return db()`
+    select g.id, g.statement
+    from goals g
+    where g.status = 'active' and g.superseded_at is null and g.tier >= 1
+      and g.updated_at < ${t}::timestamptz - make_interval(days => ${GOAL_REVIEW_STALE_DAYS})
+      and not exists (
+        select 1 from tasks tk
+        where tk.goal_id = g.id
+          and tk.updated_at >= ${t}::timestamptz - make_interval(days => ${GOAL_REVIEW_STALE_DAYS})
+      )
+    order by g.updated_at`;
+}
+
+// Search backfill (dream step 2d, W3-12): insertGoal never indexes itself -- every caller
+// (minime_upsert_goal, onboard.ts) owns calling indexParent, the same contract upsertTask's
+// callers already follow. This catches whatever a caller missed anyway (chiefly onboarding-era
+// rows written before this task, and demo/fixture seed data), so a goal eventually becomes
+// searchable even when its own write path forgot. Bounded and idempotent via the
+// not-exists-chunks check -- a goal drops out of this list as soon as indexParent runs for it.
+export async function goalsWithoutChunks(
+  limit = 200,
+): Promise<{ id: string; statement: string; why: string | null; tier: number }[]> {
+  return db()`
+    select g.id, g.statement, g.why, g.tier
+    from goals g
+    where g.superseded_at is null and g.tier >= 1
+      and not exists (
+        select 1 from chunks c where c.parent_type = 'goal' and c.parent_id = g.id
+      )
+    order by g.created_at
+    limit ${limit}` as any;
 }
 
 const COMPILED_NOTE_SOURCES_DELIMITER = "\n## Sources\n";

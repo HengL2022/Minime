@@ -3215,3 +3215,48 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   in its own paragraph above rather than folded silently into that blanket approval, as the W3-8
   ops-log entry did for the same reason, because this is a new class of surface (the first the
   system pushes to the owner unprompted) even though its content is minimal by construction.
+
+## 2026-08-09 — Goals live: minime_upsert_goal, goal_review dream kind, least-privilege goals UPDATE
+
+- **Context:** Goals (`002_core.sql`) have existed since v1 but were product-dead: `insertGoal`
+  had no update counterpart at all, no MCP tool ever called it (only `onboard.ts` and demo/test
+  fixtures did), `insertGoal` never called `indexParent` so no goal was ever searchable, and the
+  `quarter` horizon — valid per the table's own check constraint and already used in seed data —
+  was unreachable through any interface. `minime_app`'s grants (`021_runtime_app_role.sql`) never
+  included UPDATE on goals at all; `028_correction_supersede.sql` later opened exactly the two
+  supersede columns, still not enough to change a goal's own statement/why/status/parent_id.
+- **Decision:** New MCP tool `minime_upsert_goal` (`src/mcp/tools/goals.ts`): `id?`, `horizon`
+  (life|year|quarter, required on create, fixed thereafter — not part of the update path at all),
+  `statement` (required on create, optional on an id-only update — coalesce semantics, the same
+  "resend only what changed" ergonomic `upsertTask` established, reindexing the STORED row rather
+  than raw params so an id-only status change never blanks the search text), `why?`, `status?`
+  (active|achieved|dropped), `parent_id?` (three-state: omit keeps, explicit null clears,
+  matching `upsertTask`'s own due/goal_id handling). `repo.ts` gains `updateGoal` and
+  `goalsOverview` (tier-bounded active-goal list: horizon, statement, an open-task count scoped
+  to inbox/active/waiting, and the most recent activity across any linked task regardless of
+  status), which now feeds a new `goals_active` section in `minime_state`. Migration 035
+  recreates `review_queue_kind_check` as the strict superset adding `'goal_review'`, and grants
+  `minime_app` ordinary table-wide UPDATE on goals — the `tier_update` RLS policy already existed
+  and was already correctly bounded (`007_rls.sql`, tightened by `021`/`028`); only the missing
+  table-level grant was blocking it. Recorded in `src/ops/runtime-role-privileges.ts`'s reviewable
+  allow-list. `dream.ts` gains two steps: `2d_goal_backlog_index` (idempotent `indexParent`
+  backfill for any goal with no chunks yet — chiefly onboarding-era and seed/fixture rows written
+  before this task) and `6b_goal_reviews` (flags an active goal untouched, with no linked task
+  touched either, for 90+ days — deduped like every other kind; the queue payload carries
+  `goal_id` only, never the statement, which `minime_review_queue` resolves fresh at the caller's
+  own tier via the same `visibleTitle`/`parentMeta` path `decision_review` already uses).
+  `onboard.ts`'s `sectionGoals` now also asks a third "this quarter's goal" loop and calls
+  `indexParent` for every goal it creates — previously the one onboarding section that never
+  indexed its own writes.
+- **Why:** Goals were schema-complete but functionally inert — nothing could edit one, search
+  for one, or be reminded that one had gone stale, and a third of the horizon vocabulary the
+  schema itself defines was unreachable by any caller. This closes exactly that gap using the
+  patterns W2/W3 already established for tasks/decisions/commitments (coalesce id-only update,
+  PARENTS-map indexing at write plus a bounded dream-step backfill for what predates it, flag-only
+  dream-step review with fresh tier-scoped resolution, and a narrowly-scoped least-privilege grant
+  expansion recorded in the reviewable allow-list) rather than inventing new ones.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W3 workstream
+  — task W3-12, implemented as specified (migration renumbered 031→035 only because 031-034 were
+  already taken by other W3 tasks landing first on this branch, the same numbering-deviation
+  precedent 030/031/034 each already documented; not a product or scope decision in itself).

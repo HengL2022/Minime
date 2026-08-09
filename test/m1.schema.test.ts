@@ -397,7 +397,14 @@ describe("W2-1 correction/supersede columns", () => {
     "orgs",
     "decision_branches",
   ]);
-  const COLUMN_LIMITED_UPDATE = SUPERSEDE_TABLES.filter((t) => !ALREADY_FULL_UPDATE.has(t));
+  // 035_goal_review_kind.sql (W3-12) later widened goals from column-limited to full table-wide
+  // UPDATE so minime_upsert_goal can set statement/why/status/parent_id. Excluded from both the
+  // "already full before 028" set above and the "still column-limited" set below — it moved sets
+  // (see the dedicated test just after "minime_app gets column-limited UPDATE...").
+  const FULL_UPDATE_SINCE_035 = new Set(["goals"]);
+  const COLUMN_LIMITED_UPDATE = SUPERSEDE_TABLES.filter(
+    (t) => !ALREADY_FULL_UPDATE.has(t) && !FULL_UPDATE_SINCE_035.has(t),
+  );
 
   test("superseded_by/superseded_at exist, correctly typed, on all twelve content tables", async () => {
     for (const t of SUPERSEDE_TABLES) {
@@ -484,6 +491,17 @@ describe("W2-1 correction/supersede columns", () => {
         where grantee = 'minime_app' and table_name = ${t} and privilege_type = 'UPDATE'`;
       expect(row, `table ${t} should retain full UPDATE`).toBeDefined();
     }
+  });
+
+  // W3-12 least-privilege expansion (risk note: "App-role goals UPDATE is a least-privilege
+  // expansion recorded in runtime-role-privileges.ts"). Unlike the six tables above, goals only
+  // gained this JUST NOW (migration 035) — it had column-limited UPDATE only until then, proven
+  // by its absence from COLUMN_LIMITED_UPDATE's loop above.
+  test("minime_app has full table-wide UPDATE on goals (migration 035, W3-12)", async () => {
+    const [row] = await sql`
+      select 1 as ok from information_schema.role_table_grants
+      where grantee = 'minime_app' and table_name = 'goals' and privilege_type = 'UPDATE'`;
+    expect(row, "goals should have full table-wide UPDATE since migration 035").toBeDefined();
   });
 });
 

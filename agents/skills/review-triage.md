@@ -65,6 +65,12 @@ auto-resolve).
    - **decision_review** — hand off to the flow in `decision-brief.md`'s sibling:
      fetch the decision, ask "what actually happened?", write it with
      `minime_review_decision` (capture a `lesson` if one is stated → it becomes a principle).
+   - **goal_review** — the goal has gone 90+ days with no edit and no linked task touched
+     either (payload: `goal_id`; the statement is resolved fresh, masked like any other title
+     if locked). Read it back to the owner and ask "still true, or does this need updating?" —
+     `minime_upsert_goal` handles a new statement/why, a status change (achieved/dropped), or
+     nothing at all if it's just still true (touching the goal resets its own review clock).
+     Then resolve the item.
    - **phantom_person** — the nightly watchdog flagged a `people` row that looks like it should
      really be an org (payload: `person_id`, a `canonical_name` — masked like any other title if
      locked — and a fixed `suggestion`: "retype to org, or dismiss if this really is a person").
@@ -84,8 +90,9 @@ auto-resolve).
 ## Answer rules
 
 - Triage order: ops_failure (the pipeline producing every other flag may itself be broken) →
-  unfiled (quick wins) → decision reviews (time-sensitive) → contradictions → stale. Offer to
-  stop after 5 minutes; report what remains.
+  unfiled (quick wins) → decision reviews (time-sensitive) → contradictions → stale →
+  goal reviews (lowest urgency — nothing broke, a goal just went quiet). Offer to stop after 5
+  minutes; report what remains.
 - Resolving a flag (`minime_review_queue` action `resolve`) never by itself touches the flagged
   rows. Changing content is always a separate, explicit, owner-approved write —
   `minime_correct`, a type's own write tool, or an owner-run repair script. The `events` audit

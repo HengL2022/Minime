@@ -3,6 +3,7 @@ import { captureTool } from "./capture";
 import { getContextTool } from "./context";
 import { correctTool } from "./correct";
 import { logDecisionTool, reviewDecisionTool } from "./decisions";
+import { upsertGoalTool } from "./goals";
 import { logInteractionTool } from "./interactions";
 import { journalTool } from "./journal";
 import { listMetricsTool, queryMetricTool } from "./metric";
@@ -37,6 +38,7 @@ export const ALL_TOOLS: ToolDef[] = [
   upsertPersonTool,
   setPersonDateTool,
   timelineTool,
+  upsertGoalTool,
 ];
 
 export function toolByName(name: string): ToolDef {

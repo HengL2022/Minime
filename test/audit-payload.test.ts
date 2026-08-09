@@ -233,6 +233,7 @@ describe("audit payload boundary", () => {
         skipped: 1,
         results: [{ path: `/private/${SENTINEL}.md` }],
       },
+      "2d_goal_backlog_index": 4,
       "3_contradictions": 1,
       "3b_phantom_persons": 0,
       "3c_validate_edges": {
@@ -247,6 +248,7 @@ describe("audit payload boundary", () => {
       "5b_recurrence": 2,
       "5_rollups": 5,
       "6_decision_reviews": 1,
+      "6b_goal_reviews": 2,
       "7_backup": { ran: false, detail: SENTINEL },
     });
 
@@ -266,6 +268,7 @@ describe("audit payload boundary", () => {
       decision_digest_candidate_count: 2,
       decision_digest_compiled_count: 1,
       decision_digest_skipped_count: 1,
+      goal_backlog_indexed_count: 4,
       contradiction_count: 1,
       phantom_person_count: 0,
       edge_checked_count: 4,
@@ -277,6 +280,7 @@ describe("audit payload boundary", () => {
       recurrence_materialized_count: 2,
       metric_rollup_count: 5,
       decision_review_count: 1,
+      goal_review_count: 2,
       backup_ran: false,
     });
     expect(JSON.stringify(payload)).not.toContain(SENTINEL);
