@@ -48,20 +48,28 @@ async function indexAsLockedApp(parentId: string, text: string, tier: 1 | 2): Pr
 async function logInteractionAsLockedApp(
   name: string,
   subjectType: "auto" | "person" | "org",
+  promise?: { what: string; due?: string },
 ): Promise<{
-  data: { interaction_id: string };
+  data: { interaction_id: string; commitment_id?: string };
   sources: Array<{ type: string; id: string }>;
 }> {
+  // Building the whole params object through one JSON.stringify (rather than splicing each
+  // field into the template by hand) is what lets an optional `promise` ride along for W3-13's
+  // locked-role regression test below without a second copy of this harness.
+  const params = {
+    person_name: name,
+    kind: "meeting",
+    summary: "Fictional restricted-role interaction fixture.",
+    subject_type: subjectType,
+    ...(promise ? { promise } : {}),
+  };
   const source = `
     import { closeDb } from "./src/db/client.ts";
     import { logInteractionTool } from "./src/mcp/tools/interactions.ts";
     import { executeTool } from "./src/mcp/tools/registry.ts";
-    const result = await executeTool(logInteractionTool, {
-      person_name: ${JSON.stringify(name)},
-      kind: "meeting",
-      summary: "Fictional restricted-role interaction fixture.",
-      subject_type: ${JSON.stringify(subjectType)}
-    }, { actor: "agent:tier-fixture" });
+    const result = await executeTool(logInteractionTool, ${JSON.stringify(params)}, {
+      actor: "agent:tier-fixture",
+    });
     if (!result.ok) throw new Error(result.error.message);
     process.stdout.write(JSON.stringify(result.envelope));
     await closeDb();
@@ -1044,5 +1052,62 @@ describe("derived entity tier and provenance", () => {
         source_id: null,
       },
     ]);
+  });
+
+  test("W3-13: promise capture resolves to_whom via entity_canonical_name for a subject minted " +
+    "in this same locked call", async () => {
+    // The exact scenario DECISIONS.md / repo.ts / 036_commitment_update_grant.sql's own
+    // comments cite as entity_canonical_name()'s reason to exist: a locked role mints a
+    // brand-new tier-2 person/org via ensurePerson/ensureOrg, then minime_log_interaction's
+    // promise capture must read its canonical_name back in the SAME call to fill
+    // commitments.to_whom. A plain `select ... where id = ...` is bound by the caller's own
+    // tier_read RLS (tier <= app_allowed_tier(), which is 1 while locked -- 023_session_unlock_
+    // approval.sql) and would return zero rows for a row this call just minted at tier 2.
+    // Nothing else in the suite drove a promise through the actual minime_app role:
+    // commitments.test.ts's own promise assertions all run on the ordinary bun-test connection
+    // (owner role, no RLS -- see src/db/client.ts's runtime-URL fallback), so this is the one
+    // place that exercises the function at all. (Reverting personCanonicalName/orgCanonicalName
+    // to a plain select makes both branches below fail with *_not_found_for_canonical_name.)
+    const personName = "MCP Promise Talia Renn";
+    const personReceipt = await logInteractionAsLockedApp(personName, "person", {
+      what: "MCP Promise send the calibration report",
+      due: "2026-09-01",
+    });
+    const personCommitmentId = personReceipt.data.commitment_id;
+    if (!personCommitmentId) throw new Error("expected commitment_id when a promise is given");
+    expect(Object.keys(personReceipt.data).sort()).toEqual(["commitment_id", "interaction_id"]);
+    expect(personReceipt.sources).toEqual(
+      expect.arrayContaining([
+        { type: "interaction", id: personReceipt.data.interaction_id },
+        { type: "commitment", id: personCommitmentId },
+      ]),
+    );
+    const [personLink] = await testSql`
+        select person_id from interactions where id = ${personReceipt.data.interaction_id}`;
+    const [mintedPerson] = await testSql`
+        select tier, canonical_name from people where id = ${personLink!.person_id}`;
+    expect(mintedPerson!.tier).toBe(2);
+    const [personCommitment] = await testSql`
+        select to_whom, tier, derived_from from commitments where id = ${personCommitmentId}`;
+    expect(personCommitment).toEqual({
+      to_whom: mintedPerson!.canonical_name,
+      tier: 2,
+      derived_from: personReceipt.data.interaction_id,
+    });
+
+    const orgName = "MCP Promise Fjord Systems";
+    const orgReceipt = await logInteractionAsLockedApp(orgName, "org", {
+      what: "MCP Promise send the signed PO",
+    });
+    const orgCommitmentId = orgReceipt.data.commitment_id;
+    if (!orgCommitmentId) throw new Error("expected commitment_id when a promise is given");
+    const [orgLink] = await testSql`
+        select org_id from interactions where id = ${orgReceipt.data.interaction_id}`;
+    const [mintedOrg] = await testSql`
+        select tier, canonical_name from orgs where id = ${orgLink!.org_id}`;
+    expect(mintedOrg!.tier).toBe(2);
+    const [orgCommitment] = await testSql`
+        select to_whom, tier from commitments where id = ${orgCommitmentId}`;
+    expect(orgCommitment).toEqual({ to_whom: mintedOrg!.canonical_name, tier: 2 });
   });
 });

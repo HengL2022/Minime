@@ -2170,13 +2170,20 @@ export async function insertCommitment(
     status?: string;
   } & Std,
 ): Promise<{ id: string }> {
-  const [row] = await db()`
-    insert into commitments (what, to_whom, due, status, created_by, source, derived_from, tier)
-    values (${c.what}, ${c.toWhom}, ${c.due ?? null}, ${c.status ?? "open"},
+  // Generate the identifier client-side, matching insertJournal/insertInteraction: a locked
+  // tier-2 INSERT is allowed (tier_write's WITH CHECK is unconditional), but PostgreSQL also
+  // applies the table's SELECT policy to a RETURNING row, and raises "new row violates row-level
+  // security policy" -- not a silent empty result -- when that check fails. minime_log_interaction's
+  // promise capture (036_commitment_update_grant.sql / interactions.ts) is the first caller that
+  // can hit this: it inserts a commitment at tier 2, the interaction's own tier, and a locked
+  // session's app_allowed_tier() is 1.
+  const id = crypto.randomUUID();
+  await db()`
+    insert into commitments (id, what, to_whom, due, status, created_by, source, derived_from, tier)
+    values (${id}, ${c.what}, ${c.toWhom}, ${c.due ?? null}, ${c.status ?? "open"},
             ${c.createdBy ?? "human"}, ${c.source ?? "manual"}, ${c.derivedFrom ?? null},
-            ${c.tier ?? 1})
-    returning id`;
-  return row as any;
+            ${c.tier ?? 1})`;
+  return { id };
 }
 
 export class CommitmentNotFoundError extends Error {
