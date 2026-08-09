@@ -166,16 +166,61 @@ describe("parseDotenv", () => {
   });
 
   test("regression: the .env.example CLOUD_MAX_TIER line parses to a clean integer", () => {
-    // The exact pre-2026-07-18 line. Copied via `cp .env.example .env` and read through
-    // loadRepoDotenv (daemon launched from a non-repo cwd), the value parsed as
-    // "2   # lower..." → Number() = NaN → `tier > NaN` is false → the egress ceiling,
-    // stricter-only route check, and m0 gate all silently passed (invariant review B1).
+    // The exact pre-2026-07-18 line, frozen byte-for-byte as a historical regression fixture —
+    // this does NOT track the current shipped default (see the live-file assertion below) and
+    // must never change. Copied via `cp .env.example .env` and read through loadRepoDotenv
+    // (daemon launched from a non-repo cwd), the value parsed as "2   # lower..." → Number() =
+    // NaN → `tier > NaN` is false → the egress ceiling, stricter-only route check, and m0 gate
+    // all silently passed (invariant review B1).
     const line =
       "CLOUD_MAX_TIER=2                    # lower to 1 to keep journal/interactions local-only";
     expect(parseDotenv(line).CLOUD_MAX_TIER).toBe("2");
-    // and the shipped .env.example itself must always yield a clean integer ceiling
+    // and the shipped .env.example itself must always yield a clean integer ceiling — value
+    // updated to the W4-9 default (DECISIONS.md 2026-08-10: default 1, opt up to 2)
     const example = readFileSync(join(import.meta.dir, "..", ".env.example"), "utf8");
-    expect(Number(parseDotenv(example).CLOUD_MAX_TIER)).toBe(2);
+    expect(Number(parseDotenv(example).CLOUD_MAX_TIER)).toBe(1);
+  });
+});
+
+describe("CLOUD_MAX_TIER default (W4-9, DECISIONS.md 2026-08-10)", () => {
+  // Isolated subprocess, same shape as loadConfigWith above but printing the resolved value:
+  // config.ts is cached per-process, so the only way to observe a fresh env('CLOUD_MAX_TIER', …)
+  // resolution is a fresh process. The spawned env deliberately does NOT spread process.env, so
+  // CLOUD_MAX_TIER is absent unless extraEnv sets it -- this is what "unset anywhere" means here.
+  function loadCloudMaxTier(extraEnv: Record<string, string> = {}) {
+    const database = "postgres://owner:secret@localhost:5432/minime";
+    const proc = Bun.spawnSync(
+      [
+        process.execPath,
+        "--no-env-file",
+        "-e",
+        'const {config} = await import("./src/util/config"); console.log(JSON.stringify({cloudMaxTier: config.cloudMaxTier}));',
+      ],
+      {
+        cwd: join(import.meta.dir, ".."),
+        env: {
+          NODE_ENV: "test",
+          MINIME_SKIP_REPO_DOTENV: "1",
+          ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}),
+          DATABASE_URL: database,
+          MINIME_APP_DATABASE_URL: database,
+          ...extraEnv,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    return JSON.parse(proc.stdout.toString().trim()) as { cloudMaxTier: number };
+  }
+
+  test("unset CLOUD_MAX_TIER yields the stricter tier-1 ceiling, not the old tier-2 default", () => {
+    expect(loadCloudMaxTier().cloudMaxTier).toBe(1);
+  });
+
+  test("an explicit CLOUD_MAX_TIER in the environment still wins over the default", () => {
+    expect(loadCloudMaxTier({ CLOUD_MAX_TIER: "2" }).cloudMaxTier).toBe(2);
+    expect(loadCloudMaxTier({ CLOUD_MAX_TIER: "0" }).cloudMaxTier).toBe(0);
   });
 });
 

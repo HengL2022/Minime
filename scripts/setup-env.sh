@@ -73,8 +73,9 @@ set_kv TZ "$REPLY"
 echo
 echo "Model stack — embeddings + inbox classification:"
 echo "  1) local Ollama        — fully private, no credentials, ~6 GB of models"
-echo "  2) cloud provider(s)   — no local models; content up to CLOUD_MAX_TIER leaves"
-echo "                           the box (tier-0 money/health NEVER does; all egress audited)"
+echo "  2) cloud provider(s)   — no local models; content up to CLOUD_MAX_TIER leaves the box."
+echo "                           Tier-2 journal/interactions stay local by default — opt up"
+echo "                           below. Tier-0 money/health NEVER leaves; all egress audited."
 ask "Choice" "1"
 if [ "$REPLY" = "2" ]; then
   echo
@@ -105,7 +106,7 @@ if [ "$REPLY" = "2" ]; then
     *) set_kv EMBED_PROVIDER openrouter
        ask_secret "OPENROUTER_API_KEY"; [ -n "$REPLY" ] && set_kv OPENROUTER_API_KEY "$REPLY" ;;
   esac
-  ask "CLOUD_MAX_TIER — 2 sends journal/interactions too; 1 keeps them local-only" "2"
+  ask "CLOUD_MAX_TIER — 1 keeps journal/interactions local-only (recommended); 2 sends them too" "1"
   set_kv CLOUD_MAX_TIER "$REPLY"
   if [ "$(get_kv CLOUD_MAX_TIER)" = "2" ]; then
     echo "Tier-2 = journals/interactions — the most intimate text. You can keep the cloud model"

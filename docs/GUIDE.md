@@ -236,8 +236,10 @@ recorded there, on top of the log, never instead of it.
 - **Tiers**: 0 = money/health (never agent-readable, aggregates only) · 1 = notes, tasks
   (agent-readable default) · 2 = journal, interactions, email metadata (owner-approved,
   session-bound unlock-gated reads). Tier 0 is absorbing and never agent-readable: prose
-  carrying explicit tier-0 evidence is never promoted into an agent-readable tier. Set
-  `CLOUD_MAX_TIER=1` in `.env` to keep tier 2 off cloud models too. The one narrow exception:
+  carrying explicit tier-0 evidence is never promoted into an agent-readable tier. If you
+  configure a cloud provider, `CLOUD_MAX_TIER` defaults to 1 — tier 2 stays off cloud models
+  unless you explicitly opt up (`CLOUD_MAX_TIER=2` in `.env`, or the guided setup's prompt).
+  The one narrow exception:
   from your own terminal, `bun run src/cli.ts tx list` / `health list` (above) can print raw
   tier-0 rows to a real interactive terminal — never through chat, MCP, a pipe, or a script.
 - **People and orgs split identity from content**: a person or org's own card —

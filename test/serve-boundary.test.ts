@@ -217,6 +217,11 @@ describe("resident serve authority split", () => {
     const child = runtimeChildEnvironment(
       {
         CLASSIFY_PROVIDER: "bedrock",
+        // Explicit: this test exercises a *reachable* implicit tier-2 fallback (no
+        // PROVIDER_ROUTE_TIER2 override), which needs ceiling 2 — the unset-env default
+        // dropped to 1 (W4-9, DECISIONS.md 2026-08-10) and would otherwise make this an
+        // untested degraded-route case instead of the reachable one this test is named for.
+        CLOUD_MAX_TIER: "2",
         BEDROCK_MODEL: "fictional.model-v1",
         BEDROCK_AWS_ACCESS_KEY_ID: "bedrock-access-key",
         BEDROCK_AWS_SECRET_ACCESS_KEY: "bedrock-secret-key",
@@ -241,6 +246,10 @@ describe("resident serve authority split", () => {
       runtimeChildEnvironment(
         {
           CLASSIFY_PROVIDER: "bedrock",
+          // Explicit for the same reason as the "Bedrock IAM is forwarded..." test above: an
+          // implicit tier-2 fallback must be reachable (ceiling 2) for the dedicated-credential
+          // check below to run at all under the unset-env default of 1 (W4-9).
+          CLOUD_MAX_TIER: "2",
           AWS_ACCESS_KEY_ID: "shared-access-key",
           AWS_SECRET_ACCESS_KEY: "shared-secret-key",
           AWS_REGION: "us-east-1",

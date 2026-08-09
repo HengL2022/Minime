@@ -59,8 +59,11 @@ const OPTIONAL_PROVIDER_CREDENTIAL_ENV: Record<string, readonly string[]> = {
   bedrock: ["BEDROCK_AWS_SESSION_TOKEN"],
 };
 
+// Default 1, matching config.ts's own CLOUD_MAX_TIER fallback (W4-9, DECISIONS.md
+// 2026-08-10) -- this is an independent parse of the same env var for the runtime-child
+// boundary check, so the two literals must be kept in agreement by hand.
 function cloudMaxTier(source: NodeJS.ProcessEnv): number {
-  const tier = Number(source.CLOUD_MAX_TIER ?? "2");
+  const tier = Number(source.CLOUD_MAX_TIER ?? "1");
   if (!Number.isInteger(tier) || tier < 0 || tier > 2) {
     throw new Error("runtime_child_boundary_invalid");
   }

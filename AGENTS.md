@@ -105,7 +105,7 @@ different vector spaces). After changing `EMBED_PROVIDER`/`*_EMBED_MODEL`, run
 `bun run src/cli.ts reembed` (wipes and re-embeds every chunk; wrong-dimension responses are
 rejected loudly, never stored).
 
-Privacy contract: cloud providers receive content up to `CLOUD_MAX_TIER` (default 2; tier-0
+Privacy contract: cloud providers receive content up to `CLOUD_MAX_TIER` (default 1; tier-0
 financial/health content **never** leaves the box on any path). Every cloud call first commits an
 audited intent row (`egress:embed` / `egress:classify`), then appends a fixed success/failure
 outcome; both contain counts and routing metadata, never contents, and the intent survives a later

@@ -280,6 +280,6 @@ responsibility. `.env` is never committed; back up with restic to media you cont
 Optionally, the internal pipeline (embeddings, classification, contradiction scan) can route
 to cloud providers instead of local Ollama (`EMBED_PROVIDER`/`CLASSIFY_PROVIDER` — Anthropic,
 OpenAI, OpenRouter, Bedrock; see [AGENTS.md](AGENTS.md)). That widens the egress surface
-deliberately: content up to `CLOUD_MAX_TIER` (default 2) transits the chosen provider, every
+deliberately: content up to `CLOUD_MAX_TIER` (default 1) transits the chosen provider, every
 call is recorded in the append-only audit log (`egress:*` events), and tier-0 content never
 leaves under any configuration.

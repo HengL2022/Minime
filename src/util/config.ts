@@ -350,8 +350,11 @@ export const config = {
   embedProvider: providerEnvironment.embedProvider,
   classifyProvider: providerEnvironment.classifyProvider,
   // tier ceiling for content sent to CLOUD providers (tier 0 content is never sent
-  // anywhere by construction — it is never chunked, classified, or scanned)
-  cloudMaxTier: Number(env("CLOUD_MAX_TIER", "2")),
+  // anywhere by construction — it is never chunked, classified, or scanned). Default 1
+  // (W4-9, DECISIONS.md 2026-08-10, superseding the 2026-06-11 default-2 recording):
+  // tier-2 journal/interactions stay local unless the owner opts up to 2 in .env. Must
+  // agree with serve.ts's independent cloudMaxTier() parse of the same variable.
+  cloudMaxTier: Number(env("CLOUD_MAX_TIER", "1")),
   // Per-tier classify routing (W3, DECISIONS.md 2026-07): optional stricter-only overrides of
   // CLASSIFY_PROVIDER per content tier. Tier 0 is never classified and has no route.
   providerRouteTier1: providerEnvironment.providerRouteTier1,

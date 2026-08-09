@@ -3735,3 +3735,66 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   exact 026 agg_sql contract, before this task began — confirmed here by a direct
   `minime_query_metric`-shaped test over fixture data, closing the same UNKNOWN_METRIC repro the
   spec cited without adding a redundant migration.
+
+## 2026-08-10 — W4-9: CLOUD_MAX_TIER default flips 2 → 1; tier-2 cloud egress becomes opt-up
+
+- **Context:** The 2026-06-11 "Cloud LLM providers" decision recorded `CLOUD_MAX_TIER` default 2
+  as the owner's choice: once any cloud provider was configured, an unset-env install would send
+  tier-2 content (journal entries, interaction notes — the most private prose in the system) to
+  that provider by default, ahead of the far more mundane tier-1 notes/tasks. The livability
+  program review flagged this as the wrong shipped default and the owner ratified flipping it
+  (2026-08-07, program decision 3).
+- **Decision:** Flip both hardcoded fallbacks together, since they parse the same env var
+  independently by design: `src/util/config.ts`'s `env("CLOUD_MAX_TIER", "1")` (was `"2"`) and
+  `src/serve.ts`'s `cloudMaxTier()` runtime-child-boundary parse (`source.CLOUD_MAX_TIER ?? "1"`,
+  was `?? "2"`). `.env.example`'s shipped `CLOUD_MAX_TIER=1` line moves the same direction, since
+  it is the byte-for-byte seed for any freshly created `.env` (`cp .env.example .env` in
+  `scripts/setup-env.sh`, and by hand for anyone who skips the wizard). `scripts/setup-env.sh`'s
+  CLOUD_MAX_TIER prompt keeps its existing 1-or-2 numeric-choice mechanic unchanged (preserving
+  `test/setup-env.test.ts`'s existing explicit-answer coverage of both values) but now defaults to
+  1 and leads with the local-only option marked recommended; the preceding "cloud provider(s)"
+  menu line was reworded so choosing cloud at the top level no longer reads as implying tier-2 is
+  included. `docs/GUIDE.md`, `README.md`, and `AGENTS.md` had their "(default 2)" /
+  "set CLOUD_MAX_TIER=1 to keep tier 2 local too" language corrected to match: tier-2 staying
+  local is now the starting point, and reaching tier-2 cloud egress is the explicit opt-up. An
+  owner's existing `.env` is unaffected either way — `env(name, fallback)` only substitutes the
+  fallback when the variable is entirely absent from the environment, so this changes behavior
+  only for unset-env installs (fresh, or an owner who deliberately unsets the key). Two tests
+  were found relying on the old implicit default without setting `CLOUD_MAX_TIER` themselves and
+  were given explicit values so they keep testing what they were written to test, not the shipped
+  default: `test/serve-boundary.test.ts`'s "Bedrock IAM is forwarded..." test now pins
+  `CLOUD_MAX_TIER: "2"` (it specifically exercises a *reachable* implicit tier-2 fallback
+  forwarding credentials, which requires ceiling 2); `test/config.dotenv.test.ts`'s
+  `.env.example`-parses-cleanly regression now expects 1 for the live file in its second
+  assertion, while its first assertion stays an untouched, frozen byte-for-byte snapshot of the
+  pre-2026-07-18 buggy line (unrelated to the current default, it must never change).
+  `test/m13.provider-routing.test.ts` already exercised the ceiling with explicit
+  `config.cloudMaxTier` values in every case that mattered, so nothing there needed correcting; a
+  new test was added instead, asserting the acceptance scenario directly: default env (no
+  `CLOUD_MAX_TIER` anywhere) plus a cloud `CLASSIFY_PROVIDER` plus tier-2 content resolves to zero
+  cloud egress end to end. `test/config.dotenv.test.ts` also gained a subprocess-isolated
+  assertion that an unset `CLOUD_MAX_TIER` resolves `config.cloudMaxTier` to 1.
+- **Why:** I3's floor is "tier-0 content never enters agent context"; I1's local-first default has
+  always meant an env-less install stays byte-for-byte local. `CLOUD_MAX_TIER=2` as a *default*
+  sat awkwardly between those two commitments: I1's env-less-local claim only ever covered the
+  no-provider-configured case, so the moment an owner configured any cloud provider at all, the
+  previous default silently added the *most* private tier to what left the box, not the least.
+  Flipping the default inverts that: configuring a cloud provider now buys cloud tier-1 for free,
+  and tier-2 only by a second, explicit decision — matching the "opt-in enhancement, not opt-out
+  from privacy" posture the rest of the provider-routing design (per-tier `PROVIDER_ROUTE_*`, the
+  stricter-only ceiling check, the runtime-child credential scrubbing) already establishes
+  elsewhere. The one behavioral consequence — an owner who configures a cloud classifier and does
+  not additionally opt into local Ollama for tier-2 will see more raw captures land in the
+  `inbox_unfiled` review queue than before, until they either opt up or add a local route — is
+  absorbed by the already-existing degraded/manual-review fallback (an implicit cloud route above
+  the ceiling never throws at startup; it only rejects the individual job, per AGENTS.md's
+  per-tier-routing paragraph, unchanged by this task): a deliberately conservative failure mode
+  (manual filing), never a silent one (cloud egress). `classifyProviderForTier`'s stricter-only
+  ceiling enforcement and the `runtime_child_boundary_invalid` fail-closed checks in `serve.ts`
+  are themselves untouched — this task changes only which value is assumed absent a setting, never
+  how the ceiling is enforced once known (the classify-routing fix for the inbox fallback the
+  program review also flagged had already landed pre-program, commit 19fc7d1).
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W4 workstream,
+  with an explicit same-day ratification of this specific default flip (program decision 3)
+  superseding the 2026-06-11 "CLOUD_MAX_TIER default 2, owner's choice" recording.

@@ -744,4 +744,49 @@ describe("inbox classify assumed-tier-2 routing", () => {
       config.mockOllama = true;
     }
   });
+
+  test("W4-9: fresh env (CLOUD_MAX_TIER unset) keeps tier-2 local end-to-end with a cloud CLASSIFY_PROVIDER", async () => {
+    // No config.cloudMaxTier assignment here, deliberately: this is the one test in the suite
+    // that must exercise the actual shipped default (DECISIONS.md 2026-08-10 — default 1, was
+    // 2), not an explicit override. Guard the premise so a leaked mutation from an earlier test
+    // fails loudly here instead of this test silently passing for the wrong reason.
+    expect(config.cloudMaxTier).toBe(1);
+    await resetDb();
+    config.mockOllama = false;
+    config.classifyProvider = "openrouter";
+    config.openrouterApiKey = "test-key";
+    config.providerRouteTier1 = undefined;
+    config.providerRouteTier2 = undefined;
+    const patched = await patchFetch(() => ({
+      response: JSON.stringify({ type: "journal", confidence: 0.9, fields: {}, reason: "test" }),
+    }));
+    const [before] =
+      await testSql`select count(*)::int as n from events where verb = 'egress:classify'`;
+    try {
+      const classification = await classify("dear diary, the default install must keep this local");
+      const [after] =
+        await testSql`select count(*)::int as n from events where verb = 'egress:classify'`;
+      expect({
+        classification,
+        localRequests: patched.localRequests.length,
+        cloudCalls: patched.cloudCalls.length,
+        egressRows: after!.n - before!.n,
+      }).toEqual({
+        // Falls back per the existing ceiling behavior (classifyProviderForTier rejects the
+        // job before provider construction): never silently sent, never silently invented.
+        classification: {
+          type: "unknown",
+          confidence: 0,
+          fields: {},
+          reason: "classifier error or unparseable output",
+        },
+        localRequests: 0,
+        cloudCalls: 0,
+        egressRows: 0,
+      });
+    } finally {
+      await patched.restore();
+      config.mockOllama = true;
+    }
+  });
 });
