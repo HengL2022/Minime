@@ -66,8 +66,11 @@ export const upsertGoalTool: ToolDef = {
     }
     // Index the STORED statement/why (returned from the write), not the raw params — an
     // id-only status update omits both, and indexing params would blank the search text (the
-    // exact upsertTask title-rewrite wart this tool must not replicate; see repo.ts).
-    await indexParent("goal", goal.id, goalMd(goal), goal.statement, 1);
+    // exact upsertTask title-rewrite wart this tool must not replicate; see repo.ts). Tier must
+    // be read back from the row (not hardcoded) so a goal ever retiered to 2 outside this tool
+    // (e.g. a repair script) stays tier-2 in its chunks too — mirrors goalBacklogIndex
+    // (src/pipeline/dream.ts).
+    await indexParent("goal", goal.id, goalMd(goal), goal.statement, goal.tier === 2 ? 2 : 1);
     return envelope({ goal_id: goal.id }, [{ type: "goal", id: goal.id }]);
   },
 };
