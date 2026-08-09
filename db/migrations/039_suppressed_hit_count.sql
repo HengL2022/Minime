@@ -9,9 +9,9 @@
 -- (agents/skills/query.md, pre-this-migration: "never state or imply a count of what's hidden —
 -- the envelope carries none"), because no such count existed yet. This migration builds it.
 --
--- suppressed_candidate_count(q, q_vec, k) mirrors ftsCandidates'/vectorCandidates' own candidate
--- SQL as closely as a single function can: the same `chunks` table, the same `tier >= 1` floor
--- (tier 0 is never touched here or anywhere in search — I3), the same websearch_to_tsquery/
+-- suppressed_candidate_count(q, q_vec, k, types) mirrors ftsCandidates'/vectorCandidates' own
+-- candidate SQL as closely as a single function can: the same `chunks` table, the same `tier >= 1`
+-- floor (tier 0 is never touched here or anywhere in search — I3), the same websearch_to_tsquery/
 -- ts_rank_cd ordering for the fts arm and the same cosine-distance ordering for the vector arm,
 -- each independently topped at `k` (clamped to 50 — the same top-50 cap ftsCandidates/
 -- vectorCandidates themselves use — so this cannot be used to force unbounded work regardless of
@@ -24,6 +24,19 @@
 -- future bug. It returns ONLY that bare integer — never an id, title, or snippet, which would let
 -- a caller enumerate what is locked rather than merely know something is (the same "aggregate is
 -- fine, raw content is not" boundary I3 already draws for tier-0 metrics via metric_agg()).
+--
+-- `types` (review finding, 2026-08-09) applies the exact `types is null or c.parent_type =
+-- any(types)` predicate ftsCandidates/vectorCandidates apply as `(${types === null} or
+-- c.parent_type = any(${types ?? []}))` in their own SQL (repo.ts), to both fts_top and vec_top.
+-- The original three-argument function had no types predicate at all, so a type-scoped locked
+-- search (minime_search's own `types` tool parameter) disclosed a locked count that included
+-- matches of types the caller had explicitly excluded — e.g. types:["task"] reporting a tier-2
+-- journal entry as a locked "match" for a search that could never have returned that journal even
+-- unlocked. `null` (the default, and what a caller with no type filter passes) matches every
+-- type, same as ftsCandidates'/vectorCandidates' own `types === null` case. `from`/`to` remain
+-- unmirrored — a real, disclosed precision gap (DECISIONS.md), not an oversight — because unlike
+-- `types`, no date predicate exists in ftsCandidates'/vectorCandidates' own candidate SQL to
+-- mirror: their date narrowing happens later, in hybrid.ts, against parentMeta.event_at.
 --
 -- `q` must be the exact already-cjk_fold-ed, OR-joined term string ftsCandidates itself builds
 -- (repo.ts's shared ftsOrQuery helper, used by both ftsCandidates and suppressedCandidateCount) —
@@ -45,7 +58,7 @@
 -- timeline_locked_count's own precedent: engineering sessions read through the SELECT-only DSN
 -- directly (CLAUDE.md) and never run repo.ts's compiled search path, so there is no caller on
 -- that connection that could ever need it.
-create function suppressed_candidate_count(q text, q_vec vector(768), k int)
+create function suppressed_candidate_count(q text, q_vec vector(768), k int, types text[] default null)
 returns integer
 language plpgsql
 security definer
@@ -65,6 +78,7 @@ begin
     from chunks c, tsq
     where c.tier >= 1
       and c.tsv @@ tsq.query
+      and (types is null or c.parent_type = any(types))
     order by ts_rank_cd(c.tsv, tsq.query) desc
     limit cap
   ),
@@ -72,6 +86,7 @@ begin
     select c.parent_type, c.parent_id, c.tier
     from chunks c
     where c.tier >= 1 and c.embedding is not null and q_vec is not null
+      and (types is null or c.parent_type = any(types))
     order by c.embedding <=> q_vec
     limit cap
   ),
@@ -127,5 +142,5 @@ begin
 end;
 $$;
 
-revoke execute on function suppressed_candidate_count(text, vector, int) from public;
-grant execute on function suppressed_candidate_count(text, vector, int) to minime_app;
+revoke execute on function suppressed_candidate_count(text, vector, int, text[]) from public;
+grant execute on function suppressed_candidate_count(text, vector, int, text[]) to minime_app;

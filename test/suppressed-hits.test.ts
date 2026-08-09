@@ -162,6 +162,56 @@ describe("minime_search: tier-2 locked match count", () => {
       "1 matching result is tier-2 locked — an owner-approved unlock (minime_unlock) would include it",
     ]);
   });
+
+  // Review finding, 2026-08-09: suppressed_candidate_count() originally took no `types` argument
+  // at all, so a type-scoped locked search disclosed a count that included matches of types the
+  // caller had explicitly excluded — a type-scoped search could never have returned those matches
+  // even unlocked, so the gap was a false claim, not merely an imprecise one. This test's only
+  // fixture is a tier-2 JOURNAL entry and no task fixture exists anywhere in the corpus, so a
+  // types:["task"] search must see zero suppressed matches, not the journal's locked count.
+  test("type-scoped locked search never discloses a locked count for types outside the request", async () => {
+    const ctx = sessionToolCtx("agent:suppressed-hits-type-scoped-excluded");
+    const sentinel = "ZQXSUPHITTYPESCOPEDEXCLUDED";
+    await fictionalJournal(
+      `${sentinel} Fictional fennec fox burrow ventilation shaft survey, journal-only fixture.`,
+    );
+
+    const envelope = expectOk(
+      await invokeTool(
+        toolByName("minime_search"),
+        { query: sentinel, types: ["task"], limit: 20 },
+        ctx,
+      ),
+    );
+    expect(envelope.data.hits).toEqual([]);
+    expect(envelope.gaps).toEqual([
+      "no indexed content matches the query at the current access tier",
+    ]);
+  });
+
+  // Complement to the exclusion case above: types filtering must narrow the count, not just
+  // always report zero — a locked match whose own type IS in the requested `types` list must
+  // still be disclosed.
+  test("type-scoped locked search still discloses the count when the locked match's own type is in scope", async () => {
+    const ctx = sessionToolCtx("agent:suppressed-hits-type-scoped-included");
+    const sentinel = "ZQXSUPHITTYPESCOPEDINCLUDED";
+    await fictionalJournal(
+      `${sentinel} Fictional gharial nesting bank temperature log, journal-only fixture.`,
+    );
+
+    const envelope = expectOk(
+      await invokeTool(
+        toolByName("minime_search"),
+        { query: sentinel, types: ["journal"], limit: 20 },
+        ctx,
+      ),
+    );
+    expect(envelope.data.hits).toEqual([]);
+    expect(envelope.gaps).toEqual([
+      "no indexed content matches the query at the current access tier",
+      "1 matching result is tier-2 locked — an owner-approved unlock (minime_unlock) would include it",
+    ]);
+  });
 });
 
 describe("suppressed_candidate_count() under real RLS (restricted minime_app-shaped role)", () => {
@@ -214,9 +264,9 @@ describe("suppressed_candidate_count() under real RLS (restricted minime_app-sha
   test("suppressed_candidate_count() is minime_app-only, security definer, and stable", async () => {
     const [privileges] = await testSql`
       select
-        has_function_privilege('public', 'public.suppressed_candidate_count(text,vector,int)', 'EXECUTE') as public_execute,
-        has_function_privilege('minime_engineer_ro', 'public.suppressed_candidate_count(text,vector,int)', 'EXECUTE') as engineer_execute,
-        has_function_privilege(${appRole.roleName}, 'public.suppressed_candidate_count(text,vector,int)', 'EXECUTE') as app_execute`;
+        has_function_privilege('public', 'public.suppressed_candidate_count(text,vector,int,text[])', 'EXECUTE') as public_execute,
+        has_function_privilege('minime_engineer_ro', 'public.suppressed_candidate_count(text,vector,int,text[])', 'EXECUTE') as engineer_execute,
+        has_function_privilege(${appRole.roleName}, 'public.suppressed_candidate_count(text,vector,int,text[])', 'EXECUTE') as app_execute`;
     expect(privileges).toEqual({
       public_execute: false,
       engineer_execute: false,
@@ -224,7 +274,7 @@ describe("suppressed_candidate_count() under real RLS (restricted minime_app-sha
     });
     const [posture] = await testSql`
       select prosecdef as security_definer, provolatile
-      from pg_proc where oid = 'public.suppressed_candidate_count(text,vector,int)'::regprocedure`;
+      from pg_proc where oid = 'public.suppressed_candidate_count(text,vector,int,text[])'::regprocedure`;
     expect(posture).toEqual({ security_definer: true, provolatile: "s" });
   });
 });

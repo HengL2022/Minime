@@ -727,15 +727,21 @@ const SUPPRESSED_CANDIDATE_CAP = 50;
 // 032_timeline_locked_count.sql) already established for date-range reads. Runs through
 // suppressed_candidate_count() (039_suppressed_hit_count.sql), a SECURITY DEFINER function that
 // mirrors ftsCandidates'/vectorCandidates' own candidate SQL — same chunks table, same `tier >=
-// 1` floor (tier 0 is never touched — I3), same fts/vector ordering — but without their `tier <=
-// allowed` ceiling, then reports only a bare count of how many of those extra rows this session
-// cannot read. It never returns an id, title, or snippet (that would be an oracle for what is
-// locked). `query` MUST be the raw, un-folded query text — ftsOrQuery folding happens once, here,
-// exactly like ftsCandidates does it, so the two can never fold the same query two different ways.
+// 1` floor (tier 0 is never touched — I3), same fts/vector ordering, same `types` predicate
+// (review finding, 2026-08-09: the original signature had no `types` parameter at all, so a
+// type-scoped locked search disclosed a count that included matches of types the caller had
+// explicitly excluded) — but without their `tier <= allowed` ceiling, then reports only a bare
+// count of how many of those extra rows this session cannot read. It never returns an id, title,
+// or snippet (that would be an oracle for what is locked). `query` MUST be the raw, un-folded
+// query text — ftsOrQuery folding happens once, here, exactly like ftsCandidates does it, so the
+// two can never fold the same query two different ways. `types` must be the same normalized
+// (empty-array-to-null) value hybridSearch itself hands ftsCandidates/vectorCandidates, so the
+// count and the real hits agree on what "no type filter" means.
 export async function suppressedCandidateCount(
   query: string,
   embedding: number[] | null,
   k: number,
+  types: string[] | null,
   actor?: AccessActor,
 ): Promise<number> {
   // app_allowed_tier() inside the definer function already makes this structurally 0 once
@@ -747,7 +753,7 @@ export async function suppressedCandidateCount(
   const vec = embedding ? JSON.stringify(embedding) : null;
   const cap = Math.max(0, Math.min(Math.trunc(k), SUPPRESSED_CANDIDATE_CAP));
   const [row] = await db()`
-    select suppressed_candidate_count(${orQuery}, ${vec}::vector, ${cap}) as n`;
+    select suppressed_candidate_count(${orQuery}, ${vec}::vector, ${cap}, ${types}::text[]) as n`;
   return Number(row?.n ?? 0);
 }
 

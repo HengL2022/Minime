@@ -333,7 +333,12 @@ export async function hybridSearch(opts: {
 // double-count the same row. This deliberately re-runs hybridSearch unchanged (rather than
 // threading a second return value through its internals) so hybridSearch's own signature, and
 // every caller that only wants Hit[] (the eval harness, pmb/longmemeval scripts, m3/m5 tests),
-// needs no changes.
+// needs no changes. It DOES thread opts.types through to suppressedCandidateCount (review
+// finding, 2026-08-09) so a type-scoped locked search's count only reflects the types the caller
+// actually asked for — the same types predicate ftsCandidates/vectorCandidates apply to the real
+// hits above (opts.types is used at vectorCandidates/ftsCandidates just below). from/to stay
+// unmirrored (DECISIONS.md): unlike types, no date predicate exists in ftsCandidates'/
+// vectorCandidates' own candidate SQL for suppressed_candidate_count to mirror in the first place.
 export async function hybridSearchDetailed(
   opts: Parameters<typeof hybridSearch>[0],
 ): Promise<{ hits: Hit[]; suppressedTier2Count: number }> {
@@ -344,6 +349,11 @@ export async function hybridSearchDetailed(
   // path — not load-bearing for correctness.
   const allowed = await allowedTier(opts.actor);
   if (allowed >= 2) return { hits, suppressedTier2Count: 0 };
+
+  // Same [] -> null normalization hybridSearch itself applies (above) before handing `types` to
+  // ftsCandidates/vectorCandidates, so an empty-array types filter means "no filter" identically
+  // on both the hits path and the count path.
+  const types = opts.types?.length ? opts.types : null;
 
   let vec: number[] | null = null;
   try {
@@ -356,6 +366,7 @@ export async function hybridSearchDetailed(
     opts.query,
     vec,
     config.rerankTopIn,
+    types,
     opts.actor,
   );
   return { hits, suppressedTier2Count };

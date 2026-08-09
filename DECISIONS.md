@@ -3489,16 +3489,29 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   needs no changes; `search.ts` switches to it and pushes
   `"N matching results are tier-2 locked — an owner-approved unlock (minime_unlock) would include
   them"` into `gaps` whenever the count is nonzero, independent of (and possibly alongside) the
-  existing zero-hit gap. Deliberate scope limit: the count is not narrowed by the caller's
-  `types`/`from`/`to` filters (the definer function's signature is fixed at three arguments,
-  matching ftsCandidates/vectorCandidates' own unfiltered-by-date candidate SQL) — a caller who
-  scoped `types` could see a nonzero count that does not fully correspond to their narrowed
-  request; this mirrors how the underlying candidate SQL itself already ignores date windows, and
-  is recorded here since it is a real (if minor) precision limit on the disclosure, not an
-  oversight. `query.md`, `morning-brief.md`, and `evening-review.md` are updated to instruct
-  agents to relay this new real count (and `minime_timeline`'s existing one) verbatim, while
-  every other locked signal (`minime_get_context`'s interaction gap, a tier-aware `NOT_FOUND`)
-  stays existence-only and must never have a count invented for it.
+  existing zero-hit gap. `query.md`, `morning-brief.md`, and `evening-review.md` are updated to
+  instruct agents to relay this new real count (and `minime_timeline`'s existing one) verbatim,
+  while every other locked signal (`minime_get_context`'s interaction gap, a tier-aware
+  `NOT_FOUND`) stays existence-only and must never have a count invented for it.
+  **Correction (review-finding remediation, 2026-08-09, applied directly to migration 039 since it
+  had not shipped past this branch — the same precedent 028's own review-finding fix already
+  documented):** the original three-argument function was NOT narrowed by the caller's `types`
+  filter at all, which this decision entry at the time justified by analogy to `from`/`to` also
+  being unmirrored. That analogy does not hold: `from`/`to` truly are absent from
+  `ftsCandidates`'/`vectorCandidates`' own candidate SQL (their date narrowing happens later, in
+  `hybrid.ts`, against `parentMeta.event_at`, so there is no date predicate in the candidate SQL to
+  mirror in the first place), but `types` genuinely IS a predicate there
+  (`and (${types === null} or c.parent_type = any(${types ?? []}))`, repo.ts) — omitting it was a
+  real fidelity gap, not an inherent property of "the candidate SQL" the way the date-window
+  omission is. Concretely: a locked `types:["task"]` search whose only matching content was a
+  tier-2 journal entry (no task fixture existed at all) still disclosed "1 matching result is
+  tier-2 locked," a false claim for that exact request — unlocking would have added zero tasks.
+  `suppressed_candidate_count` now takes a fourth `types text[] default null` argument applying
+  the identical predicate to both its `fts_top` and `vec_top` CTEs, and `hybridSearchDetailed`
+  threads `opts.types` (normalized `[] -> null`, the same normalization `hybridSearch` itself
+  applies before its own `ftsCandidates`/`vectorCandidates` calls) into it. The remaining scope
+  limit — the count is not narrowed by `from`/`to` — stands as originally recorded, since that gap
+  really is inherent to what the candidate SQL itself does.
 - **Why:** `minime_search` is the primary lookup path, so silently returning fewer hits while
   locked — indistinguishable from "nothing else exists" — defeats the same purpose W3-3 already
   fixed for date-range reads: an agent caveating an answer needs to know that more exists, not
@@ -3508,15 +3521,22 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   Reading `app_allowed_tier()` inside the definer function (rather than only gating in JS, as
   `timeline_locked_count` does with a hardcoded `tier = 2`) is a deliberate strengthening: it
   makes the function self-limiting even if `repo.ts`'s own skip-when-unlocked check is ever
-  removed or bypassed by a future change. Not narrowing by `types`/date was accepted rather than
-  widening the function's signature, keeping the new SECURITY DEFINER surface exactly as small as
-  this task's own risk note asked ("keep k bounded... to bound work") at the cost of a minor,
-  disclosed precision gap.
+  removed or bypassed by a future change. Not narrowing by date was accepted rather than widening
+  the function's signature further, keeping the new SECURITY DEFINER surface only as large as this
+  task's own risk note asked for ("keep k bounded... to bound work") at the cost of a minor,
+  disclosed precision gap — but not narrowing by `types` was a fidelity bug, not an accepted
+  precision limit (correction above): a caller who scoped `types` could be told a nonzero count
+  that did not correspond to their request at all, which is the "drift = misleading counts" risk
+  this task's own spec named up front as the reason invariant-review was required for this
+  migration, so it is fixed rather than merely documented.
 - **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
   that authorized this branch's fully autonomous, wave-by-wave execution across the W4 workstream
   — the count-only locked-disclosure design was adopted as planned and specified by the task
   itself (which explicitly named this a "public-interface + privacy surface change" up front), not
-  a bespoke per-task approval. The types/date precision limit and the in-function
+  a bespoke per-task approval. The remaining date precision limit and the in-function
   `app_allowed_tier()` read are conservative, invariant-preserving implementation details within
-  that same scope. The owner's end-of-program review before any publication remains the final
-  gate.
+  that same scope. The `types` correction above strictly tightens an existing disclosure to match
+  what this entry always intended (a count scoped to the caller's own request), grants no new
+  access, and adds no new SECURITY DEFINER surface beyond one more parameter on the same function
+  — so, like 028's own review-finding fix, it did not need separate ratification. The owner's
+  end-of-program review before any publication remains the final gate.
