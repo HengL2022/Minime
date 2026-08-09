@@ -1,7 +1,7 @@
 [
   {
     "name": "minime_search",
-    "description": "Hybrid (semantic + full-text) search over the owner's notes, journal, decisions, tasks and people. Returns scored hits with snippets and source IDs. Optional from/to (YYYY-MM-DD) narrow hits to a semantic event-date window (a journal entry's own date, a decision's decided-at, etc — not necessarily updated_at). This is best-effort, NOT an exhaustive date read: it only filters the top-ranked semantic/full-text candidates already fetched for the query, so an in-window item that doesn't otherwise match the query well may be missed. For exhaustive date-range coverage regardless of query relevance, use minime_timeline instead.",
+    "description": "Hybrid (semantic + full-text) search over the owner's notes, journal, decisions, tasks and people. Returns scored hits with snippets and source IDs. Optional from/to (YYYY-MM-DD) narrow hits to a semantic event-date window (a journal entry's own date, a decision's decided-at, etc — not necessarily updated_at). This is best-effort, NOT an exhaustive date read: it only filters the top-ranked semantic/full-text candidates already fetched for the query, so an in-window item that doesn't otherwise match the query well may be missed. For exhaustive date-range coverage regardless of query relevance, use minime_timeline instead. A locked session's `gaps` discloses a bare count of matching tier-2 hits it cannot read — never their titles or ids — so a locked result is distinguishable from a genuinely empty one.",
     "inputSchema": {
       "type": "object",
       "properties": {

@@ -19,10 +19,13 @@ reflection prompts, then (B) when the owner replies, capture what they say.
    - `"active projects routines health"`
    - `"open questions blocked next steps follow up"`
 4. If tier-2 gaps block relevant interaction/journal-derived context, tell the owner what is
-   locked and ask whether they want a short audited unlock. Call `minime_unlock` only after an
-   explicit yes. Give the owner the returned request ID and local approval command, wait for
-   them to approve it in their terminal, then re-read. Approval is time-boxed and bound to this
-   MCP connection; a reconnect is locked again. Tier 0 is never readable.
+   locked and ask whether they want a short audited unlock. `minime_search`'s own gap carries a
+   real count when a locked query matched tier-2 content ("N matching results are tier-2
+   locked …") — relay that number as given; other tools' locked signals stay existence-only, so
+   do not invent a count for those. Call `minime_unlock` only after an explicit yes. Give the
+   owner the returned request ID and local approval command, wait for them to approve it in
+   their terminal, then re-read. Approval is time-boxed and bound to this MCP connection; a
+   reconnect is locked again. Tier 0 is never readable.
 
 Then deliver a short review, in this order. Omit any empty section:
 

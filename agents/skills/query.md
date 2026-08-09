@@ -37,18 +37,22 @@ list of search hits. This is the default skill for any lookup.
 3. **Synthesize.** Short prose, claims cited inline, structured only if the question is
    structured. Lead with the answer, not the methodology.
 4. **Disclose.** End with what the database does *not* know, one line: combine the envelope
-   `gaps` with missing periods you notice yourself. Ground every tier-lock mention in a signal
-   a tool actually returned — never state or imply a count of what's hidden (the envelope
-   carries none). The real signals to watch for: a zero-hit `minime_search`
+   `gaps` with missing periods you notice yourself. Ground every tier-lock mention in a signal a
+   tool actually returned. Two of those signals now carry a real, tool-computed COUNT — relay it
+   as given rather than rounding it away: `minime_search`'s gap when a locked query matches
+   tier-2 content ("N matching results are tier-2 locked — an owner-approved unlock (minime_unlock)
+   would include them") and `minime_timeline`'s per-kind locked count over a date range ("N
+   tier-2 entries in range are locked (…)"). Every OTHER locked signal stays existence-only —
+   never invent a count for these: a zero-hit `minime_search` with no locked match either
    ("no indexed content matches the query at the current access tier"), `minime_get_context`'s
    locked-interaction gap ("interactions are tier 2 — locked …"), and a tier-aware `NOT_FOUND`
    on a person/org lookup ("no person or org matching that name at the current access tier — a
-   match may exist at tier 2"). When one of these fires, offer the owner an unlock in your own
-   words — not "N entries are locked", just "there's more here I can't see yet." After an
-   explicit yes, call `minime_unlock`, give the owner its returned request ID and local approval
-   command, wait for them to approve it in their terminal, then re-read. Approval is time-boxed,
-   loudly audited, and bound to the current MCP connection; a reconnect is locked again. Tier 0
-   is never readable.
+   match may exist at tier 2"). When any of these fires, offer the owner an unlock in your own
+   words — repeat the real number when a tool gave you one, otherwise just "there's more here I
+   can't see yet," never a guessed count. After an explicit yes, call `minime_unlock`, give the
+   owner its returned request ID and local approval command, wait for them to approve it in their
+   terminal, then re-read. Approval is time-boxed, loudly audited, and bound to the current MCP
+   connection; a reconnect is locked again. Tier 0 is never readable.
 
 ## Anti-patterns
 

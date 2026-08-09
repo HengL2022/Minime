@@ -659,6 +659,23 @@ export interface Candidate {
   fts: number;
 }
 
+// OR the query words: plainto_tsquery ANDs every term, so a natural-language question matched
+// nothing whenever one contentful word was absent from a chunk — on a 100-question retrieval
+// eval, 70% of queries got zero fts candidates, silencing the 0.30 fts weight in hybrid scoring.
+// ts_rank_cd still ranks chunks matching more terms first (DECISIONS.md 2026-06-11). cjkFold
+// mirrors the index-side cjk_fold() so Chinese queries hit the bigram lexemes (009_cjk_fts.sql).
+// Shared by ftsCandidates and suppressedCandidateCount (W4-4) so the tier-2 locked count can
+// never silently drift onto a different query than the one ftsCandidates itself just ran —
+// 039_suppressed_hit_count.sql's suppressed_candidate_count() takes this exact string as `q` and
+// passes it straight to websearch_to_tsquery, the same as ftsCandidates does below.
+function ftsOrQuery(query: string): string {
+  return cjkFold(query)
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .filter((t) => !isCjkStopToken(t))
+    .join(" OR ");
+}
+
 export async function ftsCandidates(
   query: string,
   types: string[] | null,
@@ -666,17 +683,7 @@ export async function ftsCandidates(
   actor?: AccessActor,
 ): Promise<Candidate[]> {
   const allowed = await allowedTier(actor);
-  // OR the query words: plainto_tsquery ANDs every term, so a natural-language question
-  // matched nothing whenever one contentful word was absent from a chunk — on a 100-question
-  // retrieval eval, 70% of queries got zero fts candidates, silencing the 0.30 fts weight in
-  // hybrid scoring. ts_rank_cd still ranks chunks matching more terms first (DECISIONS.md
-  // 2026-06-11). cjkFold mirrors the index-side cjk_fold() so Chinese queries hit the
-  // bigram lexemes (009_cjk_fts.sql).
-  const orQuery = cjkFold(query)
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter(Boolean)
-    .filter((t) => !isCjkStopToken(t))
-    .join(" OR ");
+  const orQuery = ftsOrQuery(query);
   return db()`
     select c.id, c.parent_type, c.parent_id, c.ord, c.text,
            0::float as cosine,
@@ -708,6 +715,40 @@ export async function vectorCandidates(
       and (${parentIds === null} or c.parent_id = any(${parentIds ?? []}))
     order by c.embedding <=> ${vec}::vector
     limit 50` as any;
+}
+
+// Hard ceiling on the definer function's own top-k scan (039_suppressed_hit_count.sql clamps to
+// the same number) — bounds the work a caller can force regardless of what `k` it passes.
+const SUPPRESSED_CANDIDATE_CAP = 50;
+
+// W4-4: "how many matches for this query exist above the caller's current tier" — a bounded
+// existence signal for minime_search's envelope (search/hybrid.ts's hybridSearchDetailed), the
+// same shape minime_timeline's per-kind locked count (timelineRows/timeline_locked_count,
+// 032_timeline_locked_count.sql) already established for date-range reads. Runs through
+// suppressed_candidate_count() (039_suppressed_hit_count.sql), a SECURITY DEFINER function that
+// mirrors ftsCandidates'/vectorCandidates' own candidate SQL — same chunks table, same `tier >=
+// 1` floor (tier 0 is never touched — I3), same fts/vector ordering — but without their `tier <=
+// allowed` ceiling, then reports only a bare count of how many of those extra rows this session
+// cannot read. It never returns an id, title, or snippet (that would be an oracle for what is
+// locked). `query` MUST be the raw, un-folded query text — ftsOrQuery folding happens once, here,
+// exactly like ftsCandidates does it, so the two can never fold the same query two different ways.
+export async function suppressedCandidateCount(
+  query: string,
+  embedding: number[] | null,
+  k: number,
+  actor?: AccessActor,
+): Promise<number> {
+  // app_allowed_tier() inside the definer function already makes this structurally 0 once
+  // unlocked (no content tier exceeds 2), so this check is purely to skip the extra top-k scan
+  // on the common unlocked path — correctness never depends on it.
+  const allowed = await allowedTier(actor);
+  if (allowed >= 2) return 0;
+  const orQuery = ftsOrQuery(query);
+  const vec = embedding ? JSON.stringify(embedding) : null;
+  const cap = Math.max(0, Math.min(Math.trunc(k), SUPPRESSED_CANDIDATE_CAP));
+  const [row] = await db()`
+    select suppressed_candidate_count(${orQuery}, ${vec}::vector, ${cap}) as n`;
+  return Number(row?.n ?? 0);
 }
 
 export interface ParentMeta {

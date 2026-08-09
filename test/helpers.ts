@@ -38,6 +38,7 @@ export async function resetDb(): Promise<void> {
     "upsert_derived_alias",
     "upsert_extracted_edge",
     "timeline_locked_count",
+    "suppressed_candidate_count",
   ];
   for (const f of fns) {
     await sql.unsafe(`drop function if exists ${f} cascade`);

@@ -14,10 +14,12 @@ import {
   type ParentMeta,
   type ParentType,
   accessCounts,
+  allowedTier,
   entitiesNamedIn,
   ftsCandidates,
   oneHopNeighbors,
   parentMeta,
+  suppressedCandidateCount,
   vectorCandidates,
 } from "../db/repo";
 import { configuredTimeZone, localDateStr, now } from "../util/clock";
@@ -321,4 +323,40 @@ export async function hybridSearch(opts: {
     superseded: s.superseded,
     ...(s.superseded ? { superseded_by: s.m.superseded_by as string } : {}),
   }));
+}
+
+// W4-4: minime_search's envelope gap wants a bare "N tier-2 matches are locked" count alongside
+// the ordinary ranked hits. A locked chunk can never appear in `hits` above — the same chunk-tier
+// ceiling that hides it from ftsCandidates/vectorCandidates also drops its parent out of
+// parentMeta (both gate on the same tier value; corrections keep a parent's own row tier and its
+// chunks' tier in sync — setPageTier/setPageChunkTiers, repo.ts) — so the two numbers never
+// double-count the same row. This deliberately re-runs hybridSearch unchanged (rather than
+// threading a second return value through its internals) so hybridSearch's own signature, and
+// every caller that only wants Hit[] (the eval harness, pmb/longmemeval scripts, m3/m5 tests),
+// needs no changes.
+export async function hybridSearchDetailed(
+  opts: Parameters<typeof hybridSearch>[0],
+): Promise<{ hits: Hit[]; suppressedTier2Count: number }> {
+  const hits = await hybridSearch(opts);
+
+  // suppressedCandidateCount's own definer function already returns 0 once unlocked (no content
+  // tier exceeds 2), so this gate is purely to skip its extra top-k scan on the common unlocked
+  // path — not load-bearing for correctness.
+  const allowed = await allowedTier(opts.actor);
+  if (allowed >= 2) return { hits, suppressedTier2Count: 0 };
+
+  let vec: number[] | null = null;
+  try {
+    vec = await embedQuery(opts.query);
+  } catch {
+    // embeddings unavailable (e.g. Ollama down): the fts arm alone still answers the count,
+    // same fts-only degrade hybridSearch itself applies above.
+  }
+  const suppressedTier2Count = await suppressedCandidateCount(
+    opts.query,
+    vec,
+    config.rerankTopIn,
+    opts.actor,
+  );
+  return { hits, suppressedTier2Count };
 }

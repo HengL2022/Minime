@@ -3452,3 +3452,71 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   because 033-037 were already taken by other tasks landing first on this branch — the same
   numbering-deviation precedent 030/031/034/035/036/037 each already documented; not a product or
   scope decision in itself.
+
+## 2026-08-09 — W4-4: minime_search discloses a tier-2 locked match count
+
+- **Context:** `ftsCandidates`/`vectorCandidates` (repo.ts) both filter `c.tier >= 1 and c.tier <=
+  allowed` in their own SQL, so a locked session's `minime_search` silently drops any chunk above
+  its current tier — the result list is just shorter (or empty), with no signal that a real match
+  exists at tier 2. W3-3 (`032_timeline_locked_count.sql`) already established the pattern for
+  this exact gap on `minime_timeline`: a SECURITY DEFINER function that counts what a locked
+  session's own RLS would hide and returns only a bare integer, never a row. W1-8's honesty pass
+  (`agents/skills/query.md`, 2026-08-08) deliberately did NOT extend that promise to search,
+  instructing agents to "never state or imply a count of what's hidden (the envelope carries
+  none)" — true at the time, since no such count existed for search. This task builds it and
+  updates that instruction now that it is real.
+- **Decision:** Migration 039 (`039_suppressed_hit_count.sql`; the spec's own file list named it
+  "034_suppressed_hit_count.sql (new, provisional number)" — 034-038 were already taken by other
+  tasks landing first on this branch, the same numbering-deviation precedent 030/031/034-038 each
+  already documented, not a product or scope decision itself) adds
+  `suppressed_candidate_count(q text, q_vec vector(768), k int) returns integer`: SECURITY
+  DEFINER, mirroring `ftsCandidates`'/`vectorCandidates`' own candidate SQL (same `chunks` table,
+  same `tier >= 1` floor — tier 0 is never touched, I3 — same fts/vector top-k ordering) but
+  without their `tier <= allowed` ceiling, then counting distinct `(parent_type, parent_id)` pairs
+  whose tier exceeds `app_allowed_tier()` (read inside the function itself, so an already-unlocked
+  caller gets a structural 0 even if the JS-side gate is ever bypassed). `k` is clamped to 50 —
+  ftsCandidates/vectorCandidates' own top-50 cap — regardless of what a caller passes. Retracted
+  parents (`superseded_at` set, `superseded_by` null — 028/W2-5) are excluded via the same
+  twelve-PARENTS-table union `parentMeta` itself filters against, since a retracted row will never
+  reappear after an unlock and counting it as "locked" would overstate what an unlock buys. The
+  function returns ONLY the bare integer — no id, title, or snippet, which would let a caller
+  enumerate what is locked rather than merely know something is. `repo.ts` gains a shared
+  `ftsOrQuery` helper (extracted from `ftsCandidates`, used by both it and the new
+  `suppressedCandidateCount`) so the count can never silently answer a differently-folded query
+  than the one `ftsCandidates` itself ran. `hybrid.ts` gains `hybridSearchDetailed` (re-runs the
+  unchanged `hybridSearch` for hits, then computes the count separately) so `hybridSearch` itself,
+  and every caller that only wants `Hit[]` (eval harness, pmb/longmemeval scripts, m3/m5 tests),
+  needs no changes; `search.ts` switches to it and pushes
+  `"N matching results are tier-2 locked — an owner-approved unlock (minime_unlock) would include
+  them"` into `gaps` whenever the count is nonzero, independent of (and possibly alongside) the
+  existing zero-hit gap. Deliberate scope limit: the count is not narrowed by the caller's
+  `types`/`from`/`to` filters (the definer function's signature is fixed at three arguments,
+  matching ftsCandidates/vectorCandidates' own unfiltered-by-date candidate SQL) — a caller who
+  scoped `types` could see a nonzero count that does not fully correspond to their narrowed
+  request; this mirrors how the underlying candidate SQL itself already ignores date windows, and
+  is recorded here since it is a real (if minor) precision limit on the disclosure, not an
+  oversight. `query.md`, `morning-brief.md`, and `evening-review.md` are updated to instruct
+  agents to relay this new real count (and `minime_timeline`'s existing one) verbatim, while
+  every other locked signal (`minime_get_context`'s interaction gap, a tier-aware `NOT_FOUND`)
+  stays existence-only and must never have a count invented for it.
+- **Why:** `minime_search` is the primary lookup path, so silently returning fewer hits while
+  locked — indistinguishable from "nothing else exists" — defeats the same purpose W3-3 already
+  fixed for date-range reads: an agent caveating an answer needs to know that more exists, not
+  just infer it from an oddly-short list. The count leaks volume only, never identity, content, or
+  which specific match — the same "aggregate is fine, raw content is not" boundary I3 already
+  draws for tier-0 metrics via `metric_agg()`, applied here to a tier-2 existence count instead.
+  Reading `app_allowed_tier()` inside the definer function (rather than only gating in JS, as
+  `timeline_locked_count` does with a hardcoded `tier = 2`) is a deliberate strengthening: it
+  makes the function self-limiting even if `repo.ts`'s own skip-when-unlocked check is ever
+  removed or bypassed by a future change. Not narrowing by `types`/date was accepted rather than
+  widening the function's signature, keeping the new SECURITY DEFINER surface exactly as small as
+  this task's own risk note asked ("keep k bounded... to bound work") at the cost of a minor,
+  disclosed precision gap.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W4 workstream
+  — the count-only locked-disclosure design was adopted as planned and specified by the task
+  itself (which explicitly named this a "public-interface + privacy surface change" up front), not
+  a bespoke per-task approval. The types/date precision limit and the in-function
+  `app_allowed_tier()` read are conservative, invariant-preserving implementation details within
+  that same scope. The owner's end-of-program review before any publication remains the final
+  gate.
