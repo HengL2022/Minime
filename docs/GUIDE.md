@@ -92,8 +92,8 @@ everything you write, so "who is Alice again?" works even if you never logged he
 and once she's known this way, a later private journal mention never quietly hides
 her card again (see **Tiers**, below, for the identity/content split that makes that
 true). Someone who has so far only ever come up in private writing starts out private
-too, until you interact with them directly or approve the flagged suggestion in your
-evening review.
+too — interacting with her directly doesn't change that by itself; see **Tiers**,
+below, for how she actually gets promoted to visible.
 
 "Alice's birthday is March 3" / "our anniversary is June 12" → `minime_set_person_date`
 (birthday, anniversary, or a custom recurring date with your own label, e.g. "mom's
@@ -233,11 +233,12 @@ recorded there, on top of the log, never instead of it.
   and roughly when (their last-contact date moves), never what was said. A new alias
   spelling, a graph connection, or an interaction record genuinely drawn from that
   private mention still stays tier 2, same as the mention itself. Someone who has so
-  far only ever come up in private writing starts out tier 2 too, invisible until you
-  interact with them directly or promote them: the evening review flags an
-  `entity_promotion` item for anyone who looks owner-known but is still stuck at tier
-  2, and `bun run src/cli.ts entity:restore-tier` (your own terminal only, never an
-  agent tool call) is the one place that can move them to tier 1.
+  far only ever come up in private writing starts out tier 2 too, and interacting with
+  them directly doesn't change that by itself — it only queues an `entity_promotion`
+  review item (name masked until an approved unlock) for anyone who looks owner-known
+  but is still stuck at tier 2. No agent tool call can move them to tier 1: only
+  `bun run src/cli.ts entity:restore-tier`, run in your own terminal, does that (and
+  resolves the flag as a side effect).
 - **Audit**: `bun run src/cli.ts audit --since 7d` shows every read, write, and byte of
   egress — which agent, when, which verb, and how many rows a call returned (never the row
   IDs or their content). The log is append-only; nothing can be quietly erased.
