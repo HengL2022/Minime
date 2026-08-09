@@ -602,13 +602,27 @@ export async function dbSnapshot(): Promise<{ ran: boolean; detail: string }> {
   return runBackup("db-snap");
 }
 
-// W3-9: weekly repository integrity check, independent of runBackup -- it reads a random subset
-// of the already-uploaded repository (--read-data-subset), it does not create a new snapshot, so
-// it never touches the dump directory, the in-flight guard, or the manifest/retention steps
-// above. Always logs one 'backup:restic-check' audit event (content-free: {ok} only) on an actual
+// W3-9: weekly repository integrity check, independent of runBackup's dump/manifest/retention
+// steps -- it reads a random subset of the already-uploaded repository (--read-data-subset) and
+// never touches the dump directory or the manifest.
+//
+// It DOES share runBackup's inFlight mutex (review fix): `restic check` takes its own exclusive
+// repository lock, so a `restic backup` (dbSnapshot, ticking every BACKUP_CRON) that overlaps it
+// fails immediately -- exit 11, "repository is already locked exclusively" -- with no retry. Both
+// crons are only ever registered by serve.ts's startOwnerMaintenanceSchedule on the single
+// maintenance-lock-owning process (src/serve.ts's beginOwnedMaintenance), so the same in-process
+// flag runBackup already uses is sufficient to keep the two from ever colliding at the repository,
+// independent of how RESTIC_CHECK_CRON/BACKUP_CRON happen to be configured (the setup wizard's own
+// suggested defaults -- BACKUP_CRON="*/15 * * * *", RESTIC_CHECK_CRON="0 4 * * 0" -- coincide every
+// Sunday at 4:00 sharp). A caller that loses the race is skipped, not retried -- same as runBackup
+// skipping itself -- and logs no event, since no attempt was actually made; the next scheduled
+// tick tries again.
+//
+// Always logs one 'backup:restic-check' audit event (content-free: {ok} only) on an actual
 // attempt; a command failure also gets a sanitized ops.log line, same discipline as
 // restic_backup/restic_retention. Deliberately NOT wired into W3-7's ops_failure detector (spec:
-// doctor.ts's own "restic check" line, sourced from this verb's last event, covers staleness).
+// doctor.ts's own "restic check" line, sourced from this verb's last event, covers staleness and
+// its last outcome).
 export async function resticCheck(): Promise<{ ran: boolean; detail: string }> {
   if (!config.resticRepository || !config.resticPasswordFile) {
     return {
@@ -616,16 +630,22 @@ export async function resticCheck(): Promise<{ ran: boolean; detail: string }> {
       detail: "restic not configured (RESTIC_REPOSITORY / RESTIC_PASSWORD_FILE)",
     };
   }
-  const result = await run(["restic", "check", "--read-data-subset=5%"], resticEnv());
-  if (!result.ok) await logCommandFailure("restic_check", result);
-  await logEvent({
-    actor: "system:backup",
-    verb: "backup:restic-check",
-    payload: auditPayload.resticCheck({ ok: result.ok }),
-  });
-  return result.ok
-    ? { ran: true, detail: "restic check complete" }
-    : { ran: false, detail: BACKUP_DETAIL.resticCheck };
+  if (inFlight) return { ran: false, detail: "skipped: another snapshot is in flight" };
+  inFlight = true;
+  try {
+    const result = await run(["restic", "check", "--read-data-subset=5%"], resticEnv());
+    if (!result.ok) await logCommandFailure("restic_check", result);
+    await logEvent({
+      actor: "system:backup",
+      verb: "backup:restic-check",
+      payload: auditPayload.resticCheck({ ok: result.ok }),
+    });
+    return result.ok
+      ? { ran: true, detail: "restic check complete" }
+      : { ran: false, detail: BACKUP_DETAIL.resticCheck };
+  } finally {
+    inFlight = false;
+  }
 }
 
 export async function preUpdateSnapshot(): Promise<PreUpdateSnapshotOutcome> {

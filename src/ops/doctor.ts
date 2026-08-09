@@ -13,7 +13,7 @@ import { statfsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { adminSql } from "../db/client";
-import { type OpsHealth, lastEventAt, maintenanceLockHeld, opsHealth } from "../db/repo";
+import { type OpsHealth, maintenanceLockHeld, opsHealth, recentEventsByVerb } from "../db/repo";
 import { fetchOllamaTags } from "../llm/ollama-http";
 import { DB_DUMP_DIR, config } from "../util/config";
 import type { OllamaEndpoint } from "../util/ollama-url";
@@ -141,23 +141,31 @@ async function checkDumpFreshness(probes: DoctorProbes, now: Date): Promise<Doct
   return { name: "backup dump", status: "PASS" };
 }
 
-// W3-9: surfaces the age of the weekly `restic check --read-data-subset` pass by reading its
-// audit verb's last timestamp -- this never re-runs restic itself (that stays on serve.ts's
-// cron), so the check is fast and needs no restic binary. Same non-fatal stance as
-// checkDumpFreshness: restic being unconfigured, or the check never having run yet, is common
-// and only ever WARNs.
+// W3-9: surfaces the health of the weekly `restic check --read-data-subset` pass by reading its
+// audit verb's last event -- this never re-runs restic itself (that stays on serve.ts's cron), so
+// the check is fast and needs no restic binary. Review fix: inspects the logged payload.ok, not
+// just the event's recency (mirrors sibling checkDream, which grades on opsHealth's failed_steps/
+// ops_failure_open rather than only dream:summary's timestamp) -- otherwise a repository that has
+// failed every attempt this week still reads PASS as long as some attempt happened recently, which
+// defeats the point of an owner-facing integrity signal. Same non-fatal stance as
+// checkDumpFreshness throughout: restic being unconfigured, the check never having run yet, or its
+// last attempt having failed, is common/recoverable and only ever WARNs, never FAILs.
 async function checkResticCheck(now: Date): Promise<DoctorCheck> {
   if (!config.resticRepository || !config.resticPasswordFile) {
     return { name: "restic check", status: "WARN", detail: "restic not configured" };
   }
-  let at: Date | null;
+  let latest: { at: string | Date; payload: unknown } | undefined;
   try {
-    at = await lastEventAt("backup:restic-check");
+    [latest] = await recentEventsByVerb("backup:restic-check", 1);
   } catch {
     return { name: "restic check", status: "WARN", detail: "status could not be read" };
   }
-  if (!at) return { name: "restic check", status: "WARN", detail: "has never run" };
-  const hours = hoursSince(at, now);
+  if (!latest) return { name: "restic check", status: "WARN", detail: "has never run" };
+  const payload = latest.payload as { ok?: unknown } | null;
+  if (payload?.ok === false) {
+    return { name: "restic check", status: "WARN", detail: "last check failed" };
+  }
+  const hours = hoursSince(new Date(latest.at), now);
   if (hours > RESTIC_CHECK_STALE_HOURS) {
     return { name: "restic check", status: "WARN", detail: `last run ${Math.floor(hours)}h ago` };
   }

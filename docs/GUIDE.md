@@ -265,9 +265,10 @@ or a distributed rollback across Postgres, files, model providers, or indexes.
   fails closed with no partial file when it doesn't. Independently, a weekly
   `restic check --read-data-subset=5%` (`RESTIC_CHECK_CRON`, default Sunday 4am, runs only once
   `RESTIC_REPOSITORY`/`RESTIC_PASSWORD_FILE` are set) verifies the destination itself is still
-  readable; it does not create a new snapshot. Each attempt logs one content-free
-  `backup:restic-check` event (`minime audit` shows it), and `minime doctor` reports how long ago
-  it last ran.
+  readable; it does not create a new snapshot, and it shares the same in-process lock as the
+  frequent snapshot cron so the two never race restic's own repository lock. Each attempt logs one
+  content-free `backup:restic-check` event (`minime audit` shows it), and `minime doctor` reports
+  both how long ago it last ran and whether that last attempt failed.
 - **Restore promotion**: `make promote-restore` is a separate, deliberate owner action. It refuses
   active sessions, prepared transactions, a stale schema, or an existing `minime_replaced`; writes
   a private pre-promotion dump; blocks new connections; then performs the two database renames.

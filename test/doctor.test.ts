@@ -244,6 +244,42 @@ describe("minime doctor (src/ops/doctor.ts)", () => {
     expect(result.exitCode).toBe(0);
   });
 
+  // Review fix: checkResticCheck used to grade PASS purely from the audit event's recency, so a
+  // repository that fails its integrity check on every run still read PASS as long as an attempt
+  // happened recently. It now inspects the logged payload.ok (see doctor.ts:144-152), same as
+  // sibling checkDream inspects opsHealth's failed_steps/ops_failure_open instead of only a
+  // timestamp.
+  test("WARNs (not PASS) when the last restic check attempt failed, even though it just ran", async () => {
+    await seedDreamSummary(new Date(), []);
+    await seedResticCheck(new Date(), false); // recent, but the check itself failed
+
+    const original = {
+      resticRepository: config.resticRepository,
+      resticPasswordFile: config.resticPasswordFile,
+    };
+    config.resticRepository = "test:repository";
+    config.resticPasswordFile = "/test/restic-password";
+    try {
+      const result = await runDoctorChecks({
+        statfs: HEALTHY_STATFS,
+        fetchOllamaTags: async () => [],
+        dumpDir: NO_DUMP_DIR,
+      });
+      const resticCheck = result.checks.find((c) => c.name === "restic check");
+      expect(resticCheck).toEqual({
+        name: "restic check",
+        status: "WARN",
+        detail: "last check failed",
+      });
+      // Non-fatal, same as every other restic-check outcome (a bad week is recoverable; W3-7's
+      // ops_failure counter is deliberately not wired to this verb -- see backup.ts:623-625).
+      expect(result.exitCode).toBe(0);
+    } finally {
+      config.resticRepository = original.resticRepository;
+      config.resticPasswordFile = original.resticPasswordFile;
+    }
+  });
+
   test("FAILs (nonzero exit) when dream has never run", async () => {
     const result = await runDoctorChecks({
       statfs: HEALTHY_STATFS,

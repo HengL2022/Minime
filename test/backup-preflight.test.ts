@@ -9,7 +9,9 @@ import { join } from "node:path";
 import {
   __setCommandRunnerForTest,
   __setDumpDirForTest,
+  __setInFlightForTest,
   __setStatfsForTest,
+  backup,
   dbSnapshot,
   resticCheck,
 } from "../src/pipeline/backup";
@@ -21,6 +23,7 @@ afterEach(() => {
   __setCommandRunnerForTest(undefined);
   __setStatfsForTest(undefined);
   __setDumpDirForTest(undefined);
+  __setInFlightForTest(false);
   config.resticRepository = undefined;
   config.resticPasswordFile = undefined;
 });
@@ -191,6 +194,61 @@ describe("resticCheck (W3-9)", () => {
       select payload from events where verb = 'backup:restic-check' order by at desc limit 1`;
     expect(row!.payload).toEqual({ ok: false });
     expect(JSON.stringify(row!.payload)).not.toContain("/private/backups");
+  });
+
+  // Review fix: resticCheck() used to run with no in-flight guard at all, so a `restic check`
+  // scheduled at the same tick as a `restic backup` (dbSnapshot) raced restic's own exclusive
+  // repository lock instead of one of them cleanly skipping -- see backup.ts:605-619 for the
+  // full mechanism. These two tests cover both directions of the now-shared mutex.
+  test("skips while a backup is already in flight, without spawning restic or logging an event", async () => {
+    config.resticRepository = "test:repo";
+    config.resticPasswordFile = "/test/pass";
+    const before = await countEvents("backup:restic-check");
+    const calls: string[][] = [];
+    __setCommandRunnerForTest(async (cmd) => {
+      calls.push(cmd);
+      return { ok: true };
+    });
+    __setInFlightForTest(true); // simulates a concurrent dbSnapshot()/backup() holding the flag
+
+    const result = await resticCheck();
+    expect(result.ran).toBe(false);
+    expect(result.detail).toMatch(/in flight/i);
+    expect(calls).toEqual([]);
+    expect(await countEvents("backup:restic-check")).toBe(before);
+  });
+
+  test("holds the flag while running, so a concurrent dbSnapshot()/backup() skips instead of racing restic's lock", async () => {
+    config.resticRepository = "test:repo";
+    config.resticPasswordFile = "/test/pass";
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let checkStarted = false;
+    __setCommandRunnerForTest(async (cmd) => {
+      if (cmd[0] === "restic" && cmd[1] === "check") {
+        checkStarted = true;
+        await gate; // the admitted resticCheck() parks here, holding inFlight = true
+        return { ok: true };
+      }
+      return { ok: true }; // the "command -v" probe inside a would-be runBackup, if ever reached
+    });
+
+    const checkP = resticCheck(); // claims inFlight synchronously, then parks in the gated call
+    await Promise.resolve();
+    expect(checkStarted).toBe(true);
+
+    const snapshot = await dbSnapshot();
+    expect(snapshot.ran).toBe(false);
+    expect(snapshot.detail).toMatch(/in flight/i);
+    const dream = await backup();
+    expect(dream.ran).toBe(false);
+    expect(dream.detail).toMatch(/in flight/i);
+
+    release(); // unpark resticCheck(); it completes normally and releases the flag
+    const check = await checkP;
+    expect(check).toEqual({ ran: true, detail: "restic check complete" });
   });
 });
 
