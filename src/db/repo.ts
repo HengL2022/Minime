@@ -1,7 +1,10 @@
 // The ONLY place application SQL runs (spec §14). Every agent/ordinary content read applies
 // the predicate `tier >= 1 AND tier <= allowedTier()`. Tier-0 tables
-// (transactions, health_samples) have no
-// content-read functions at all — they are reachable only via metric_agg() (I3).
+// (transactions, health_samples) have no MCP/agent-reachable content-read functions — every
+// src/mcp/tools/ path reaches them only through metric_agg() (I3). The one exception is the
+// owner-CLI-only section below (listTransactions/listHealthSamples, W4-5, ~line 3187): a
+// narrowly-scoped read path reachable only from src/cli.ts, never from src/mcp/tools/ — see
+// DECISIONS.md 2026-08-10 for the recorded exception this implements.
 // Everything is parameterized; string-interpolated SQL is a review-blocker.
 
 import { existsSync, readFileSync } from "node:fs";

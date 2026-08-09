@@ -775,8 +775,16 @@ async function main(): Promise<number> {
           Array.isArray(p.returned_ids) && p.returned_ids.length
             ? ` ids=${p.returned_ids.length}`
             : "";
+        // cli:tx:list / cli:health:list (W4-5): the only payload shape carrying `row_count` —
+        // surfaces the month/kind, count, and whether a match filter was used, exactly what
+        // docs/GUIDE.md promises `minime audit` shows for these two verbs. Never the match text
+        // or any row content: the payload never carries either, so there is nothing here to leak.
+        const tier0Count =
+          typeof p.row_count === "number"
+            ? ` ${p.month !== undefined ? `month=${p.month}` : `kind=${p.kind}`} count=${p.row_count} match_used=${p.match_used}`
+            : "";
         console.log(
-          `${new Date(r.at).toISOString()}  ${r.actor.padEnd(24)} ${r.verb}${ids}${p.error ? ` ERROR=${p.error}` : ""}`,
+          `${new Date(r.at).toISOString()}  ${r.actor.padEnd(24)} ${r.verb}${ids}${tier0Count}${p.error ? ` ERROR=${p.error}` : ""}`,
         );
       }
       console.log(`-- ${rows.length} events in last ${days}d`);
