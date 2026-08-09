@@ -368,6 +368,11 @@ export const config = {
   // verified live: OpenRouter /embeddings honors dimensions=768 for this model (MRL)
   openrouterEmbedModel: env("OPENROUTER_EMBED_MODEL", "qwen/qwen3-embedding-8b"),
   bedrockModel: process.env.BEDROCK_MODEL, // required for bedrock; ids aren't guessable
+  // W4-6: optional 3-letter ISO 4217 default currency for minime_log_expense when the caller
+  // omits one. No fallback value -- absent means the tool must reject a currency-less call
+  // (BAD_INPUT) rather than guess a monetary unit. Format is validated at the tool call site
+  // (src/mcp/tools/expense.ts), not here, matching bedrockModel's own lazy-validation precedent.
+  defaultCurrency: process.env.MINIME_DEFAULT_CURRENCY,
   tz: env("TZ", "Asia/Singapore"),
   tier2UnlockMaxMinutes: parseTier2UnlockMaxMinutes(env("TIER2_UNLOCK_MAX_MINUTES", "60")),
   // Default stays 10 minutes; override for a wider or narrower blind-approval window.

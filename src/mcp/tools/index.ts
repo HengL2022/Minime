@@ -4,6 +4,7 @@ import { upsertCommitmentTool } from "./commitments";
 import { getContextTool } from "./context";
 import { correctTool } from "./correct";
 import { logDecisionTool, reviewDecisionTool } from "./decisions";
+import { logExpenseTool } from "./expense";
 import { upsertGoalTool } from "./goals";
 import { logInteractionTool } from "./interactions";
 import { journalTool } from "./journal";
@@ -41,6 +42,7 @@ export const ALL_TOOLS: ToolDef[] = [
   timelineTool,
   upsertGoalTool,
   upsertCommitmentTool,
+  logExpenseTool,
 ];
 
 export function toolByName(name: string): ToolDef {

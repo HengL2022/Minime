@@ -803,6 +803,7 @@ const AUDITED_TOOL_NAMES = new Set([
   "minime_journal",
   "minime_list_metrics",
   "minime_log_decision",
+  "minime_log_expense",
   "minime_log_interaction",
   "minime_query_metric",
   "minime_refile",

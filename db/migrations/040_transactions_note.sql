@@ -1,0 +1,26 @@
+-- 040_transactions_note.sql
+-- W4-6 (minime_log_expense: tier-0 insert-only agent write with CSV-import dedup). The task's
+-- own spec text targeted migration 035 (provisional); 035-039 were already taken by other W3/W4
+-- tasks landing on this branch first (035_goal_review_kind.sql, 036_commitment_update_grant.sql,
+-- 037_identity_content_tier_split.sql, 038_entity_promotion_backfill.sql,
+-- 039_suppressed_hit_count.sql). 040 is the true next free number as of this migration -- same
+-- numbering-deviation note as 030/031/034/035/036's own precedent, not a contract decision in
+-- itself.
+--
+-- Adds one nullable free-text column so an agent-logged cash/unbanked expense can carry an
+-- optional note, same as the merchant/category columns 005_mirrors.sql already gave every
+-- transaction row.
+alter table transactions add column note text;
+
+-- No grant or RLS change accompanies this column, deliberately. `transactions` is tier 0 and its
+-- access boundary is table-scoped, not column-scoped:
+--   * 021_runtime_app_role.sql already grants minime_app INSERT-only on `transactions` (its own
+--     blanket revoke-all followed by a curated re-grant list that never included SELECT) -- the
+--     tier-0 insert-only boundary this task's own MCP tool (minime_log_expense) relies on.
+--   * 018_engineer_role.sql already revokes SELECT on `transactions` from minime_engineer_ro
+--     outright, ahead of its blanket default-grant-select-on-future-tables clause.
+-- A `alter table ... add column` does not touch either boundary: Postgres privileges are granted
+-- per table (or via an explicit column list, which neither statement above uses), so a table
+-- already fully closed to SELECT for both roles stays fully closed once this column exists, and a
+-- table already open to INSERT for minime_app gains INSERT on this column for free, the same way
+-- it already covers every other nullable column added to `transactions` since 005_mirrors.sql.

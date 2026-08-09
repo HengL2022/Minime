@@ -31,6 +31,7 @@ import {
   type DbExecutor,
   type DbPool,
   type DbReservation,
+  type DbTransaction,
   db,
   hasDbTransaction,
   reserveDb,
@@ -3131,18 +3132,77 @@ export async function insertTransaction(t: {
   category?: string | null;
   accountLabel: string;
   externalRef: string;
+  // W4-6 (minime_log_expense): an explicit id lets a caller know a row's id BEFORE this INSERT
+  // ever runs. That is required, not cosmetic -- minime_app has INSERT-only privilege on
+  // `transactions` (021_runtime_app_role.sql; 040_transactions_note.sql adds no grant), and
+  // Postgres requires SELECT privilege for RETURNING output on INSERT, not just INSERT itself.
+  // So this function can never add `returning id` and stay callable from an actor-scoped MCP
+  // tool handler -- the id must already be known by the caller. Omit it to keep the importer's
+  // exact prior behavior (gen_random_uuid() default).
+  id?: string;
+  // I5 provenance overrides -- default to the importer's own long-standing literals so every
+  // existing caller (src/importers/transactions.ts) is byte-for-byte unaffected.
+  createdBy?: string;
+  source?: string;
+  note?: string | null;
 }): Promise<boolean> {
+  const createdBy = t.createdBy ?? "importer:transactions";
+  const source = t.source ?? "importer:transactions";
+  const insertOnce = (executor: DbExecutor) =>
+    t.id !== undefined
+      ? executor`
+          insert into transactions (id, occurred_at, amount_cents, currency, merchant, category,
+                                    account_label, external_ref, created_by, source, note, tier)
+          values (${t.id}, ${t.occurredAt}, ${String(t.amountCents)}::bigint, ${t.currency},
+                  ${t.merchant ?? null}, ${t.category ?? null}, ${t.accountLabel}, ${t.externalRef},
+                  ${createdBy}, ${source}, ${t.note ?? null}, 0)`
+      : executor`
+          insert into transactions (occurred_at, amount_cents, currency, merchant, category,
+                                    account_label, external_ref, created_by, source, note, tier)
+          values (${t.occurredAt}, ${String(t.amountCents)}::bigint, ${t.currency},
+                  ${t.merchant ?? null}, ${t.category ?? null}, ${t.accountLabel}, ${t.externalRef},
+                  ${createdBy}, ${source}, ${t.note ?? null}, 0)`;
   try {
-    await db()`
-      insert into transactions (occurred_at, amount_cents, currency, merchant, category,
-                                account_label, external_ref, created_by, source, tier)
-      values (${t.occurredAt}, ${String(t.amountCents)}::bigint, ${t.currency}, ${t.merchant ?? null}, ${t.category ?? null},
-              ${t.accountLabel}, ${t.externalRef}, 'importer:transactions', 'importer:transactions', 0)`;
+    // W4-6: minime_log_expense calls this from inside withActorDbSession's transaction, where a
+    // bare insert is unsafe to catch-and-continue from. postgres.js's sql.begin() subscribes to
+    // EVERY query issued against the transaction independently of any local try/catch
+    // (node_modules/postgres/src/index.js's per-scope `uncaughtError` tracking) -- so even though
+    // this function's own catch below handles a 23505 locally, the ENCLOSING transaction would
+    // still be silently aborted and rolled back at commit time, and callers upstream of THIS
+    // function would still see the query's rejection surface at the transaction boundary.
+    // Isolating the insert in its own savepoint contains that rollback to just this statement.
+    // hasDbTransaction() is false on the importer's own top-level calls (no actor-scoped
+    // transaction there), so that path stays a plain autocommit statement, byte-for-byte as
+    // before.
+    if (hasDbTransaction()) {
+      await (db() as DbTransaction).savepoint((sql) => insertOnce(sql));
+    } else {
+      await insertOnce(db());
+    }
     return true;
   } catch (error) {
     if ((error as { code?: string }).code === "23505") return false;
     throw error;
   }
+}
+
+// W4-6: does an 'agent-log' (minime_log_expense) row already exist for this exact date+amount?
+// Used by the CSV importer to flag a same-day, same-amount bank transaction for owner review
+// instead of silently double-counting a cash expense the owner already logged by hand. id-only
+// (I3-safe, "row IDs are fine" per CLAUDE.md) -- never selects merchant/category/note. Callers
+// outside an already-elevated admin scope MUST wrap this in withAdminDbScope: it is a genuine
+// SELECT on `transactions`, and minime_app has no SELECT grant on that table (see insertTransaction
+// above) -- never call this from an MCP tool handler's ordinary actor-scoped session.
+export async function findAgentLoggedTxMatch(
+  occurredAt: string,
+  amountCents: bigint | number,
+): Promise<{ id: string } | null> {
+  const [row] = await db()`
+    select id::text as id from transactions
+    where account_label = 'agent-log' and occurred_at = ${occurredAt}::date
+      and amount_cents = ${String(amountCents)}::bigint
+    limit 1`;
+  return row ? { id: String(row.id) } : null;
 }
 
 export async function insertHealthSample(h: {

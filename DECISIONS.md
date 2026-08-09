@@ -3605,3 +3605,68 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   (`owner_decision` in the task spec); the design here implements exactly that, with no
   broadening. `docs/GUIDE.md` documents both commands and the tier-0 exception inline next to the
   existing "tier 0: no agent ever sees a row" text they now narrowly qualify.
+
+## 2026-08-10 — W4-6: minime_log_expense, the first agent write path into tier 0
+
+- **Context:** Every existing agent write lands in tier 1 or tier 2 (journal, tasks, interactions,
+  decisions, …); tier 0 (`transactions`, `health_samples`) has only ever been written by the
+  owner's own importers, never by an agent. That left cash and unbanked spend — the one expense
+  category a bank CSV import structurally cannot see — with no way into Minime's own spend metrics
+  short of the owner hand-editing a CSV before import. The gap is narrow (one table, one
+  direction) but new in kind: it is the first migration that grants an MCP tool a write path onto
+  a tier-0 table.
+- **Decision:** `minime_log_expense` (`src/mcp/tools/expense.ts`) inserts one row into
+  `transactions` (`account_label` fixed `'agent-log'`, `source` `'agent:log_expense'`,
+  `created_by` the calling actor) and returns only `{transaction_id, deduped}` — never merchant,
+  amount, category, or note, on either the fresh-insert or the dedupe path (test-verified: the
+  full envelope, including its audit-trail encoding, is scanned for every input field the caller
+  supplied). No migration grant changes accompany it: 021_runtime_app_role.sql already gave
+  minime_app INSERT-only on `transactions` (no SELECT, no UPDATE) as part of its blanket
+  revoke-then-curated-regrant, and 040_transactions_note.sql's own new `note` column inherits that
+  same table-scoped boundary for free. Three mechanisms keep this insert-only surface honest:
+  1. **Deterministic id, not `RETURNING`.** Postgres requires SELECT privilege for an INSERT's
+     `RETURNING` output, not just INSERT — a fact the existing importer code already avoided
+     (`insertTransaction` has never used `RETURNING`). Rather than add a SELECT/UPDATE grant to
+     recover a row's id after the fact, the tool derives the row's uuid deterministically from a
+     sha256 of `date|amount_cents|currency|merchant|note` (same fields, disjoint byte ranges, as
+     the dedupe key below) — the id is known before the INSERT runs, on both the fresh-insert and
+     the re-log path, with zero additional privilege and zero reads.
+  2. **Self-dedupe.** `external_ref = sha256(date|amount_cents|currency|merchant|note).slice(24)`,
+     unique with `account_label`. Re-logging the identical expense (any subset of fields omitted
+     the same way both times) hits the existing `unique(account_label, external_ref)` constraint
+     and returns `deduped: true` with the same `transaction_id` as the original call — no second
+     row, and (because the id is the same deterministic value both times) no fabricated id that
+     matches nothing in the table.
+  3. **CSV-collision review flag.** `importTransactions` (`src/importers/transactions.ts`) now
+     checks, after each newly-inserted bank row, whether an `agent-log` row already exists for the
+     same date and amount (`findAgentLoggedTxMatch`, `src/db/repo.ts`) and if so enqueues one
+     `review_queue` item (`kind: 'duplicate'`, payload `{transaction_id, existing_transaction_id}`
+     — ids only) instead of silently letting both rows count toward `spend_total`. That lookup is a
+     genuine SELECT against `transactions`, so it always runs inside `withAdminDbScope` — the
+     importer is an owner-run batch command (`bun run src/cli.ts import:transactions`), not an
+     agent-facing path, so admin scope there does not touch I2's agent-facing boundary. Spend is
+     always stored negative (006_metrics_seed.sql's sign convention — `spend_total`/
+     `spend_by_category` only count `amount_cents < 0`); the tool forces this regardless of the
+     sign the caller typed, so "-12.50" and "12.50" log the same expense.
+  Also: `note text` (migration 040, nullable, no grant change — see its own comment), and
+  `MINIME_DEFAULT_CURRENCY` (optional 3-letter fallback when the caller omits `currency`; absent
+  ⇒ BAD_INPUT, never a silent guess), plumbed through `src/util/config.ts` and `serve.ts`'s
+  `RUNTIME_SETTING_ENV` pass-through the same way every other optional runtime setting is.
+- **Why:** I3's floor is "tier-0 content never enters agent context," not "tier 0 is agent-
+  read-only" — the two are different claims, and 021 already drew the line precisely at the first
+  one (insert-only, no read grant of any kind). Extending that exact line to a second write path
+  costs nothing new to police: the boundary this tool must never cross (SELECT on `transactions`)
+  is the same boundary the importer has respected since 021, enforced the same way (a GRANT the
+  migration never adds), and tested the same way (m15.roles/m6.leak's existing "no SELECT grant on
+  transactions" assertions stay green untouched, plus this task's own runtime-app-role probe).
+  Double-counting against a future bank import is the one real new risk a write-only, dedupe-only
+  tool introduces, so it gets an explicit, reviewable mitigation (the review-queue flag) rather
+  than being left as a silent data-quality gap.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W4 workstream
+  — task W4-6's own spec named the new agent write surface into tier 0 up front and required this
+  entry; the design here implements exactly that (insert-only, no read-back, dedupe semantics),
+  with no broadening beyond what the spec described. The deterministic-id mechanism and the
+  importer's admin-scoped collision lookup are conservative, invariant-preserving implementation
+  details needed to make that exact design work under minime_app's real insert-only grant — not a
+  scope change in themselves.
