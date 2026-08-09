@@ -258,7 +258,11 @@ recorded there, on top of the log, never instead of it.
   resolves the flag as a side effect).
 - **Audit**: `bun run src/cli.ts audit --since 7d` shows every read, write, and byte of
   egress — which agent, when, which verb, and how many rows a call returned (never the row
-  IDs or their content). The log is append-only; nothing can be quietly erased.
+  IDs or their content). Add `--summary` for one screen of per-actor/verb counts, an egress
+  rollup by provider and route tier, and recent tier-2 unlock request/approval history; add
+  `--verb <pattern>` (glob, `*` → SQL `LIKE '%'`, e.g. `egress:*`) or `--actor <actor>` to
+  filter the raw per-line listing (summary mode ignores both). The log is append-only;
+  nothing can be quietly erased.
 
 ### Reading MCP audit outcomes
 

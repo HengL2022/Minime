@@ -4,11 +4,13 @@ import { join } from "node:path";
 import { closeDb, withAdminDbTransaction } from "./db/client";
 import { assertSchemaCurrent, migrate, parseMigrationCliContext } from "./db/migrate";
 import {
+  type AuditSummary,
   type EntityKind,
   type PendingTier2UnlockRequest,
   type Tier0HealthSampleRow,
   type Tier0TransactionRow,
   approveTier2UnlockRequest,
+  auditSummarySince,
   eventsSince,
   getInboxItem,
   insertMetricDef,
@@ -79,6 +81,10 @@ const USAGE = `minime <command>
   serve                            MCP server (stdio) + inbox watcher + dream cron
   review                           list open inbox_unfiled/duplicate items with full text (owner; no unlock needed)
   audit --since <Nd>               show what left the box (events), default 7d
+              [--summary] [--verb <pattern>] [--actor <actor>]
+                                    --summary: actor/verb + egress + unlock rollups on one screen
+                                    (ignores --verb/--actor); otherwise raw lines, filterable by
+                                    exact --actor or --verb (glob, '*' -> SQL LIKE '%', e.g. 'egress:*')
   import:calendar <file.ics>
   import:transactions <file.csv> --profile <bank>
   import:health <export.xml>
@@ -143,6 +149,63 @@ function padColumns(headers: string[], rows: string[][]): string[] {
       .join("  ")
       .trimEnd();
   return [line(headers), ...rows.map(line)];
+}
+
+// Translates the owner's `audit --verb` glob filter into a parameterized SQL LIKE pattern: '*'
+// becomes '%' (Postgres's any-run wildcard). Any literal '%'/'_'/'\' in the glob is escaped first
+// so only the caller's own '*' behaves specially — mirrors repo.ts's tier0CliEscapeLikePattern for
+// the tx/health --match filter. Verbs never actually contain these characters today, but a
+// mistyped filter should search literally rather than surprise-matching everything.
+function verbLikePattern(glob: string): string {
+  return glob.replace(/[\\%_]/g, (ch) => `\\${ch}`).replace(/\*/g, "%");
+}
+
+// `audit --summary`'s renderer (W4-11). Prints exactly three tables plus a footer, touching only
+// the fixed fields AuditSummary exposes (actor/verb/count, provider/route_tier/count,
+// at/verb/actor/request_id/minutes) — never a raw payload object — so there is nothing here for a
+// future edit to accidentally widen into a payload dump.
+function renderAuditSummary(summary: AuditSummary, days: number): string[] {
+  const lines: string[] = [];
+  lines.push(`== audit summary: last ${days}d (since ${summary.since.toISOString()}) ==`, "");
+  lines.push("-- events by actor/verb --");
+  lines.push(
+    ...padColumns(
+      ["actor", "verb", "count"],
+      summary.actorVerbCounts.map((r) => [r.actor, r.verb, String(r.count)]),
+    ),
+    "",
+  );
+  lines.push("-- egress rollup (provider / route_tier) --");
+  lines.push(
+    ...padColumns(
+      ["provider", "route_tier", "count"],
+      summary.egressRollup.map((r) => [
+        r.provider,
+        r.routeTier === null ? "-" : String(r.routeTier),
+        String(r.count),
+      ]),
+    ),
+    "",
+  );
+  lines.push("-- unlock history: requested/approved, last 20 --");
+  lines.push(
+    ...padColumns(
+      ["at", "verb", "actor", "request_id", "minutes"],
+      summary.unlockHistory.map((r) => [
+        r.at.toISOString(),
+        r.verb,
+        r.actor,
+        r.requestId,
+        String(r.minutes),
+      ]),
+    ),
+    "",
+  );
+  lines.push(
+    `-- ${summary.totalEvents} events, ${summary.distinctActors} distinct actor(s), ` +
+      `${summary.egressEventCount} egress event(s) in last ${days}d --`,
+  );
+  return lines;
 }
 
 const TIER0_TTY_ERROR = "ERROR: tier-0 rows can only print to a real interactive terminal";
@@ -895,7 +958,18 @@ async function main(): Promise<number> {
     case "audit": {
       const since = arg("--since") ?? "7d";
       const days = Number(since.match(/^(\d+)d$/)?.[1] ?? 7);
-      const rows = await eventsSince(new Date(Date.now() - days * 86_400_000));
+      const sinceDate = new Date(Date.now() - days * 86_400_000);
+      if (process.argv.includes("--summary")) {
+        const summary = await auditSummarySince(sinceDate);
+        for (const line of renderAuditSummary(summary, days)) console.log(line);
+        return 0;
+      }
+      const verbGlob = arg("--verb");
+      const actor = arg("--actor");
+      const rows = await eventsSince(sinceDate, {
+        verbLike: verbGlob === undefined ? undefined : verbLikePattern(verbGlob),
+        actor,
+      });
       for (const r of rows) {
         const p = r.payload ?? {};
         const ids =

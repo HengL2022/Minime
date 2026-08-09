@@ -542,9 +542,122 @@ export async function logEgressOutcome(input: {
   );
 }
 
-export async function eventsSince(since: Date): Promise<any[]> {
+/**
+ * `minime audit`'s raw per-line mode (src/cli.ts). `verbLike` is an already-translated SQL LIKE
+ * pattern (cli.ts turns the owner's `--verb` glob into one, '*' -> '%'); `actor` is an exact
+ * match. Both are optional and parameterized; an omitted filter is never evaluated rather than
+ * bound to some placeholder value, the same boolean-gated-OR shape listTransactions/
+ * listHealthSamples and accessCounts above already use for their own optional filters.
+ */
+export async function eventsSince(
+  since: Date,
+  opts?: { verbLike?: string; actor?: string },
+): Promise<any[]> {
+  const noVerbFilter = opts?.verbLike === undefined;
+  const noActorFilter = opts?.actor === undefined;
   return db()`select id, at, actor, verb, entity_type, entity_id, payload
-             from events where at >= ${since} order by at desc`;
+             from events
+             where at >= ${since}
+               and (${noVerbFilter} or verb like ${opts?.verbLike ?? ""})
+               and (${noActorFilter} or actor = ${opts?.actor ?? ""})
+             order by at desc`;
+}
+
+export interface AuditActorVerbCount {
+  actor: string;
+  verb: string;
+  count: number;
+}
+
+export interface AuditEgressRollupRow {
+  provider: string;
+  routeTier: 1 | 2 | null;
+  count: number;
+}
+
+export interface AuditUnlockHistoryRow {
+  at: Date;
+  verb: string;
+  actor: string;
+  requestId: string;
+  minutes: number;
+}
+
+export interface AuditSummary {
+  since: Date;
+  totalEvents: number;
+  distinctActors: number;
+  egressEventCount: number;
+  actorVerbCounts: AuditActorVerbCount[];
+  egressRollup: AuditEgressRollupRow[];
+  unlockHistory: AuditUnlockHistoryRow[];
+}
+
+/**
+ * `minime audit --summary`'s three read-only rollups over `events` (I8: SELECT only, nothing
+ * written). Every field returned here is either a bounded count, an actor/verb (audit metadata,
+ * not row content), or one of the fixed, closed-vocabulary payload keys audit-payload.ts's own
+ * builders allow — provider/route_tier from llmEgress, request_id/minutes from tier2Unlock —
+ * never a free-text payload value, so nothing tier-0 can reach an agent transitively through this
+ * path (I3).
+ *
+ * The egress rollup filters to the two *intent* verbs (egress:embed / egress:classify) rather
+ * than a literal `verb like 'egress:%'`, which would also sweep in their paired `:outcome`
+ * events — those carry only {intent_event_id, status}, no provider/route_tier, and would
+ * otherwise show up as a confusing provider=null group. totalEvents/distinctActors/
+ * egressEventCount are derived in memory from the first two result sets rather than three more
+ * round trips, keeping this at exactly the three aggregate queries the design calls for.
+ */
+export async function auditSummarySince(since: Date): Promise<AuditSummary> {
+  const actorVerbRows = await db()`
+    select actor, verb, count(*)::int as n
+    from events
+    where at >= ${since}
+    group by 1, 2
+    order by n desc, actor asc, verb asc`;
+  const actorVerbCounts: AuditActorVerbCount[] = actorVerbRows.map((row) => ({
+    actor: String(row.actor),
+    verb: String(row.verb),
+    count: Number(row.n),
+  }));
+
+  const egressRows = await db()`
+    select payload ->> 'provider' as provider, payload ->> 'route_tier' as route_tier,
+           count(*)::int as n
+    from events
+    where at >= ${since} and verb in ('egress:embed', 'egress:classify')
+    group by 1, 2
+    order by n desc, provider asc`;
+  const egressRollup: AuditEgressRollupRow[] = egressRows.map((row) => ({
+    provider: String(row.provider),
+    routeTier: row.route_tier === null ? null : (Number(row.route_tier) as 1 | 2),
+    count: Number(row.n),
+  }));
+
+  const unlockRows = await db()`
+    select at, verb, actor, payload ->> 'request_id' as request_id,
+           (payload ->> 'minutes')::int as minutes
+    from events
+    where at >= ${since} and verb in ('unlock:tier2:requested', 'unlock:tier2:approved')
+    order by at desc
+    limit 20`;
+  const unlockHistory: AuditUnlockHistoryRow[] = unlockRows.map((row) => ({
+    at: new Date(row.at),
+    verb: String(row.verb),
+    actor: String(row.actor),
+    requestId: String(row.request_id),
+    minutes: Number(row.minutes),
+  }));
+
+  return {
+    since,
+    totalEvents: actorVerbCounts.reduce((sum, row) => sum + row.count, 0),
+    distinctActors: new Set(actorVerbCounts.map((row) => row.actor)).size,
+    egressEventCount: egressRollup.reduce((sum, row) => sum + row.count, 0),
+    actorVerbCounts,
+    egressRollup,
+    unlockHistory,
+  };
 }
 
 // Latest `at` for one verb, or across every verb when omitted. The maintenance scheduler (W3-5)
