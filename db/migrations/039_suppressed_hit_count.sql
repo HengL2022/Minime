@@ -58,7 +58,7 @@
 -- timeline_locked_count's own precedent: engineering sessions read through the SELECT-only DSN
 -- directly (CLAUDE.md) and never run repo.ts's compiled search path, so there is no caller on
 -- that connection that could ever need it.
-create function suppressed_candidate_count(q text, q_vec vector(768), k int, types text[] default null)
+create function suppressed_candidate_count(q text, q_vec vector(768), k int, types text[] default null, parent_ids uuid[] default null)
 returns integer
 language plpgsql
 security definer
@@ -79,6 +79,7 @@ begin
     where c.tier >= 1
       and c.tsv @@ tsq.query
       and (types is null or c.parent_type = any(types))
+      and (parent_ids is null or c.parent_id = any(parent_ids))
     order by ts_rank_cd(c.tsv, tsq.query) desc
     limit cap
   ),
@@ -87,6 +88,7 @@ begin
     from chunks c
     where c.tier >= 1 and c.embedding is not null and q_vec is not null
       and (types is null or c.parent_type = any(types))
+      and (parent_ids is null or c.parent_id = any(parent_ids))
     order by c.embedding <=> q_vec
     limit cap
   ),
@@ -142,5 +144,5 @@ begin
 end;
 $$;
 
-revoke execute on function suppressed_candidate_count(text, vector, int, text[]) from public;
-grant execute on function suppressed_candidate_count(text, vector, int, text[]) to minime_app;
+revoke execute on function suppressed_candidate_count(text, vector, int, text[], uuid[]) from public;
+grant execute on function suppressed_candidate_count(text, vector, int, text[], uuid[]) to minime_app;

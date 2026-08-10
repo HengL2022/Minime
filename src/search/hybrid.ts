@@ -365,9 +365,10 @@ async function runHybridSearch(opts: Parameters<typeof hybridSearch>[0]): Promis
 // (review finding, 2026-08-09) so a type-scoped locked search's count only reflects the types the
 // caller actually asked for — the same types predicate ftsCandidates/vectorCandidates apply to
 // the real hits above (opts.types is used at vectorCandidates/ftsCandidates inside
-// runHybridSearch). from/to stay unmirrored (DECISIONS.md): unlike types, no date predicate
-// exists in ftsCandidates'/vectorCandidates' own candidate SQL for suppressed_candidate_count to
-// mirror in the first place.
+// runHybridSearch) — and likewise threads opts.scopeParentIds (review finding, 2026-08-10), the
+// candidates' other scope restriction. from/to stay unmirrored (DECISIONS.md): unlike types and
+// parent-id scope, no date predicate exists in ftsCandidates'/vectorCandidates' own candidate SQL
+// for suppressed_candidate_count to mirror in the first place.
 export async function hybridSearchDetailed(
   opts: Parameters<typeof hybridSearch>[0],
 ): Promise<{ hits: Hit[]; suppressedTier2Count: number }> {
@@ -384,6 +385,11 @@ export async function hybridSearchDetailed(
   // on both the hits path and the count path.
   const types = opts.types?.length ? opts.types : null;
 
+  // Same [] -> null normalization for the parent-id scope (review finding, 2026-08-10): a
+  // scoped search's locked count must be computed over the same restricted candidate pool as
+  // its real hits, or the count silently overstates what an unlock would add.
+  const scope = opts.scopeParentIds?.length ? opts.scopeParentIds : null;
+
   // queryVec is runHybridSearch's own embedQuery(opts.query) result, reused as-is rather than
   // re-embedding: null means embedding was unavailable, same fts-only degrade semantics
   // suppressedCandidateCount already applies for the hits path above.
@@ -392,6 +398,7 @@ export async function hybridSearchDetailed(
     queryVec,
     config.rerankTopIn,
     types,
+    scope,
     opts.actor,
   );
   return { hits, suppressedTier2Count };

@@ -966,6 +966,7 @@ export async function suppressedCandidateCount(
   embedding: number[] | null,
   k: number,
   types: string[] | null,
+  parentIds: string[] | null = null,
   actor?: AccessActor,
 ): Promise<number> {
   // app_allowed_tier() inside the definer function already makes this structurally 0 once
@@ -977,7 +978,7 @@ export async function suppressedCandidateCount(
   const vec = embedding ? JSON.stringify(embedding) : null;
   const cap = Math.max(0, Math.min(Math.trunc(k), SUPPRESSED_CANDIDATE_CAP));
   const [row] = await db()`
-    select suppressed_candidate_count(${orQuery}, ${vec}::vector, ${cap}, ${types}::text[]) as n`;
+    select suppressed_candidate_count(${orQuery}, ${vec}::vector, ${cap}, ${types}::text[], ${parentIds}::uuid[]) as n`;
   return Number(row?.n ?? 0);
 }
 

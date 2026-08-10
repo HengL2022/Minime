@@ -212,6 +212,41 @@ describe("minime_search: tier-2 locked match count", () => {
       "1 matching result is tier-2 locked — an owner-approved unlock (minime_unlock) would include it",
     ]);
   });
+
+  // Parent-id scope must narrow the locked count exactly like it narrows the real candidate
+  // pool (review finding, 2026-08-10): a scoped search whose scope excludes the tier-2 match
+  // reports 0 locked; the same query scoped TO that match reports 1. Drives
+  // hybridSearchDetailed directly since scopeParentIds is not exposed on the MCP tool.
+  test("parent-id-scoped locked count mirrors the candidates' scope restriction", async () => {
+    const { hybridSearchDetailed } = await import("../src/search/hybrid");
+    const sentinel = "ZQXSUPHITPARENTSCOPED";
+    const inScope = await fictionalJournal(
+      `${sentinel} Fictional axolotl tank chemistry notes, journal-only fixture.`,
+    );
+    const outOfScope = await fictionalJournal(
+      `${sentinel} Fictional axolotl feeding schedule, second journal fixture.`,
+    );
+
+    const actor = "agent:suppressed-hits-parent-scoped";
+    const scopedToOther = await hybridSearchDetailed({
+      query: sentinel,
+      limit: 20,
+      actor,
+      scopeParentIds: [outOfScope.id],
+    });
+    expect(scopedToOther.suppressedTier2Count).toBe(1);
+
+    const scopedToBoth = await hybridSearchDetailed({
+      query: sentinel,
+      limit: 20,
+      actor,
+      scopeParentIds: [inScope.id, outOfScope.id],
+    });
+    expect(scopedToBoth.suppressedTier2Count).toBe(2);
+
+    const unscoped = await hybridSearchDetailed({ query: sentinel, limit: 20, actor });
+    expect(unscoped.suppressedTier2Count).toBe(2);
+  });
 });
 
 describe("suppressed_candidate_count() under real RLS (restricted minime_app-shaped role)", () => {
@@ -264,9 +299,9 @@ describe("suppressed_candidate_count() under real RLS (restricted minime_app-sha
   test("suppressed_candidate_count() is minime_app-only, security definer, and stable", async () => {
     const [privileges] = await testSql`
       select
-        has_function_privilege('public', 'public.suppressed_candidate_count(text,vector,int,text[])', 'EXECUTE') as public_execute,
-        has_function_privilege('minime_engineer_ro', 'public.suppressed_candidate_count(text,vector,int,text[])', 'EXECUTE') as engineer_execute,
-        has_function_privilege(${appRole.roleName}, 'public.suppressed_candidate_count(text,vector,int,text[])', 'EXECUTE') as app_execute`;
+        has_function_privilege('public', 'public.suppressed_candidate_count(text,vector,int,text[],uuid[])', 'EXECUTE') as public_execute,
+        has_function_privilege('minime_engineer_ro', 'public.suppressed_candidate_count(text,vector,int,text[],uuid[])', 'EXECUTE') as engineer_execute,
+        has_function_privilege(${appRole.roleName}, 'public.suppressed_candidate_count(text,vector,int,text[],uuid[])', 'EXECUTE') as app_execute`;
     expect(privileges).toEqual({
       public_execute: false,
       engineer_execute: false,
@@ -274,7 +309,7 @@ describe("suppressed_candidate_count() under real RLS (restricted minime_app-sha
     });
     const [posture] = await testSql`
       select prosecdef as security_definer, provolatile
-      from pg_proc where oid = 'public.suppressed_candidate_count(text,vector,int,text[])'::regprocedure`;
+      from pg_proc where oid = 'public.suppressed_candidate_count(text,vector,int,text[],uuid[])'::regprocedure`;
     expect(posture).toEqual({ security_definer: true, provolatile: "s" });
   });
 });
