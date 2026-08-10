@@ -441,6 +441,111 @@ export async function pendingTier2UnlockRequests(): Promise<PendingTier2UnlockRe
   }));
 }
 
+export interface RevokedTier2Unlock {
+  id: string;
+  requestedBy: string;
+  minutes: number;
+}
+
+/**
+ * Fail-closed revoke: set expires_at to right now on every currently-active approval (or just
+ * `id`, when given). 023's app_allowed_tier() re-checks `expires_at > statement_timestamp()` on
+ * every single read rather than caching anything per transaction/connection, so this closes an
+ * active unlock immediately, including a read already mid-transaction elsewhere (proven in
+ * test/unlock-lifecycle.test.ts the same way 023's own tests proved natural expiry: two
+ * statements in one held-open transaction, with this function called on a separate connection in
+ * the gap between them). A still-pending, never-approved request is left untouched — there is
+ * nothing to revoke; it simply falls out of the approval window on its own. Logs one
+ * 'unlock:tier2:revoked' event per row actually revoked, same payload shape as
+ * 'unlock:tier2:approved' (request_id, minutes) — session_id is NEVER selected or logged
+ * (DECISIONS.md 2026-08-06).
+ */
+export async function revokeTier2Unlock(
+  id?: string,
+  revokedBy = "owner:cli",
+): Promise<RevokedTier2Unlock[]> {
+  const revokeAll = id === undefined;
+  // Same typed-placeholder trick as listHealthSamples' TIER0_CLI_DUMMY_DATE just above: the
+  // boolean gate means this is never actually compared against when revokeAll is true, but the
+  // parameter still has to bind as SOME well-formed uuid.
+  const idBound = id ?? "00000000-0000-0000-0000-000000000000";
+  const rows = await db()`
+    update session_unlocks
+    set expires_at = clock_timestamp()
+    where scope = 'tier2'
+      and approved_at is not null
+      and expires_at > clock_timestamp()
+      and (${revokeAll} or id = ${idBound}::uuid)
+    returning id::text as id, requested_by, requested_minutes::int as minutes`;
+  const revoked: RevokedTier2Unlock[] = rows.map((row) => ({
+    id: String(row.id),
+    requestedBy: String(row.requested_by),
+    minutes: Number(row.minutes),
+  }));
+  for (const row of revoked) {
+    await logEvent({
+      actor: revokedBy,
+      verb: "unlock:tier2:revoked",
+      entityType: "session_unlock",
+      entityId: row.id,
+      payload: auditPayload.tier2Unlock({ requestId: row.id, minutes: row.minutes }),
+    });
+  }
+  return revoked;
+}
+
+interface ActiveTier2Unlock {
+  id: string;
+  requestedBy: string;
+  requestedMinutes: number;
+  expiresAt: Date;
+  remainingMinutes: number;
+}
+
+async function activeTier2Unlocks(): Promise<ActiveTier2Unlock[]> {
+  const rows = await db()`
+    select id::text as id, requested_by, requested_minutes::int as requested_minutes, expires_at
+    from session_unlocks
+    where scope = 'tier2' and approved_at is not null and expires_at > clock_timestamp()
+    order by expires_at asc`;
+  const readAt = Date.now();
+  return rows.map((row) => {
+    const expiresAt = new Date(row.expires_at);
+    return {
+      id: String(row.id),
+      requestedBy: String(row.requested_by),
+      requestedMinutes: Number(row.requested_minutes),
+      expiresAt,
+      // Ceil, floor at 0: a countdown showing "0min" while a few seconds of a real grant remain
+      // would be misleading, and this is a display convenience (computed from the app server's
+      // own clock against the DB's expires_at) — the actual gate is app_allowed_tier()'s own
+      // statement-time check, never this number.
+      remainingMinutes: Math.max(0, Math.ceil((expiresAt.getTime() - readAt) / 60_000)),
+    };
+  });
+}
+
+export type PendingOrActiveTier2Unlock =
+  | ({ status: "pending" } & PendingTier2UnlockRequest)
+  | ({ status: "active" } & ActiveTier2Unlock);
+
+/**
+ * unlock:status's data source: every pending request still inside its approval window (exactly
+ * pendingTier2UnlockRequests' own predicate, reused) plus every approved unlock that has not yet
+ * expired, pending requests newest-first then active approvals soonest-to-expire-first. A
+ * naturally expired OR revoked approval — revoke is simply setting expires_at to now, see
+ * revokeTier2Unlock above — falls out of both buckets, same as an out-of-window pending request.
+ * session_id is NEVER selected (DECISIONS.md 2026-08-06).
+ */
+export async function pendingAndActiveUnlocks(): Promise<PendingOrActiveTier2Unlock[]> {
+  const pending = await pendingTier2UnlockRequests();
+  const active = await activeTier2Unlocks();
+  return [
+    ...pending.map((request) => ({ status: "pending" as const, ...request })),
+    ...active.map((unlock) => ({ status: "active" as const, ...unlock })),
+  ];
+}
+
 export async function logEvent(e: {
   actor: string;
   verb: string;
@@ -638,7 +743,8 @@ export async function auditSummarySince(since: Date): Promise<AuditSummary> {
     select at, verb, actor, payload ->> 'request_id' as request_id,
            (payload ->> 'minutes')::int as minutes
     from events
-    where at >= ${since} and verb in ('unlock:tier2:requested', 'unlock:tier2:approved')
+    where at >= ${since}
+      and verb in ('unlock:tier2:requested', 'unlock:tier2:approved', 'unlock:tier2:revoked')
     order by at desc
     limit 20`;
   const unlockHistory: AuditUnlockHistoryRow[] = unlockRows.map((row) => ({

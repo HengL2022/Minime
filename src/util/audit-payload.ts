@@ -916,6 +916,7 @@ function expectedPayloadKind(verb: string, payload: AuditPayload): AuditPayloadK
     "push:brief": "pushBrief",
     "unlock:tier2:approved": "tier2Unlock",
     "unlock:tier2:requested": "tier2Unlock",
+    "unlock:tier2:revoked": "tier2Unlock",
   };
   const fixedKind = fixedKinds[verb];
   if (fixedKind) return fixedKind;

@@ -76,12 +76,17 @@ Tell your agent "journal: …" (→ `minime_journal`, with optional mood/energy 
 just write journal-ish text into the inbox. Journal entries are **tier 2**: agents can
 write them anytime but can only *read* them during an unlock you approve explicitly. After
 you agree, `minime_unlock` creates a pending request and gives the agent a request ID and local
-command. Run `bun run src/cli.ts unlock:approve <request-id>` in your own terminal, or
+command. If a resident `serve` is running, its console also prints a `tier-2 unlock requested
+(Nmin): ...` line within about 5 seconds, so you don't have to go looking for the request.
+Run `bun run src/cli.ts unlock:approve <request-id>` in your own terminal, or
 `unlock:approve --latest` to approve the one pending request without copying an id — it refuses
 and lists every pending request instead of guessing if more than one is waiting. Approval must
 happen within the approval window (`TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES`, default 10 minutes,
 configurable 1–60), is time-boxed, loudly audited, bound to that MCP connection, and is lost
-when it reconnects.
+when it reconnects. `bun run src/cli.ts unlock:status` lists every pending request and active
+approval with its live remaining minutes; `unlock:revoke <request-id>` (or `--all`) ends an
+active approval immediately — the next tier-2 read in that connection is denied, even
+mid-conversation.
 
 ### 4. People and interactions
 
@@ -259,8 +264,8 @@ recorded there, on top of the log, never instead of it.
 - **Audit**: `bun run src/cli.ts audit --since 7d` shows every read, write, and byte of
   egress — which agent, when, which verb, and how many rows a call returned (never the row
   IDs or their content). Add `--summary` for one screen of per-actor/verb counts, an egress
-  rollup by provider and route tier, and recent tier-2 unlock request/approval history; add
-  `--verb <pattern>` (glob, `*` → SQL `LIKE '%'`, e.g. `egress:*`) or `--actor <actor>` to
+  rollup by provider and route tier, and recent tier-2 unlock request/approval/revocation
+  history; add `--verb <pattern>` (glob, `*` → SQL `LIKE '%'`, e.g. `egress:*`) or `--actor <actor>` to
   filter the raw per-line listing (summary mode ignores both). The log is append-only;
   nothing can be quietly erased.
 

@@ -18,9 +18,11 @@ import {
   listTransactions,
   logEvent,
   openReviewItems,
+  pendingAndActiveUnlocks,
   pendingEntityPromotions,
   pendingTier2UnlockRequests,
   restoreEntityTier,
+  revokeTier2Unlock,
 } from "./db/repo";
 import { importCalendar } from "./importers/calendar";
 import { importEmailMeta } from "./importers/email-meta";
@@ -68,6 +70,9 @@ const USAGE = `minime <command>
   backup:pre-update                take the fail-closed pre-update db snapshot
   unlock:approve <request-id>      approve one pending tier-2 request for its MCP connection
   unlock:approve --latest          approve the single pending request (refuses if more than one)
+  unlock:status                    list pending tier-2 requests and active approvals with remaining minutes
+  unlock:revoke <request-id>       end one active tier-2 approval immediately
+  unlock:revoke --all              end every currently active tier-2 approval immediately
   entity:restore-tier --list       list pending entity_promotion review items, with names
   entity:restore-tier <person|org> <id>
                                     demote one person/org identity from tier 2 back to tier 1
@@ -414,6 +419,93 @@ async function main(): Promise<number> {
       }
       throw error;
     }
+  }
+  // Unlock lifecycle continuation (W4-12): status/revoke, owner-terminal-only like unlock:approve
+  // just above and placed ahead of the same ollamaPreflight gate below, so checking or closing a
+  // tier-2 unlock works even when Ollama is down. Kept strictly before the "tx list" handler's own
+  // start marker: test/tier0-cli-read.test.ts's source-slice check (7) scans from that marker to
+  // the ollamaPreflight line and asserts no console.log call appears there outside
+  // renderTier0Lines — these two commands print freely (request id/minutes/timestamps only, never
+  // tier-0 content), so they must stay upstream of that marker, not downstream of it.
+  if (cmd === "unlock:status") {
+    if (process.argv.length !== 3) {
+      console.error("ERROR: unlock:status takes no arguments");
+      console.error("FIX: run `bun run src/cli.ts unlock:status` on its own");
+      return 2;
+    }
+    try {
+      await assertSchemaCurrent();
+    } catch (error) {
+      if (error instanceof Error && error.message === "schema_not_current") {
+        console.error("ERROR: schema is not current");
+        console.error("FIX: run make migrate, or rerun make update");
+        return 50;
+      }
+      throw error;
+    }
+    const unlocks = await withAdminDbTransaction(() => pendingAndActiveUnlocks());
+    if (unlocks.length === 0) {
+      console.log("no pending or active tier-2 unlocks");
+      return 0;
+    }
+    for (const u of unlocks) {
+      if (u.status === "active") {
+        console.log(
+          `${u.id}  active   requested_by=${u.requestedBy}  ${u.remainingMinutes}min remaining ` +
+            `(of ${u.requestedMinutes}min, expires ${u.expiresAt.toISOString()})`,
+        );
+      } else {
+        const ageMinutes = Math.max(0, Math.floor((Date.now() - u.requestedAt.getTime()) / 60_000));
+        console.log(
+          `${u.id}  pending  requested_by=${u.requestedBy}  ${u.requestedMinutes}min requested, ` +
+            `${ageMinutes}min ago`,
+        );
+      }
+    }
+    console.log(`-- ${unlocks.length} pending/active tier-2 unlock(s)`);
+    return 0;
+  }
+  if (cmd === "unlock:revoke") {
+    const requestArg = process.argv[3];
+    const isAll = requestArg === "--all";
+    const isUuid =
+      typeof requestArg === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestArg);
+    if (!requestArg || process.argv.length !== 4 || !(isUuid || isAll)) {
+      console.error("ERROR: unlock:revoke requires exactly one <request-id>, or --all");
+      console.error("FIX: run `bun run src/cli.ts unlock:status` to find an active id");
+      return 2;
+    }
+    try {
+      await assertSchemaCurrent();
+    } catch (error) {
+      if (error instanceof Error && error.message === "schema_not_current") {
+        console.error("ERROR: schema is not current");
+        console.error("FIX: run make migrate, or rerun make update");
+        return 50;
+      }
+      throw error;
+    }
+    const revoked = await withAdminDbTransaction(() =>
+      revokeTier2Unlock(isAll ? undefined : requestArg),
+    );
+    if (revoked.length === 0) {
+      if (isAll) {
+        console.log("no active tier-2 unlocks to revoke");
+        return 0;
+      }
+      console.error("ERROR: that request has no active tier-2 unlock to revoke");
+      console.error(
+        "FIX: run `bun run src/cli.ts unlock:status` to check what is currently active",
+      );
+      return 1;
+    }
+    for (const r of revoked) {
+      console.log(
+        `revoked tier-2 request ${r.id} (${r.minutes}min, requested by ${r.requestedBy})`,
+      );
+    }
+    return 0;
   }
   // Owner-terminal-only demotion path (W4-2): never reachable through MCP — demotion approval
   // lives here, not in agent-facing tool surface (DECISIONS.md 2026-08-09). Placed ahead of the

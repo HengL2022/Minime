@@ -126,6 +126,7 @@ describe("single maintenance owner (W3-5)", () => {
       config.dreamCron,
       config.backupCron,
       config.resticCheckCron,
+      "*/5 * * * * *",
     ]);
 
     const b = fakeCronFactory();
@@ -145,6 +146,7 @@ describe("single maintenance owner (W3-5)", () => {
       config.dreamCron,
       config.backupCron,
       config.resticCheckCron,
+      "*/5 * * * * *",
     ]);
   });
 
@@ -159,6 +161,7 @@ describe("single maintenance owner (W3-5)", () => {
       config.dreamCron,
       config.backupCron,
       config.resticCheckCron,
+      "*/5 * * * * *",
     ]);
     await scheduleB.close();
   });
@@ -186,7 +189,7 @@ describe("single maintenance owner (W3-5)", () => {
       config.backupCron,
       config.resticCheckCron,
     ]);
-    expect(registrations.length).toBe(4); // + one dream catch-up run
+    expect(registrations.length).toBe(5); // + one dream catch-up run, + the always-on unlock watch
     const catchUp = registrations[3]!;
     expect(catchUp.pattern).not.toBe(config.dreamCron);
 
@@ -207,6 +210,7 @@ describe("single maintenance owner (W3-5)", () => {
       config.dreamCron,
       config.backupCron,
       config.resticCheckCron,
+      "*/5 * * * * *",
     ]);
     await schedule.close();
 
@@ -222,6 +226,7 @@ describe("single maintenance owner (W3-5)", () => {
       config.dreamCron,
       config.backupCron,
       config.resticCheckCron,
+      "*/5 * * * * *",
     ]);
     await schedule.close();
 

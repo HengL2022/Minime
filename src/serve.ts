@@ -3,10 +3,12 @@ import { Cron } from "croner";
 import { withAdminDbScope } from "./db/client";
 import {
   type MaintenanceLockHandle,
+  type PendingTier2UnlockRequest,
   insertReviewItem,
   lastEventAt,
   logEvent,
   openReviewItems,
+  pendingTier2UnlockRequests,
   recentEventsByVerb,
   releaseMaintenanceLock,
   stateSnapshot,
@@ -17,6 +19,7 @@ import { briefCounts, buildBriefText, deliverBrief } from "./ops/push";
 import { dbSnapshot, resticCheck } from "./pipeline/backup";
 import { dream } from "./pipeline/dream";
 import { auditPayload } from "./util/audit-payload";
+import { configuredTimeZone } from "./util/clock";
 import { REPO_ROOT, config, parseProviderEnvironment } from "./util/config";
 import { parseLocalPostgresUrl } from "./util/postgres-url";
 
@@ -298,6 +301,78 @@ async function scheduleDreamCatchUp(
   );
 }
 
+// Resident pending-unlock surfacing (W4-12): every ~5s (croner's optional leading seconds
+// field -- see its own README quick-start example), not a minute-resolution pattern, because the
+// default approval window is only 10 minutes and a pending minime_unlock request otherwise sits
+// silent until the owner happens to run `unlock:status` or `audit --summary`.
+const UNLOCK_WATCH_CRON = "*/5 * * * * *";
+
+/**
+ * The resident supervisor's one printed line per newly-seen pending tier-2 request -- request id
+ * and requested minutes only ("print request id + minutes only"); requestedBy (the requesting
+ * actor) never appears here, unlike unlock:status's fuller owner-terminal listing, because this
+ * is ambient background console output rather than something the owner explicitly asked to see in
+ * full. requestedAt is read only to derive the approval window's own close time (HH:MM) -- in the
+ * *configured owner* time zone, deliberately not Date's local getters, which read the daemon
+ * process's own zone and drift on a system-localtime-UTC host (see util/clock.ts's own note on
+ * exactly that failure mode).
+ */
+export function formatPendingUnlockLine(
+  request: PendingTier2UnlockRequest,
+  approvalWindowMinutes: number,
+  timeZone: string = config.tz,
+): string {
+  const windowExpiresAt = new Date(request.requestedAt.getTime() + approvalWindowMinutes * 60_000);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: configuredTimeZone(timeZone),
+    hourCycle: "h23",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).formatToParts(windowExpiresAt);
+  const hour = parts.find((part) => part.type === "hour")?.value ?? "00";
+  const minute = parts.find((part) => part.type === "minute")?.value ?? "00";
+  return (
+    `tier-2 unlock requested (${request.requestedMinutes}min): ` +
+    `bun run src/cli.ts unlock:approve ${request.id} — expires ${hour}:${minute}`
+  );
+}
+
+// Owner DSN only: 023_session_unlock_approval.sql revokes every privilege on session_unlocks from
+// minime_app and minime_engineer_ro, so this must run under withAdminDbScope, same as
+// runDream/dbSnapshot/resticCheck above -- the MCP-reachable child could not read this table even
+// if it tried. Registered unconditionally (unlike backup/restic-check/brief above): the unlock
+// ceremony has no separate enable flag.
+function scheduleUnlockWatch(
+  createCron: MaintenanceCronFactory,
+  crons: MaintenanceCron[],
+  run: (label: string, work: () => Promise<unknown>) => void,
+): void {
+  // Ids already printed this residency, so a still-pending request is announced once, not every
+  // ~5s until it is approved, revoked, or falls out of the approval window. Pruned to exactly the
+  // ids still actually pending on every tick, so this can never grow unbounded over a
+  // long-running residency.
+  const surfaced = new Set<string>();
+  const watch = createCron(UNLOCK_WATCH_CRON, { timezone: config.tz }, () =>
+    run("unlock watch", () =>
+      withAdminDbScope(async () => {
+        const pending = await pendingTier2UnlockRequests();
+        const stillPending = new Set(pending.map((request) => request.id));
+        for (const id of surfaced) {
+          if (!stillPending.has(id)) surfaced.delete(id);
+        }
+        for (const request of pending) {
+          if (surfaced.has(request.id)) continue;
+          surfaced.add(request.id);
+          console.error(
+            `[minime] ${formatPendingUnlockLine(request, config.tier2UnlockApprovalWindowMinutes)}`,
+          );
+        }
+      }),
+    ),
+  );
+  crons.push(watch);
+}
+
 // Persistent-failure detector (W3-7): after each dream run, look at the last 3 dream:summary
 // events (this run plus the two before it). Only when all 3 failed at least one step AND no
 // ops_failure item is already open does this enqueue one -- one bad night never pages the owner,
@@ -402,6 +477,10 @@ async function beginOwnedMaintenance(
   }
 
   await scheduleDreamCatchUp(createCron, crons, runDream);
+
+  // Registered last so it never shifts the index of anything above (dream/backup/restic-check/
+  // brief/catch-up) that test/maintenance-lock.test.ts already pins by position.
+  scheduleUnlockWatch(createCron, crons, run);
 }
 
 /** Trusted maintenance scheduler. The MCP child never receives restic or owner DB credentials. */
