@@ -131,6 +131,25 @@ lexicon already loaded by `allOrgsWithAliases()` — no new SQL.
 TDD: `test/extract-fix-b.test.ts`. Fix A / org-poisoning guards in `test/m7.graph.test.ts`
 are unchanged; two extractAndLink write assertions now expect the 0.7 floor.
 
-**Still open:** LLM segmenter quality (sibling known-issue) and a local watchdog for
-`system:extract` orgs with an unusually high edge count and no human confirmation. Existing
-pre-Fix-B phantom/duplicate rows are not swept.
+**Still open after Fix B:** LLM segmenter quality (sibling known-issue) and a local watchdog
+for `system:extract` orgs with an unusually high edge count and no human confirmation.
+Existing pre-Fix-B phantom/duplicate rows are not swept.
+
+## STATUS — Fix C shipped (2026-08-14)
+
+Periodic audit landed as dream step `3d_high_edge_orgs` (`highEdgeExtractOrgScan`).
+
+- **Candidates:** non-retired `orgs` with `created_by = 'system:extract'` and at least 20
+  attached edges (the observed "Priya" phantom had 42; `detectMistypedEntities` still
+  skips single-token names). Human-confirmed orgs stay out.
+- **Flag-only.** One open `extract_suspect` (`reason: high_edge_extract_org`, `flag_key`,
+  org id/name, `edge_count`, `works_at_people`). No source text, no auto-retype/delete.
+- **Dedup / quiet window.** Open items and any status created in the last 90 days suppress
+  a re-queue (same shape as stale). `retypeOrgToPerson` auto-resolves the open flag.
+- **MCP.** The machine reason is restored after `CONTENT_KEYS` masking; the org name is
+  re-resolved at the caller's tier.
+
+TDD: `test/extract-org-watchdog.test.ts`.
+
+**Still open:** LLM segmenter quality (sibling known-issue). Existing pre-Fix-B
+phantom/duplicate rows are not swept.

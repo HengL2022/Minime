@@ -3964,3 +3964,25 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   RFC822 sniff avoids stealing ordinary captures.
 - **Approved by:** owner request to continue the current-state plan through the
   ordinary backlog (2026-08-14).
+
+## 2026-08-14 — Extract-org high-edge watchdog
+
+- **Context:** `detectMistypedEntities` skips single-token extractor orgs
+  (brand-vs-surname). The observed phantom (`Priya`, 42 edges) was that class.
+  Periodic audit was the remaining Fix C item in
+  `docs/known-issues/extractor-phantom-orgs.md`. This amends the dream-step
+  vocabulary (`DREAM_STEPS` / `dream:summary`) and the `extract_suspect` reason
+  codes the MCP review queue may restore after content masking.
+- **Decision:** Dream step `3d_high_edge_orgs` flags non-retired
+  `created_by='system:extract'` orgs with ≥ 20 attached edges as
+  `extract_suspect` (`reason: high_edge_extract_org`). Payload is org id/name,
+  `edge_count`, and `works_at_people` — no source text. Flag-only: no
+  auto-retype or delete. Open items and any status created in the last 90 days
+  suppress a re-queue. `retypeOrgToPerson` auto-resolves the open flag. No new
+  review kind and no migration.
+- **Why:** Reuses the existing extractor-quality queue and the stale-style
+  quiet window. Floor 20 is below the observed 42-edge case and above a
+  handful of legitimate extract mentions. A new kind would have needed a
+  constraint migration for the same owner action.
+- **Approved by:** owner request to continue the current-state plan through the
+  ordinary backlog (2026-08-14).

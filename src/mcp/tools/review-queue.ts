@@ -174,11 +174,15 @@ async function maskReviewPayload(item: any, actor: string): Promise<any> {
   // tier (edges inherit their source parent's tier): invisible → mask rel + names, keep
   // edge_id/rule_key/verdict/entity_type for post-unlock triage; visible → still re-resolve
   // each endpoint name at the caller's tier. Fail closed on any lookup error.
-  // Fix B flags (no edge_id) carry the same endpoint shape plus a machine-code reason;
-  // restore that code after CONTENT_KEYS masking and re-resolve names the same way.
+  // Fix B / high-edge-org flags (no edge_id) carry the same endpoint shape plus a
+  // machine-code reason; restore that code after CONTENT_KEYS masking and re-resolve names.
   if (item.kind === "extract_suspect") {
     const raw = item.payload ?? {};
-    if (raw.reason === "fuzzy_org_ambiguous" || raw.reason === "low_confidence_edge") {
+    if (
+      raw.reason === "fuzzy_org_ambiguous" ||
+      raw.reason === "low_confidence_edge" ||
+      raw.reason === "high_edge_extract_org"
+    ) {
       payload = { ...payload, reason: raw.reason };
     }
     if (Array.isArray(raw.matches)) {

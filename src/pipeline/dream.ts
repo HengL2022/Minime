@@ -8,6 +8,9 @@ import {
   decisionsNeedingReview,
   goalsNeedingReview,
   goalsWithoutChunks,
+  highEdgeExtractOrgCandidates,
+  highEdgeExtractOrgFlagKey,
+  highEdgeExtractOrgRecentlyFlagged,
   insertReviewItem,
   listMetricDefs,
   logEvent,
@@ -146,6 +149,28 @@ export async function phantomPersonScan(): Promise<number> {
       canonical_name: c.canonical_name,
       reason,
       suggestion: "retype to org, or dismiss if this really is a person",
+    });
+    flagged++;
+  }
+  return flagged;
+}
+
+// -- step 3d: high-edge extract-org watchdog --------------------------------
+//
+// Periodic audit for the class detectMistypedEntities misses: an extractor-minted org
+// (including a single-token name like "Priya") that accreted an unusual number of edges
+// and was never human-confirmed. Flag-only — never auto-retype or delete. Payload is
+// ids + counts + a machine reason; no source text.
+export async function highEdgeExtractOrgScan(): Promise<number> {
+  let flagged = 0;
+  for (const c of await highEdgeExtractOrgCandidates()) {
+    if (await highEdgeExtractOrgRecentlyFlagged(c.id)) continue;
+    await insertReviewItem("extract_suspect", {
+      reason: "high_edge_extract_org",
+      flag_key: highEdgeExtractOrgFlagKey(c.id),
+      org: { type: "org", id: c.id, name: c.canonical_name },
+      edge_count: c.edges,
+      works_at_people: c.works_at_people,
     });
     flagged++;
   }
@@ -326,6 +351,7 @@ export async function dream(): Promise<Record<string, unknown>> {
     const { validateEdges } = await import("./validate-edges");
     return validateEdges();
   });
+  await step("3d_high_edge_orgs", () => highEdgeExtractOrgScan());
   await step("4_stale", () => staleScan());
   await step("5b_recurrence", () => recurrenceBackfill());
   await step("5_rollups", () => rollupMetrics());

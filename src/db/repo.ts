@@ -1475,6 +1475,14 @@ export async function allOrgsWithAliases(): Promise<{ id: string; names: string[
 //      self-referential edges and de-duping any edge that now collides,
 //   3. retires (does NOT delete) the org row and records the supersession pointer on the
 //      person, so the change is auditable and reversible from the backup.
+
+// Shared with dream step 3d (highEdgeExtractOrgScan) and the auto-resolve below.
+export const HIGH_EDGE_EXTRACT_ORG_MIN = 20;
+const HIGH_EDGE_EXTRACT_ORG_SUPPRESSION_DAYS = 90;
+export function highEdgeExtractOrgFlagKey(orgId: string): string {
+  return `high_edge_extract_org:${orgId}`;
+}
+
 export async function retypeOrgToPerson(
   orgId: string,
   opts: { relation?: string | null; reason?: string } = {},
@@ -1620,6 +1628,14 @@ export async function retypeOrgToPerson(
     // 4. retire (keep) the org row — never hard-delete
     await tx`update orgs set retired_at = now(), retired_reason = ${opts.reason ?? "retyped to person"}
              where id = ${orgId}`;
+
+    // Close the high-edge extract-org watchdog if it flagged this row — the org no longer
+    // independently exists, same as mergePersonIntoPerson auto-resolves phantom_person.
+    await tx`
+      update review_queue
+      set status = 'resolved', resolved_at = ${now()}
+      where status = 'open' and kind = 'extract_suspect'
+        and payload ->> 'flag_key' = ${highEdgeExtractOrgFlagKey(orgId)}`;
 
     return { personId, orgId, created, edgesRepointed: edgesRepointed as number };
   });
@@ -5117,6 +5133,42 @@ export async function phantomPersonCandidates(): Promise<
            (p.relation is not null
             or exists (select 1 from interactions i where i.person_id = p.id)) as has_human_signal
     from p` as any;
+}
+
+// High-edge extract-org watchdog (dream step 3d). detectMistypedEntities skips single-token
+// names (brand-vs-surname); the original "Priya" phantom had 42 edges and slipped that screen.
+// Floor 20 is below that observed case and above a handful of legitimate extract mentions.
+export async function highEdgeExtractOrgCandidates(): Promise<
+  { id: string; canonical_name: string; edges: number; works_at_people: number }[]
+> {
+  return db()`
+    select o.id, o.canonical_name, e.edges, e.works_at_people
+    from orgs o
+    cross join lateral (
+      select
+        (select count(*)::int from edges x
+          where x.src_id = o.id or x.dst_id = o.id) as edges,
+        (select count(distinct x.src_id)::int from edges x
+          where x.dst_id = o.id and x.dst_type = 'org'
+            and x.rel = 'works_at' and x.src_type = 'person') as works_at_people
+    ) e
+    where o.created_by = 'system:extract'
+      and o.retired_at is null
+      and e.edges >= ${HIGH_EDGE_EXTRACT_ORG_MIN}` as any;
+}
+
+/** Open item, or any status inside the suppression window — dismissed stays quiet for 90 days
+ * so a real extract-minted workplace is not re-queued every night (staleRecentlyFlagged). */
+export async function highEdgeExtractOrgRecentlyFlagged(orgId: string): Promise<boolean> {
+  const flagKey = highEdgeExtractOrgFlagKey(orgId);
+  const rows = await db()`
+    select 1 from review_queue
+    where kind = 'extract_suspect' and payload ->> 'flag_key' = ${flagKey}
+      and (status = 'open'
+        or created_at >= ${now()}::timestamptz
+             - make_interval(days => ${HIGH_EDGE_EXTRACT_ORG_SUPPRESSION_DAYS}))
+    limit 1`;
+  return rows.length > 0;
 }
 
 // -- W1 extractor re-validation (system-internal; NOT tier-gated — see personById precedent:
