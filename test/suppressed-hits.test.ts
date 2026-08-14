@@ -14,6 +14,7 @@ import { toolByName } from "../src/mcp/tools";
 import { type ToolResult, invokeTool } from "../src/mcp/tools/registry";
 import { indexParent } from "../src/search/index-parent";
 import { resetDb, testSql } from "./helpers";
+import { type TrackedTestSqlPoolHandle, trackTestSqlPool } from "./setup";
 import { type TestAppRoleLease, dropTestAppRole, mintTestAppRole } from "./support/app-role";
 import { requestAndApproveTier2, sessionToolCtx } from "./support/unlock";
 
@@ -252,6 +253,7 @@ describe("minime_search: tier-2 locked match count", () => {
 describe("suppressed_candidate_count() under real RLS (restricted minime_app-shaped role)", () => {
   let appRole: TestAppRoleLease;
   let app: ReturnType<typeof postgres>;
+  let appHeld: TrackedTestSqlPoolHandle | undefined;
   const sentinel = "ZQXSUPHITROLE";
 
   beforeAll(async () => {
@@ -261,6 +263,7 @@ describe("suppressed_candidate_count() under real RLS (restricted minime_app-sha
     await resetDb();
     appRole = await mintTestAppRole(process.env.DATABASE_URL!);
     app = postgres(appRole.databaseUrl, { max: 1, onnotice: () => {} });
+    appHeld = trackTestSqlPool(app);
 
     await fictionalNote(
       "test/suppressed-hits-role-note.md",
@@ -272,7 +275,8 @@ describe("suppressed_candidate_count() under real RLS (restricted minime_app-sha
   });
 
   afterAll(async () => {
-    await app?.end({ timeout: 2 });
+    await appHeld?.close();
+    appHeld?.unregister();
     if (appRole) await dropTestAppRole(appRole);
   });
 

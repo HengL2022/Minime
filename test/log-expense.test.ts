@@ -10,6 +10,7 @@ import { toolByName } from "../src/mcp/tools";
 import { invokeTool } from "../src/mcp/tools/registry";
 import { config } from "../src/util/config";
 import { expectSqlReject, resetDb, testSql as sql } from "./helpers";
+import { type TrackedTestSqlPoolHandle, trackTestSqlPool } from "./setup";
 import { type TestAppRoleLease, dropTestAppRole, mintTestAppRole } from "./support/app-role";
 import { sessionToolCtx } from "./support/unlock";
 
@@ -261,15 +262,18 @@ describe("CSV bank import flags a collision with an agent-logged expense (W4-6 d
 describe("boundary: minime_app cannot SELECT transactions -- table-scoped, not column-scoped (021, unchanged by 040)", () => {
   let appRole: TestAppRoleLease;
   let app: ReturnType<typeof postgres>;
+  let appHeld: TrackedTestSqlPoolHandle | undefined;
 
   beforeAll(async () => {
     await resetDb();
     appRole = await mintTestAppRole(config.databaseUrl);
     app = postgres(appRole.databaseUrl, { max: 1, onnotice: () => {} });
+    appHeld = trackTestSqlPool(app);
   });
 
   afterAll(async () => {
-    await app?.end({ timeout: 5 });
+    await appHeld?.close();
+    appHeld?.unregister();
     await dropTestAppRole(appRole);
   });
 

@@ -59,6 +59,35 @@ export function registerTestDatabaseCloser(closer: TestDatabaseCloser): () => vo
   return testDatabaseCloserRegistry.register(closer);
 }
 
+export type TrackedTestSqlPool = {
+  end: (options?: { timeout?: number }) => Promise<void>;
+};
+
+// File afterAll can run after or concurrent with this preload closer. minime is not
+// superuser, so leftover minime_test_app_* / engineer_ro clients block DROP DATABASE
+// for the ordinary 2s budget and then fail closed. Register those pools here so drain
+// closes them before dispose, independent of file hook order.
+export type TrackedTestSqlPoolHandle = {
+  close: () => Promise<void>;
+  unregister: () => void;
+};
+
+export function trackTestSqlPool(pool: TrackedTestSqlPool): TrackedTestSqlPoolHandle {
+  let closePromise: Promise<void> | undefined;
+  const close = (): Promise<void> => {
+    if (!closePromise) {
+      const held = pool;
+      closePromise = Promise.resolve()
+        .then(() => held.end({ timeout: 5 }))
+        .catch(() => {
+          throw fixedCleanupError();
+        });
+    }
+    return closePromise;
+  };
+  return { close, unregister: registerTestDatabaseCloser(close) };
+}
+
 const DEFAULT_DATABASE_URL = "postgres://minime:minime@localhost:5432/minime";
 const sourceDatabaseUrl = process.env.DATABASE_URL ?? DEFAULT_DATABASE_URL;
 // Verification can run inside install.sh after it has exported the selected live lifecycle and

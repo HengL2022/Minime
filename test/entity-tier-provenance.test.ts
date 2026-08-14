@@ -14,10 +14,12 @@ import {
 import { indexParent } from "../src/search/index-parent";
 import { config } from "../src/util/config";
 import { expectSqlReject, resetDb, testSql } from "./helpers";
+import { type TrackedTestSqlPoolHandle, trackTestSqlPool } from "./setup";
 import { dropTestAppRole, mintTestAppRole } from "./support/app-role";
 
 let app: ReturnType<typeof postgres>;
 let appRole: Awaited<ReturnType<typeof mintTestAppRole>>;
+let appHeld: TrackedTestSqlPoolHandle | undefined;
 
 async function indexAsLockedApp(parentId: string, text: string, tier: 1 | 2): Promise<void> {
   const source = `
@@ -172,10 +174,12 @@ beforeAll(async () => {
   appRole = await mintTestAppRole(process.env.DATABASE_URL!);
   await testSql.unsafe(`grant minime_app to "${appRole.roleName}"`);
   app = postgres(appRole.databaseUrl, { max: 2, onnotice: () => {} });
+  appHeld = trackTestSqlPool(app);
 });
 
 afterAll(async () => {
-  await app?.end({ timeout: 2 });
+  await appHeld?.close();
+  appHeld?.unregister();
   if (appRole) await dropTestAppRole(appRole);
 });
 

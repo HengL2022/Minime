@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import postgres from "postgres";
 import { ensureRuntimeDsn } from "../scripts/eval-search-worker";
 import { expectSqlReject, resetDb, testSql } from "./helpers";
+import { type TrackedTestSqlPoolHandle, trackTestSqlPool } from "./setup";
 import { dropTestAppRole, mintTestAppRole, resolveTestAppPassword } from "./support/app-role";
 
 describe("stable runtime app credential", () => {
@@ -119,15 +120,18 @@ describe("eval worker runtime boundary", () => {
 
 let app: ReturnType<typeof postgres>;
 let appRole: Awaited<ReturnType<typeof mintTestAppRole>>;
+let appHeld: TrackedTestSqlPoolHandle | undefined;
 
 beforeAll(async () => {
   await resetDb();
   appRole = await mintTestAppRole(process.env.DATABASE_URL!);
   app = postgres(appRole.databaseUrl, { max: 1, onnotice: () => {} });
+  appHeld = trackTestSqlPool(app);
 });
 
 afterAll(async () => {
-  await app?.end({ timeout: 2 });
+  await appHeld?.close();
+  appHeld?.unregister();
   if (appRole) await dropTestAppRole(appRole);
 });
 
