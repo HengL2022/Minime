@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { ALL_TOOLS } from "../src/mcp/tools";
 
 const repoRoot = resolve(import.meta.dir, "..");
 const packageJson = JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf8")) as {
@@ -118,6 +119,18 @@ describe("authoritative verification contract", () => {
     expect((installWorkflow.match(/bun-version-file: \.bun-version/g) ?? []).length).toBe(3);
     expect(installWorkflow).toContain("MINIME_PG_PORT=55432");
     expect(installWorkflow).toContain("MINIME_PG_PORT=55433");
+  });
+
+  test("owner and agent docs list every registered MCP tool", () => {
+    const resolver = readFileSync(resolve(repoRoot, "agents/skills/RESOLVER.md"), "utf8");
+    const names = ALL_TOOLS.map((t) => t.name);
+    expect(names).toHaveLength(22);
+    for (const document of [readme, agents, resolver]) {
+      expect(document).not.toMatch(/\b14 (tools|functions)\b/);
+      for (const name of names) {
+        expect(document).toContain(name);
+      }
+    }
   });
 
   test("docs identify verify-offline as fast development gate and verify as release gate", () => {

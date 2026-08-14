@@ -170,12 +170,15 @@ ratchet, evidence-hash hierarchy, or approval receipt is needed.
 
 ### 4. Release
 
-- Align owner and agent documentation with actual behavior and remove stale active-contract claims.
-- Run `make verify`, the restore drill, and the outgoing privacy scan once on the release candidate.
-- Fix concrete failures, then prepare the release handoff.
-
-Pushing remains the owner's explicit action or authorization. Do not create another release train
-unless the owner asks for one.
+- **Delivered 2026-08-14:** owner and agent documentation matches the 22-tool surface
+  (`README.md`, `AGENTS.md`, `agents/skills/RESOLVER.md`). Stale "14 functions" / "14 tools"
+  claims are gone. A contract test pins every registered tool name in those three files.
+  `make eval-search` held every committed mock floor. Lint, typecheck, typecheck-ops, and
+  `check-subsystems` pass.
+- Remaining owner-only gates: unsandboxed `make verify` (this agent sandbox blocks fixture
+  `git init` hooks), a real-snapshot `make restore-drill`, the outgoing privacy scan with the
+  owner's private terms, then the release handoff. Pushing remains the owner's explicit
+  action or authorization. Do not create another release train unless the owner asks for one.
 
 ## Ordinary product backlog (not release blockers)
 
