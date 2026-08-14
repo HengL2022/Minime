@@ -14,13 +14,15 @@ import {
   type ParentMeta,
   type ParentType,
   accessCounts,
+  allowedTier,
   entitiesNamedIn,
   ftsCandidates,
   oneHopNeighbors,
   parentMeta,
+  suppressedCandidateCount,
   vectorCandidates,
 } from "../db/repo";
-import { now } from "../util/clock";
+import { configuredTimeZone, localDateStr, now } from "../util/clock";
 import { config } from "../util/config";
 import { autocut } from "./autocut";
 import { embedQuery } from "./embed";
@@ -37,6 +39,8 @@ export interface Hit {
   updated_at: Date;
   derived: boolean;
   created_by: string;
+  superseded: boolean;
+  superseded_by?: string;
 }
 
 // RRF dampening constant (Cormack et al. 2009 use 60): large enough that the top several
@@ -62,6 +66,10 @@ const ACCESS_BAND = 0.05;
 const ACCESS_CAP = 5;
 const ACCESS_WINDOW_DAYS = 90;
 const DERIVED_PENALTY = 0.85;
+// A row with a live successor (superseded_by set — 028_correction_supersede.sql) stays rankable
+// but half-weighted so the successor wins ties; a pure multiplier on the flagged row only, so
+// ranking is bit-identical for every unflagged row. tune only against the eval harness.
+const SUPERSEDED_PENALTY = 0.5;
 // Compiled notes (dream-distilled summaries, source='dream:notes') are high-signal derived
 // content — boosted like GBrain's compiled-truth layer instead of penalized. ×1.5 starting
 // value. // eval-calibration pending
@@ -156,20 +164,56 @@ export async function hybridSearch(opts: {
   scopeParentIds?: string[] | null;
   /** cut the result list at the rerank-score cliff (only meaningful with the reranker on) */
   autocut?: boolean;
+  /**
+   * Best-effort inclusive date window (YYYY-MM-DD), matched against each candidate parent's
+   * semantic event date (repo.ts PARENTS[type].dateCol, e.g. a journal entry's `at`, not its
+   * `updated_at`) — see the in-body comment near `dated` for exact semantics and limits.
+   */
+  from?: string | null;
+  to?: string | null;
+  /** IANA time zone for from/to day boundaries; defaults to the owner's configured tz. */
+  timeZone?: string | null;
 }): Promise<Hit[]> {
+  return (await runHybridSearch(opts)).hits;
+}
+
+// Core pipeline shared by hybridSearch (above) and hybridSearchDetailed (below). Returns the
+// query embedding alongside the ranked hits purely so hybridSearchDetailed can reuse it for
+// suppressedCandidateCount instead of calling embedQuery a second time for the identical query
+// text (review finding, 2026-08-09: embedQuery has no cache, so a second, independently-issued
+// call duplicated embedding-provider cost, latency, and audited-egress call volume on every
+// locked search — I3's default state — for no ranking or count benefit). hybridSearch itself
+// discards queryVec and keeps its own plain Promise<Hit[]> signature, so every Hit[]-only caller
+// (eval harness, pmb/longmemeval scripts, m3/m5 tests) needs no changes.
+async function runHybridSearch(opts: Parameters<typeof hybridSearch>[0]): Promise<{
+  hits: Hit[];
+  queryVec: number[] | null;
+}> {
   const { query } = opts;
   const types = opts.types?.length ? opts.types : null;
   const limit = opts.limit ?? 10;
   const includeDerived = opts.includeDerived ?? false;
   const scope = opts.scopeParentIds?.length ? opts.scopeParentIds : null;
+  const from = opts.from || null;
+  const to = opts.to || null;
   const nudge = intentNudge(query); // zero-LLM; never overrides explicit filters
+  // An explicit date window already pins the result to a period the caller chose — the
+  // recency multiplier's job (guessing which period the caller probably means) is moot once
+  // they've said so directly, temporal-intent guess or not (spec W3-4).
+  if (from || to) nudge.recencyScale = 1.0;
 
-  // candidates = top-50 cosine ∪ top-50 fts (each already tier-filtered in repo)
+  // candidates = top-50 cosine ∪ top-50 fts (each already tier-filtered in repo). queryVec is
+  // captured (not just inlined into the vectorCandidates call) so hybridSearchDetailed can reuse
+  // this exact embedding below — same combined try/catch as before, so any failure (embedQuery OR
+  // vectorCandidates) still degrades identically to FTS-only.
+  let queryVec: number[] | null = null;
   let vec: Candidate[] = [];
   try {
-    vec = await vectorCandidates(await embedQuery(query), types, scope, opts.actor);
+    queryVec = await embedQuery(query);
+    vec = await vectorCandidates(queryVec, types, scope, opts.actor);
   } catch {
     // embeddings unavailable (e.g. Ollama down): degrade to FTS-only
+    queryVec = null;
   }
   const fts = await ftsCandidates(query, types, scope, opts.actor);
 
@@ -188,7 +232,7 @@ export async function hybridSearch(opts: {
     }
   }
   const candidates = [...byId.values()];
-  if (candidates.length === 0) return [];
+  if (candidates.length === 0) return { hits: [], queryVec };
 
   // parent metadata (recency, derived, title) — batch per type, tier-filtered again
   const idsByType = new Map<ParentType, string[]>();
@@ -204,19 +248,42 @@ export async function hybridSearch(opts: {
     }
   }
 
+  // Best-effort date-range filter (spec W3-4). Narrows the ALREADY-fetched top-50/arm
+  // candidate pool (vec/fts above) to parents whose semantic event date — PARENTS[type].dateCol
+  // via meta.event_at, e.g. a journal entry's `at` rather than its `updated_at` — falls within
+  // [from, to] inclusive, compared as local calendar days in the caller's time zone (same
+  // day-boundary semantics minime_timeline uses). This can only NARROW the candidate pool, never
+  // re-query it: a genuinely in-window row that missed the top-50 cosine/FTS cut is simply
+  // absent from `candidates` in the first place — minime_timeline is the exhaustive date read,
+  // this is a ranking convenience layered on top of ordinary search. Applied after the
+  // parentMeta lookup (need event_at) and before any scoring. A candidate with no meta entry
+  // (invisible at this tier) is dropped here too — it would be dropped later anyway (the `!m`
+  // branch below), just sooner, so it never pays for a graph/access-boost lookup either.
+  const windowTz = from || to ? configuredTimeZone(opts.timeZone) : null;
+  const dated =
+    windowTz === null
+      ? candidates
+      : candidates.filter((c) => {
+          const m = meta.get(`${c.parent_type}:${c.parent_id}`);
+          if (!m) return false;
+          const day = localDateStr(new Date(m.event_at), windowTz);
+          return (!from || day >= from) && (!to || day <= to);
+        });
+  if (dated.length === 0) return { hits: [], queryVec };
+
   // graph boost: parent within 1 edge hop of an entity literally named in the query
   const boosted = await oneHopNeighbors(await entitiesNamedIn(query, opts.actor), opts.actor);
 
   // access boost: parents the owner's agents drilled into recently (audit log, ids only)
   const access = await accessCounts(
-    [...new Set(candidates.map((c) => c.parent_id))],
+    [...new Set(dated.map((c) => c.parent_id))],
     ACCESS_WINDOW_DAYS,
     opts.actor,
   );
 
   // RRF score per candidate, then max-normalize so the blend lives on a [0,1] scale.
   const rrfRaw = new Map<string, number>();
-  for (const c of candidates) {
+  for (const c of dated) {
     const vr = vecRank.get(c.id);
     const fr = ftsRank.get(c.id);
     const r =
@@ -227,7 +294,7 @@ export async function hybridSearch(opts: {
   const normRrf = normalize([...rrfRaw.values()]);
   const t = now().getTime();
 
-  const scored = candidates.flatMap((c) => {
+  const scored = dated.flatMap((c) => {
     const m = meta.get(`${c.parent_type}:${c.parent_id}`);
     if (!m) return []; // parent invisible at current tier (or deleted)
 
@@ -247,7 +314,11 @@ export async function hybridSearch(opts: {
     // both stamps required: an imported/agent-written page can't claim the boost by source alone
     if (COMPILED_SOURCES.has(m.source) && m.created_by === "system:dream") score *= NOTES_BOOST;
     else if (derived && !includeDerived) score *= DERIVED_PENALTY;
-    return [{ c, m, score, derived }];
+    // Retracted rows never reach here — parentMeta already excludes them, so the `!m` meta-miss
+    // branch above drops their chunks first. A superseded row with a successor stays, penalized.
+    const superseded = m.superseded_by !== null;
+    if (superseded) score *= SUPERSEDED_PENALTY;
+    return [{ c, m, score, derived, superseded }];
   });
 
   // dedupe to best chunk per parent
@@ -261,14 +332,74 @@ export async function hybridSearch(opts: {
   const ranked = [...bestByParent.values()].sort((a, b) => b.score - a.score);
   const { ordered, cut } = await rerankStage(query, ranked, limit, opts.autocut ?? false);
 
-  return ordered.slice(0, cut).map((s) => ({
-    type: s.c.parent_type,
-    id: s.c.parent_id,
-    title: s.m.title,
-    snippet: snippet(s.c.text, query),
-    score: Number(s.score.toFixed(4)),
-    updated_at: s.m.updated_at,
-    derived: s.derived,
-    created_by: s.m.created_by,
-  }));
+  return {
+    hits: ordered.slice(0, cut).map((s) => ({
+      type: s.c.parent_type,
+      id: s.c.parent_id,
+      title: s.m.title,
+      snippet: snippet(s.c.text, query),
+      score: Number(s.score.toFixed(4)),
+      updated_at: s.m.updated_at,
+      derived: s.derived,
+      created_by: s.m.created_by,
+      superseded: s.superseded,
+      ...(s.superseded ? { superseded_by: s.m.superseded_by as string } : {}),
+    })),
+    queryVec,
+  };
+}
+
+// W4-4: minime_search's envelope gap wants a bare "N tier-2 matches are locked" count alongside
+// the ordinary ranked hits. A locked chunk can never appear in `hits` above — the same chunk-tier
+// ceiling that hides it from ftsCandidates/vectorCandidates also drops its parent out of
+// parentMeta (both gate on the same tier value; corrections keep a parent's own row tier and its
+// chunks' tier in sync — setPageTier/setPageChunkTiers, repo.ts) — so the two numbers never
+// double-count the same row. Shares runHybridSearch's core pipeline with hybridSearch (rather
+// than calling exported hybridSearch and separately re-deriving a query embedding) so
+// hybridSearch's own signature, and every caller that only wants Hit[] (the eval harness,
+// pmb/longmemeval scripts, m3/m5 tests), needs no changes — while this function pays for exactly
+// one embedQuery call per search, not two (review finding, 2026-08-09: an earlier version called
+// embedQuery here a second time, independently of runHybridSearch's own identical call, doubling
+// embedding-provider cost/latency/audited-egress on every locked search — I3's default state —
+// for no ranking or count benefit). It DOES thread opts.types through to suppressedCandidateCount
+// (review finding, 2026-08-09) so a type-scoped locked search's count only reflects the types the
+// caller actually asked for — the same types predicate ftsCandidates/vectorCandidates apply to
+// the real hits above (opts.types is used at vectorCandidates/ftsCandidates inside
+// runHybridSearch) — and likewise threads opts.scopeParentIds (review finding, 2026-08-10), the
+// candidates' other scope restriction. from/to stay unmirrored (DECISIONS.md): unlike types and
+// parent-id scope, no date predicate exists in ftsCandidates'/vectorCandidates' own candidate SQL
+// for suppressed_candidate_count to mirror in the first place.
+export async function hybridSearchDetailed(
+  opts: Parameters<typeof hybridSearch>[0],
+): Promise<{ hits: Hit[]; suppressedTier2Count: number }> {
+  const { hits, queryVec } = await runHybridSearch(opts);
+
+  // suppressedCandidateCount's own definer function already returns 0 once unlocked (no content
+  // tier exceeds 2), so this gate is purely to skip its extra top-k scan on the common unlocked
+  // path — not load-bearing for correctness.
+  const allowed = await allowedTier(opts.actor);
+  if (allowed >= 2) return { hits, suppressedTier2Count: 0 };
+
+  // Same [] -> null normalization hybridSearch itself applies (above) before handing `types` to
+  // ftsCandidates/vectorCandidates, so an empty-array types filter means "no filter" identically
+  // on both the hits path and the count path.
+  const types = opts.types?.length ? opts.types : null;
+
+  // Same [] -> null normalization for the parent-id scope (review finding, 2026-08-10): a
+  // scoped search's locked count must be computed over the same restricted candidate pool as
+  // its real hits, or the count silently overstates what an unlock would add.
+  const scope = opts.scopeParentIds?.length ? opts.scopeParentIds : null;
+
+  // queryVec is runHybridSearch's own embedQuery(opts.query) result, reused as-is rather than
+  // re-embedding: null means embedding was unavailable, same fts-only degrade semantics
+  // suppressedCandidateCount already applies for the hits path above.
+  const suppressedTier2Count = await suppressedCandidateCount(
+    opts.query,
+    queryVec,
+    config.rerankTopIn,
+    types,
+    scope,
+    opts.actor,
+  );
+  return { hits, suppressedTier2Count };
 }

@@ -233,7 +233,10 @@ describe("repository-stable roots", () => {
       throw error;
     });
     try {
-      expect(await dbSnapshot()).toEqual({ ran: false, detail: "backup failed (dump_cleanup)" });
+      expect(await dbSnapshot()).toEqual({
+        ran: false,
+        detail: "backup failed (dump_cleanup) — see data/logs/ops.log",
+      });
     } finally {
       __setCommandRunnerForTest(undefined);
       __setDumpTempRemoveForTest(undefined);
@@ -275,7 +278,7 @@ describe("repository-stable roots", () => {
       try {
         expect(await dbSnapshot()).toEqual({
           ran: false,
-          detail: "backup failed (dump_cleanup)",
+          detail: "backup failed (dump_cleanup) — see data/logs/ops.log",
         });
       } finally {
         __setCommandRunnerForTest(undefined);
@@ -315,7 +318,13 @@ test("every persistent archive/dump consumer uses the canonical roots", () => {
   expect(backup).toContain("await completed.sync()");
   expect(backup).toContain("await rename(temp, out)");
   expect(backup).toContain('stdout: "ignore"');
-  expect(backup).toContain('stderr: "ignore"');
+  // W3-8: backup.ts's own child stderr is no longer blindly discarded -- it is captured
+  // bounded (never unbounded/raw) and funneled through the fixed allowlist classifier before
+  // any of it can reach the local ops log; console/audit stay exactly as content-free as
+  // before. repair.ts (below) is untouched by W3-8 and still discards stderr outright.
+  expect(backup).toContain('stderr: "pipe"');
+  expect(backup).toContain("STDERR_CAP_BYTES");
+  expect(backup).toContain("classifyStderrLine");
   expect(repair).toContain("DB_DUMP_DIR");
   expect(repair).toContain("resolveRepairDumpDir(opts.dumpDir)");
   expect(repair).toContain('stdout: "ignore"');

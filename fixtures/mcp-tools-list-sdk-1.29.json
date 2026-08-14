@@ -1,7 +1,7 @@
 [
   {
     "name": "minime_search",
-    "description": "Hybrid (semantic + full-text) search over the owner's notes, journal, decisions, tasks and people. Returns scored hits with snippets and source IDs.",
+    "description": "Hybrid (semantic + full-text) search over the owner's notes, journal, decisions, tasks and people. Returns scored hits with snippets and source IDs. Optional from/to (YYYY-MM-DD) narrow hits to a semantic event-date window (a journal entry's own date, a decision's decided-at, etc — not necessarily updated_at). This is best-effort, NOT an exhaustive date read: it only filters the top-ranked semantic/full-text candidates already fetched for the query, so an in-window item that doesn't otherwise match the query well may be missed. For exhaustive date-range coverage regardless of query relevance, use minime_timeline instead. A locked session's `gaps` discloses a bare count of matching tier-2 hits it cannot read — never their titles or ids — so a locked result is distinguishable from a genuinely empty one.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -22,6 +22,16 @@
         },
         "include_derived": {
           "type": "boolean"
+        },
+        "from": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "Inclusive start date, YYYY-MM-DD."
+        },
+        "to": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "Inclusive end date, YYYY-MM-DD."
         },
         "time_zone": {
           "type": "string",
@@ -90,7 +100,29 @@
   },
   {
     "name": "minime_state",
-    "description": "Snapshot of now: today/tomorrow calendar, due tasks, tasks moved (closed) today, open commitments, decision reviews due, review-queue count, metric anomalies (from rollups only).",
+    "description": "Snapshot of now: today/tomorrow calendar, due tasks, tasks moved (closed) today, captures filed today (type/confidence/title/tier), open commitments, decision reviews due, goals_active (active goals with horizon, statement, open-task count, and most recent linked-task activity), review-queue count, metric anomalies (from rollups only), upcoming_dates (birthdays/anniversaries/custom person dates recurring in the next 14 days, next occurrence only), and ops_health (nightly maintenance status: dream_last_at, failed_steps, ops_failure_open — content-free, same for every actor).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_list_metrics",
+    "description": "List every queryable metric (name, unit, description, week/month rollup). Call this before minime_query_metric when unsure of the metric name; agg SQL is never exposed.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -429,7 +461,7 @@
   },
   {
     "name": "minime_upsert_task",
-    "description": "Create or update a task (status: inbox|active|waiting|done|dropped).",
+    "description": "Create or update a task (status: inbox|active|waiting|done|dropped). A recurring task (recur_freq set) materializes its next instance automatically when marked done.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -455,12 +487,41 @@
           ]
         },
         "due": {
-          "type": "string",
-          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "goal_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recur_freq": {
           "type": "string",
-          "format": "uuid"
+          "enum": [
+            "daily",
+            "weekly",
+            "monthly",
+            "yearly",
+            "none"
+          ]
+        },
+        "recur_interval": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 365
         },
         "time_zone": {
           "type": "string",
@@ -471,9 +532,6 @@
           "description": "Alias for time_zone."
         }
       },
-      "required": [
-        "title"
-      ],
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"
     },
@@ -483,7 +541,7 @@
   },
   {
     "name": "minime_agenda",
-    "description": "Forward-looking task agenda for a date range. Answers 'what's due tomorrow / Saturday / this week' — which minime_state CANNOT (it is today-anchored, due<=today only). Defaults to today..+7 days when no dates given. Returns open tasks (inbox/active/waiting) due in [from, to], grouped by due date.",
+    "description": "Forward-looking task agenda for a date range. Answers 'what's due tomorrow / Saturday / this week' — which minime_state CANNOT (it is today-anchored, due<=today only). Defaults to today..+7 days when no dates given. Returns open tasks (inbox/active/waiting) due in [from, to], grouped by due date. include_undated:true also returns open tasks with no due date — the ones that otherwise never resurface — in a separate `undated` list (never mixed into by_day). status:[...] narrows to a subset of open statuses (default: inbox, active, waiting).",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -494,6 +552,20 @@
         "to": {
           "type": "string",
           "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "include_undated": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "inbox",
+              "active",
+              "waiting"
+            ]
+          }
         },
         "time_zone": {
           "type": "string",
@@ -513,7 +585,7 @@
   },
   {
     "name": "minime_log_interaction",
-    "description": "Log a meeting/call/message/email/note with a person OR an org (vendor/institution). Resolves aliases, creates the subject if new, updates last-contact for people. subject_type defaults to 'auto': if the name already matches an existing org it attaches to that org, otherwise it attaches to a person. Pass subject_type='org' to force a vendor/institution (avoids minting a phantom person). Tier 2: writable now, reads require unlock.",
+    "description": "Log a meeting/call/message/email/note with a person OR an org (vendor/institution). Resolves aliases, creates the subject if new, updates last-contact for people. subject_type defaults to 'auto': if the name already matches an existing org it attaches to that org, otherwise it attaches to a person. Pass subject_type='org' to force a vendor/institution (avoids minting a phantom person). The interaction record itself is tier 2 — writable now, reads require unlock. The subject's own identity (name, relation, last-contact) is tier 1 and stays readable even locked; this call never lowers an existing identity's tier, and a brand-new subject is minted at tier 1, not 2. Optional promise={what, due?} records a commitment made during this interaction — to_whom is the resolved subject's own canonical name, tier 2 like the interaction itself, and derived_from links back to it. Close or reschedule it later with minime_upsert_commitment.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -547,6 +619,23 @@
             "org"
           ]
         },
+        "promise": {
+          "type": "object",
+          "properties": {
+            "what": {
+              "type": "string",
+              "minLength": 1
+            },
+            "due": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+            }
+          },
+          "required": [
+            "what"
+          ],
+          "additionalProperties": false
+        },
         "time_zone": {
           "type": "string",
           "description": "IANA timezone for interpreting date-only input and rendering timestamps."
@@ -570,7 +659,7 @@
   },
   {
     "name": "minime_review_queue",
-    "description": "List open review-queue items (contradiction | stale | duplicate | decision_review | inbox_unfiled | phantom_person | extract_suspect), or resolve one as 'resolved' | 'dismissed'. The queue is flag-only: resolving never edits the flagged rows themselves.",
+    "description": "List open review-queue items (contradiction | stale | duplicate | decision_review | inbox_unfiled | phantom_person | extract_suspect | ops_failure | goal_review | entity_promotion), or resolve one as 'resolved' | 'dismissed'. inbox_unfiled/duplicate items carry the classifier's type/confidence guess (always visible) under payload.capture; its reason and a ~500-char capture text excerpt require an approved tier-2 unlock (minime_unlock) and read '[above current tier]' until then. ops_failure carries only fixed dream-step identifiers and a timestamp (payload.failed_steps, payload.since) — always visible, no unlock needed; run `bun run src/cli.ts doctor` locally for the full maintenance checklist. goal_review flags an active goal untouched (and with no linked task touched) for 90+ days; update it with minime_upsert_goal. entity_promotion flags a person/org whose identity is still tier 2 though it looks owner-known or independently tier-1-evidenced; its name reads '[above current tier]' until an approved tier-2 unlock, and only the owner's own terminal (`bun run src/cli.ts entity:restore-tier`) can actually restore it to tier 1 — this tool can surface the flag but never execute that change. The queue is flag-only: resolving never edits the flagged rows themselves.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -591,7 +680,10 @@
             "decision_review",
             "inbox_unfiled",
             "phantom_person",
-            "extract_suspect"
+            "extract_suspect",
+            "ops_failure",
+            "goal_review",
+            "entity_promotion"
           ]
         },
         "id": {
@@ -622,6 +714,204 @@
     }
   },
   {
+    "name": "minime_refile",
+    "description": "File a pending inbox capture (status=pending) into a typed row: task | journal | note | interaction | decision. Requires an approved tier-2 unlock (minime_unlock) — a not-yet-filed capture's text is tier-2-gated regardless of its eventual type (DECISIONS.md 2026-08-08). Optional overrides: title, due (YYYY-MM-DD), person_name, kind (meeting|call|message|email|note), question, choice, mood (1-5), and tier (1|2 — honored only when type=note, and floored to 2 whenever this capture's own stored classifier guess was journal/interaction, so tier-2-grade text can never be filed as a lower-tier note). type=task/decision are rejected (BAD_INPUT) instead of downgraded when that same evidence says tier-2: neither table has a tier-2 representation, so file it as journal, interaction, or note (tier 2) instead. Rejects a non-pending item, and rejects a match against an existing open task (BAD_INPUT) rather than filing a duplicate. Resolves any open inbox_unfiled/duplicate review-queue items for this capture. Never echoes the capture's text back in its response.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "inbox_item_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "task",
+            "journal",
+            "note",
+            "interaction",
+            "decision"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "due": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "person_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "meeting",
+            "call",
+            "message",
+            "email",
+            "note"
+          ]
+        },
+        "question": {
+          "type": "string",
+          "minLength": 1
+        },
+        "choice": {
+          "type": "string"
+        },
+        "mood": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "tier": {
+          "type": "number",
+          "enum": [
+            1,
+            2
+          ]
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "inbox_item_id",
+        "type"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_correct",
+    "description": "Correct a typed row after the fact: journal | interaction | decision | note (page). action=amend inserts a successor row carrying the patched fields (source='correction', tier preserved from the original, full I5 provenance) and stamps the original superseded_by/superseded_at — the original is never edited or deleted, so both remain readable by id (e.g. minime_get_context) and both are cited as sources. Patchable fields: journal — entry_md, mood, energy, at; interaction — summary, kind, occurred_at; decision — question, choice, reasoning, expected_outcome; note — title, body_md. Any field left out carries over unchanged from the original. action=retract withdraws a row with no successor (stamps superseded_at only) and drops it from search; the row stays readable by id. action=retier promotes a note's tier — and its chunks/edges — from 1 to 2 (to_tier must be 2); up-only, requires an approved tier-2 unlock, and refuses every other type. Every action is bounded by what this session can currently read: a locked session cannot correct a tier-2 row, and no session can ever correct a tier-0 row. task rows are not supported here — use minime_upsert_task to edit or drop a task. Optional reason (<=200 chars) is recorded in the audit trail only, never on the row itself.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "journal",
+            "interaction",
+            "decision",
+            "note"
+          ]
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "amend",
+            "retract",
+            "retier"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "entry_md": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mood": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "energy": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "meeting",
+            "call",
+            "message",
+            "email",
+            "note"
+          ]
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "question": {
+          "type": "string",
+          "minLength": 1
+        },
+        "choice": {
+          "type": "string"
+        },
+        "reasoning": {
+          "type": "string"
+        },
+        "expected_outcome": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "body_md": {
+          "type": "string",
+          "minLength": 1
+        },
+        "to_tier": {
+          "type": "number",
+          "enum": [
+            1,
+            2
+          ]
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "type",
+        "action",
+        "id"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
     "name": "minime_unlock",
     "description": "Request an owner-approved, time-boxed tier-2 read unlock for this MCP connection (journal, interactions, email metadata). Tier 0 is never unlockable.",
     "inputSchema": {
@@ -642,6 +932,363 @@
       },
       "required": [
         "minutes"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_upsert_person",
+    "description": "Add an alias, set a person's relation/context, or rename a person or org after the fact. Target by type+id, or person_name (resolved as a person then an org, same tier rules and wording as minime_get_context — a name matching nothing readable at this session's tier is NOT_FOUND). action=add_alias adds an alternate name; the new alias always inherits the target's CURRENT privacy tier, so a tier-2 identity's alias is itself tier 2 and never becomes resolvable at a locked (tier-1) session — it cannot be used to reduce an identity's privacy. action=set_relation / action=set_context set the person's relation label or free-text context (person only — org is BAD_INPUT); each patches only its own field and never blanks the other. action=rename changes the canonical name and ALWAYS preserves the old name as an alias first, so anything that already referred to the old name keeps resolving. Adding an alias string already owned by a different visible person/org is refused (BAD_INPUT) — full identity merges are not supported by this tool.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "person",
+            "org"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "person_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "add_alias",
+            "set_relation",
+            "set_context",
+            "rename"
+          ]
+        },
+        "alias": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "relation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "context": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_set_person_date",
+    "description": "Set a person's birthday, anniversary, or a custom recurring date (month/day, optional year). Target by person_name (resolved the same way as minime_get_context) or person_id -- a name or id matching nothing readable at this session's tier is NOT_FOUND, worded identically either way. kind=custom requires a label, used to tell multiple custom dates for the same person apart (e.g. \"mom's memorial\" vs \"house purchase\"); birthday/anniversary must not carry one -- a person has only one of each. Re-setting the same person+kind (or person+custom+label) updates month/day/year in place instead of creating a duplicate. year is optional (e.g. birth year) and not required for the date to recur. A date stored as Feb 29 surfaces on Feb 28 in a non-leap year, never skipped. Every date is tier 1; if the person themselves is tier 2 (locked), the date stays invisible until an owner-approved unlock, same as any other attribute of a locked person.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "person_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "person_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "birthday",
+            "anniversary",
+            "custom"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "month": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 12
+        },
+        "day": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 31
+        },
+        "year": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9999
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "kind",
+        "month",
+        "day"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_timeline",
+    "description": "Tier-gated date-range read across every life source: calendar, closed tasks (done/dropped), and decisions at tier 1, plus journal entries and interactions once tier 2 is unlocked. Answers period questions minime_agenda (forward-looking, open tasks only) and minime_state (today-anchored) cannot — 'what happened in June', 'summarize last week'. A locked range still discloses that tier-2 entries exist as a bare count in `gaps` — never their titles or ids — so a locked read is distinguishable from an empty one.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "Inclusive start date, YYYY-MM-DD, in time_zone."
+        },
+        "to": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "Inclusive end date, YYYY-MM-DD, in time_zone."
+        },
+        "types": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "calendar",
+              "journal",
+              "interaction",
+              "task",
+              "decision"
+            ]
+          },
+          "description": "Narrow to a subset of sources. Defaults to all five."
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_upsert_goal",
+    "description": "Create or update a goal (horizon: life|year|quarter, fixed at creation; status: active|achieved|dropped). horizon and statement are required when creating; omit them on an id-only update to change only what you pass — e.g. mark a goal achieved without resending its statement. Goals appear in minime_search and minime_state's goals_active section with each goal's open-task count and most recent linked-task activity.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "horizon": {
+          "type": "string",
+          "enum": [
+            "life",
+            "year",
+            "quarter"
+          ]
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1
+        },
+        "why": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "achieved",
+            "dropped"
+          ]
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_upsert_commitment",
+    "description": "Create or update a commitment — a promise made to a person or org (status: open|kept|renegotiated|broken, default open). what and to_whom are required when creating; omit them on an id-only update to change only status/due — e.g. close one as kept without resending what was promised. Open commitments appear in minime_state's commitments_open and in the subject's dossier (minime_get_context) when to_whom matches their canonical name. minime_log_interaction's own promise param is the usual way a commitment starts (to_whom resolved automatically); use this tool directly for one with no interaction to hang it on.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "what": {
+          "type": "string",
+          "minLength": 1
+        },
+        "to_whom": {
+          "type": "string",
+          "minLength": 1
+        },
+        "due": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "open",
+            "kept",
+            "renegotiated",
+            "broken"
+          ]
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "minime_log_expense",
+    "description": "Log a cash or unbanked expense directly into the tier-0 transaction ledger (insert-only: this tool, like every other MCP tool, can never read transaction rows back -- it never echoes merchant, amount, or note in its result). Prefer a bank CSV import for card spend; use this only for expenses that never hit a bank statement. Amount is always stored as spend (negative) regardless of the sign given. Re-logging the exact same date+amount+currency+merchant+note dedupes to the original row instead of double-counting it. A later bank import that lands on the same date+amount flags itself in the review queue (kind: duplicate) instead of silently double-counting the two together.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "date": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "description": "YYYY-MM-DD, the date the expense occurred."
+        },
+        "amount": {
+          "type": "string",
+          "pattern": "^-?\\d+(\\.\\d{1,2})?$",
+          "description": "Decimal dollars, e.g. '12.50'. Sign is ignored -- always stored as spend."
+        },
+        "currency": {
+          "type": "string",
+          "pattern": "^[A-Z]{3}$",
+          "description": "3-letter ISO 4217 code. Falls back to MINIME_DEFAULT_CURRENCY when omitted."
+        },
+        "merchant": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "time_zone": {
+          "type": "string",
+          "description": "IANA timezone for interpreting date-only input and rendering timestamps."
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Alias for time_zone."
+        }
+      },
+      "required": [
+        "date",
+        "amount"
       ],
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"

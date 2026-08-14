@@ -140,7 +140,14 @@ describe("audit payload boundary", () => {
   test("the constructor surface is closed and validates identifier and code fields", async () => {
     const { auditPayload } = (await import("../src/util/audit-payload")) as any;
     expect(Object.keys(auditPayload).sort()).toEqual([
+      "cliHealthList",
+      "cliMetricAdd",
+      "cliTxList",
+      "correctAmend",
+      "correctRetier",
+      "correctRetract",
       "dreamSummary",
+      "entityTierRestored",
       "importMalformed",
       "importSummary",
       "inboxClosedExistingTask",
@@ -148,13 +155,18 @@ describe("audit payload boundary", () => {
       "inboxFiled",
       "inboxLegacyDuplicate",
       "inboxOrphaned",
+      "inboxRefiled",
       "inboxSplitDecision",
       "inboxSplitDoneTask",
+      "inboxSplitEntities",
       "inboxUnfiled",
       "llmEgress",
       "llmEgressOutcome",
       "onboardComplete",
+      "personUpsert",
+      "pushBrief",
       "repair",
+      "resticCheck",
       "tier2Unlock",
       "toolAttempt",
       "toolDisposition",
@@ -226,6 +238,7 @@ describe("audit payload boundary", () => {
         skipped: 1,
         results: [{ path: `/private/${SENTINEL}.md` }],
       },
+      "2d_goal_backlog_index": 4,
       "3_contradictions": 1,
       "3b_phantom_persons": 0,
       "3c_validate_edges": {
@@ -237,8 +250,10 @@ describe("audit payload boundary", () => {
         byRule: { [SENTINEL]: { checked: 4, denied: 1 } },
       },
       "4_stale": 1,
+      "5b_recurrence": 2,
       "5_rollups": 5,
       "6_decision_reviews": 1,
+      "6b_goal_reviews": 2,
       "7_backup": { ran: false, detail: SENTINEL },
     });
 
@@ -246,6 +261,7 @@ describe("audit payload boundary", () => {
       status: "partial_failure",
       error_code: "dream_step_failed",
       failed_step_count: 1,
+      failed_steps: ["2_entity_link"],
       embed_backlog_count: 3,
       entity_link_count: 0,
       note_candidate_count: 2,
@@ -257,6 +273,7 @@ describe("audit payload boundary", () => {
       decision_digest_candidate_count: 2,
       decision_digest_compiled_count: 1,
       decision_digest_skipped_count: 1,
+      goal_backlog_indexed_count: 4,
       contradiction_count: 1,
       phantom_person_count: 0,
       edge_checked_count: 4,
@@ -265,8 +282,10 @@ describe("audit payload boundary", () => {
       edge_unsure_count: 1,
       edge_flagged_count: 2,
       stale_count: 1,
+      recurrence_materialized_count: 2,
       metric_rollup_count: 5,
       decision_review_count: 1,
+      goal_review_count: 2,
       backup_ran: false,
     });
     expect(JSON.stringify(payload)).not.toContain(SENTINEL);
@@ -357,5 +376,148 @@ describe("audit payload boundary", () => {
         ids: [crypto.randomUUID()],
       }),
     ).toThrow("invalid_audit_payload");
+  });
+
+  test("resticCheck (W3-9) carries only {ok} and rejects a non-boolean", async () => {
+    const { auditPayload, assertAuditPayloadForVerb } = (await import(
+      "../src/util/audit-payload"
+    )) as any;
+    const payload = auditPayload.resticCheck({
+      ok: true,
+      prose: SENTINEL,
+      path: `/private/${SENTINEL}.log`,
+    });
+    expect(payload).toEqual({ ok: true });
+    expect(JSON.stringify(payload)).not.toContain(SENTINEL);
+    expect(() => assertAuditPayloadForVerb("backup:restic-check", payload)).not.toThrow();
+    expect(() => auditPayload.resticCheck({ ok: "true" })).toThrow("invalid_audit_payload");
+    expect(() =>
+      assertAuditPayloadForVerb(
+        "backup:restic-check",
+        auditPayload.repair({
+          script: "unknown",
+          phase: "failed",
+          code: "repair_module_failed",
+        }),
+      ),
+    ).toThrow("invalid_audit_payload");
+  });
+
+  test("entityTierRestored (W4-2) carries only entity_type/entity_id, never a name", async () => {
+    const { auditPayload, assertAuditPayloadForVerb } = (await import(
+      "../src/util/audit-payload"
+    )) as any;
+    const entityId = crypto.randomUUID();
+    const payload = auditPayload.entityTierRestored({
+      entityType: "person",
+      entityId,
+      canonical_name: SENTINEL,
+      name: SENTINEL,
+    });
+    expect(payload).toEqual({ entity_type: "person", entity_id: entityId });
+    expect(JSON.stringify(payload)).not.toContain(SENTINEL);
+    expect(() => assertAuditPayloadForVerb("entity:tier:restored", payload)).not.toThrow();
+    expect(() => auditPayload.entityTierRestored({ entityType: "team", entityId })).toThrow(
+      "invalid_audit_payload",
+    );
+    expect(() =>
+      auditPayload.entityTierRestored({ entityType: "person", entityId: SENTINEL }),
+    ).toThrow("invalid_audit_payload");
+    expect(() =>
+      assertAuditPayloadForVerb(
+        "entity:tier:restored",
+        auditPayload.personUpsert({ entityType: "person", entityId, action: "rename" }),
+      ),
+    ).toThrow("invalid_audit_payload");
+  });
+
+  test("cliTxList/cliHealthList (W4-5) carry only {month|kind, row_count, match_used}, never a match string or row content", async () => {
+    const { auditPayload, assertAuditPayloadForVerb } = (await import(
+      "../src/util/audit-payload"
+    )) as any;
+
+    const txPayload = auditPayload.cliTxList({
+      month: "2026-08",
+      rowCount: 3,
+      matchUsed: true,
+      match: SENTINEL,
+      merchant: SENTINEL,
+    });
+    expect(txPayload).toEqual({ month: "2026-08", row_count: 3, match_used: true });
+    expect(JSON.stringify(txPayload)).not.toContain(SENTINEL);
+    expect(() => assertAuditPayloadForVerb("cli:tx:list", txPayload)).not.toThrow();
+    expect(() =>
+      auditPayload.cliTxList({ month: "2026-8", rowCount: 0, matchUsed: false }),
+    ).toThrow("invalid_audit_payload");
+    expect(() =>
+      auditPayload.cliTxList({ month: "2026-08", rowCount: -1, matchUsed: false }),
+    ).toThrow("invalid_audit_payload");
+    expect(() =>
+      auditPayload.cliTxList({ month: "2026-08", rowCount: 0, matchUsed: "yes" }),
+    ).toThrow("invalid_audit_payload");
+
+    const healthPayload = auditPayload.cliHealthList({
+      kind: "steps",
+      rowCount: 0,
+      matchUsed: false,
+      value: SENTINEL,
+    });
+    expect(healthPayload).toEqual({ kind: "steps", row_count: 0, match_used: false });
+    expect(JSON.stringify(healthPayload)).not.toContain(SENTINEL);
+    expect(() => assertAuditPayloadForVerb("cli:health:list", healthPayload)).not.toThrow();
+    expect(() =>
+      auditPayload.cliHealthList({ kind: "Not Valid Kind", rowCount: 0, matchUsed: false }),
+    ).toThrow("invalid_audit_payload");
+
+    // Bound to its own exact verb, same closed-surface guarantee every other constructor has.
+    expect(() => assertAuditPayloadForVerb("cli:health:list", txPayload)).toThrow(
+      "invalid_audit_payload",
+    );
+    expect(() => assertAuditPayloadForVerb("cli:tx:list", healthPayload)).toThrow(
+      "invalid_audit_payload",
+    );
+  });
+
+  test("cliMetricAdd (W4-8) carries only {metric, template}, never the --kind/--category/--merchant-pattern value", async () => {
+    const { auditPayload, assertAuditPayloadForVerb } = (await import(
+      "../src/util/audit-payload"
+    )) as any;
+
+    const payload = auditPayload.cliMetricAdd({
+      metric: "dining_spend",
+      template: "spend-by-merchant",
+      merchantPattern: SENTINEL,
+      kind: SENTINEL,
+    });
+    expect(payload).toEqual({ metric: "dining_spend", template: "spend-by-merchant" });
+    expect(JSON.stringify(payload)).not.toContain(SENTINEL);
+    expect(() => assertAuditPayloadForVerb("cli:metric:add", payload)).not.toThrow();
+    expect(() =>
+      auditPayload.cliMetricAdd({ metric: "Not Valid Name", template: "health-sum" }),
+    ).toThrow("invalid_audit_payload");
+    expect(() =>
+      auditPayload.cliMetricAdd({ metric: "dining_spend", template: "not-a-template" }),
+    ).toThrow("invalid_audit_payload");
+    expect(() =>
+      assertAuditPayloadForVerb(
+        "cli:metric:add",
+        auditPayload.cliHealthList({ kind: "steps", rowCount: 0, matchUsed: false }),
+      ),
+    ).toThrow("invalid_audit_payload");
+  });
+});
+
+// Every registered MCP tool must be in audit-payload's AUDITED_TOOL_NAMES allowlist, or its
+// very first audited call fails as INTERNAL before execution (W1-2 found minime_list_metrics
+// bricked this way). This guard makes the required lockstep update a test failure, not a
+// runtime surprise for the next tool-adding change.
+describe("audited tool-name allowlist", () => {
+  test("accepts an attempt payload for every registered tool", async () => {
+    const { ALL_TOOLS } = await import("../src/mcp/tools/index");
+    const { assertAuditPayloadForVerb } = await import("../src/util/audit-payload");
+    for (const tool of ALL_TOOLS) {
+      const payload = auditPayload.toolAttempt({ paramsHash: "0".repeat(16) });
+      expect(() => assertAuditPayloadForVerb(`tool:${tool.name}:attempt`, payload)).not.toThrow();
+    }
   });
 });

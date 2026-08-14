@@ -334,3 +334,80 @@ describe("watcher dedup (e2e, classifier mocked)", () => {
     expect(unfiled!.n).toBe(0);
   });
 });
+
+describe("note tier trust guardrail (e2e, classifier mocked / stale-claim replay)", () => {
+  // BLOCKER regression (I3/tier boundary, §12 + invariant-review 2026-06-12/2026-08-08):
+  // fileRow's "note" case used to trust a Classification's fields.tier outright whenever it was
+  // a bare 1 or 2, on EVERY caller — not just minime_refile, which is careful to floor it first.
+  // On the automatic pipeline, classify() passes the LLM's raw parsed JSON `fields` through
+  // unfiltered, and a replayed storedClassification (crash mid-finalization, a stale claim
+  // reusing the persisted plan) is equally unsanitized. So a stray or prompt-injected "tier" in
+  // the model's own JSON output could downgrade an agent-session capture — which must always file
+  // at tier 2 (the hint-based default) — down to tier 1, exposing it to any actor without an
+  // unlock. The fix floors whatever tier the fields carry against noteHintTier(text), so a pin
+  // can only ever raise the tier, never launder one down.
+  test("a stored plan's fields.tier=1 cannot downgrade an agent-session note below its hint-derived floor", async () => {
+    const inbox = join(config.dataDir, "inbox");
+    await mkdir(inbox, { recursive: true });
+    const text =
+      "unclear: ZQX-TIERFLOOR fictional agent session outcome\n<!-- hint: agent work session -->\nverbatim fictional session prose";
+    const path = join(inbox, "tier-floor.md");
+    await Bun.write(path, text);
+    const first = await processInboxFile(path);
+    expect(first.filed).toBe(false); // heuristic mock leaves an "unclear:" capture pending
+
+    // Simulate the exact state a crash mid-finalization leaves behind: setInboxClassification
+    // persisted the model's plan, the process died, the claim went stale, and a replay reuses
+    // the stored plan verbatim (processInboxSnapshot's storedClassification branch) instead of
+    // re-classifying. Direct-SQL test scaffolding (test/helpers.ts) — not an application write
+    // path; app code never touches classifier_output outside repo.ts.
+    await sql`
+      update inbox_items
+      set status = 'processing',
+          claim_token = ${crypto.randomUUID()}::uuid,
+          claimed_at = clock_timestamp() - interval '6 minutes',
+          classifier_output = ${sql.json({
+            type: "note",
+            confidence: 0.95,
+            fields: { title: "ZQX-TIERFLOOR", tier: 1 },
+            reason: "synthetic stray/prompt-injected plan",
+          })}
+      where id = ${first.inboxId}::uuid`;
+
+    const replay = await processInboxFile(path);
+    expect(replay.filed).toBe(true);
+
+    const [page] = await sql`select tier from pages where derived_from = ${first.inboxId}`;
+    // If this reads 1, the stored plan's fields.tier downgraded an agent-session capture below
+    // its hint-based tier-2 default — exactly the laundering path the fix closes.
+    expect(page!.tier).toBe(2);
+  });
+
+  test("a stored plan's fields.tier can still RAISE an ordinary note above tier 1 — the floor never lowers an explicit higher tier", async () => {
+    const inbox = join(config.dataDir, "inbox");
+    await mkdir(inbox, { recursive: true });
+    const text = "unclear: ZQX-TIERRAISE fictional plain reference note, no agent-session hint";
+    const path = join(inbox, "tier-raise.md");
+    await Bun.write(path, text);
+    const first = await processInboxFile(path);
+    expect(first.filed).toBe(false);
+
+    await sql`
+      update inbox_items
+      set status = 'processing',
+          claim_token = ${crypto.randomUUID()}::uuid,
+          claimed_at = clock_timestamp() - interval '6 minutes',
+          classifier_output = ${sql.json({
+            type: "note",
+            confidence: 0.95,
+            fields: { title: "ZQX-TIERRAISE", tier: 2 },
+            reason: "synthetic evidence-backed tier-2 plan",
+          })}
+      where id = ${first.inboxId}::uuid`;
+
+    const replay = await processInboxFile(path);
+    expect(replay.filed).toBe(true);
+    const [page] = await sql`select tier from pages where derived_from = ${first.inboxId}`;
+    expect(page!.tier).toBe(2); // pin honored — flooring only ever raises, never clamps down
+  });
+});

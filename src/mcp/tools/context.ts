@@ -13,6 +13,7 @@ import {
   resolveOrg,
   resolvePerson,
 } from "../../db/repo";
+import { localDateStr } from "../../util/clock";
 import { type SourceRef, ToolError, envelope, stalenessOf } from "../envelope";
 import type { ToolDef } from "./registry";
 
@@ -85,7 +86,16 @@ export const getContextTool: ToolDef = {
         type = "org";
         row = await resolveOrg(params.person_name, ctx.actor);
       }
-      if (!row) throw new ToolError("NOT_FOUND", "no person or org matching that name");
+      // Wording MUST be byte-identical whether a tier-2 row exists or nothing exists at all —
+      // resolvePerson/resolveOrg already return null for both cases (repo.ts tier predicate),
+      // so no extra query may be added here to distinguish them (would introduce an oracle for
+      // otherwise RLS-hidden tier-2 identities, e.g. people minted by minime_log_interaction).
+      if (!row)
+        throw new ToolError(
+          "NOT_FOUND",
+          "no person or org matching that name at the current access tier — a match may exist " +
+            "at tier 2; offer an owner-approved unlock (minime_unlock)",
+        );
     } else if (params.type && params.id) {
       type = params.type;
       row = await getRow(type, params.id, ctx.actor);
@@ -96,6 +106,19 @@ export const getContextTool: ToolDef = {
         );
     } else {
       throw new ToolError("BAD_INPUT", "provide either type+id or person_name");
+    }
+
+    // getRow/resolvePerson/resolveOrg are deliberately unfiltered on supersession state — the
+    // owner/agent can always inspect a row by id (I5) — so flag it here instead: a superseded
+    // row (successor exists, 028_correction_supersede.sql) points the reader at the current
+    // version; a retracted row (no successor) is labeled withdrawn.
+    if (row.superseded_at) {
+      const on = localDateStr(new Date(row.superseded_at), ctx.timeZone);
+      gaps.push(
+        row.superseded_by
+          ? `this row was superseded on ${on} — read ${type} ${row.superseded_by} for the current version`
+          : `this row was retracted on ${on}`,
+      );
     }
 
     sources.push({
@@ -206,6 +229,7 @@ export const getContextTool: ToolDef = {
           source: row.source,
           created_by: row.created_by,
           derived_from: row.derived_from,
+          superseded_by: row.superseded_by,
         },
       },
       sources,

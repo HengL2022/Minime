@@ -170,23 +170,37 @@ ratchet, evidence-hash hierarchy, or approval receipt is needed.
 
 ### 4. Release
 
-- Align owner and agent documentation with actual behavior and remove stale active-contract claims.
-- Run `make verify`, the restore drill, and the outgoing privacy scan once on the release candidate.
-- Fix concrete failures, then prepare the release handoff.
-
-Pushing remains the owner's explicit action or authorization. Do not create another release train
-unless the owner asks for one.
+- **Delivered 2026-08-14:** owner and agent documentation matches the 22-tool surface
+  (`README.md`, `AGENTS.md`, `agents/skills/RESOLVER.md`). Stale "14 functions" / "14 tools"
+  claims are gone. A contract test pins every registered tool name in those three files
+  and reads Make recipes without nested `--print-directory` banners.
+  `make eval-search` held every committed mock floor. Lint, typecheck, typecheck-ops, and
+  `check-subsystems` pass. Focused suites for the 22-tool contract, multi-entity companion
+  split, and single inbox-watcher lock pass. A cloud-VM `make verify-offline` was 1860
+  pass / 1 skip / 9 fail; the three nested-Make contract dry-run failures are gone.
+- Remaining owner-only gates (do not start these from an agent session without an explicit
+  ask): a full `make verify` on the owner's machine. This cloud VM already binds native
+  Postgres on 5432 and skipped Ollama, so installer/launch suites cannot prove a clean
+  first-install path here. Its Git 2.43 `rev-list --objects -z` also does not emit the
+  NUL/`path=` records the privacy scanner parses, so three outgoing-blob fixture cases
+  report `outgoing_blobs=0` and cannot stand in for the owner scan. One inbox-identity
+  watcher case timed out (known flake). Then: a real-snapshot `make restore-drill`, the
+  outgoing privacy scan with the owner's private terms, live migrate through 040 after
+  backup, and the release handoff. Merging to `main` and any history rewrite remain the
+  owner's explicit action. Do not create another release train unless the owner asks
+  for one.
 
 ## Ordinary product backlog (not release blockers)
 
 After the release gate, resume product work as outcome-sized tasks under this workflow. Current
 known candidates are:
 
-- coordinate multiple MCP processes so one process owns watcher/dream/backup work with clean
-  takeover;
-- split genuine multi-entity inbox captures into idempotent typed items, routing uncertainty to
-  review; and
-- close related known-issue documents once their behavioral regressions pass.
+- LLM segment pre-pass and first-class org/person capture types (the 2026-08-14
+  deterministic companion split covers legal-suffix / enumerated-company captures;
+  see `docs/known-issues/classifier-multi-entity-captures.md`);
+- org fuzzy-dedup on extract write and a low-confidence extract→review path
+  (`docs/known-issues/extractor-phantom-orgs.md` Fix B); and
+- close remaining known-issue documents once their behavioral regressions pass.
 
 Agent skill wording for owner-approved tier-2 unlocks and timezone-aware output should stay aligned
 as ordinary documentation maintenance. These improvements matter, but bundling them into the

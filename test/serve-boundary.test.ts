@@ -143,6 +143,20 @@ describe("resident serve authority split", () => {
     expect(() => assertRuntimeChildBoundary(child)).not.toThrow();
   });
 
+  test("REDACT_ALLOWLIST survives the runtime child scrub (W4-10)", () => {
+    // Owner-only outbound-redaction exemption list (src/mcp/redact.ts, src/util/config.ts).
+    // It must reach the MCP-reachable child unchanged -- that child is the only process that
+    // ever actually redacts agent-facing tool output -- or the owner's setting silently stops
+    // applying to real traffic despite still being present in the supervisor's own env.
+    const child = runtimeChildEnvironment({ REDACT_ALLOWLIST: "1234567890,9876543210" }, APP_URL);
+    expect(child.REDACT_ALLOWLIST).toBe("1234567890,9876543210");
+    expect(() => assertRuntimeChildBoundary(child)).not.toThrow();
+
+    const absent = runtimeChildEnvironment({}, APP_URL);
+    expect(absent.REDACT_ALLOWLIST).toBeUndefined();
+    expect(() => assertRuntimeChildBoundary(absent)).not.toThrow();
+  });
+
   test("test-only runtime knobs are admitted only as the exact test pair", () => {
     const testChild = runtimeChildEnvironment(
       { NODE_ENV: "test", MINIME_MOCK_OLLAMA: "1" },
@@ -217,6 +231,11 @@ describe("resident serve authority split", () => {
     const child = runtimeChildEnvironment(
       {
         CLASSIFY_PROVIDER: "bedrock",
+        // Explicit: this test exercises a *reachable* implicit tier-2 fallback (no
+        // PROVIDER_ROUTE_TIER2 override), which needs ceiling 2 — the unset-env default
+        // dropped to 1 (W4-9, DECISIONS.md 2026-08-10) and would otherwise make this an
+        // untested degraded-route case instead of the reachable one this test is named for.
+        CLOUD_MAX_TIER: "2",
         BEDROCK_MODEL: "fictional.model-v1",
         BEDROCK_AWS_ACCESS_KEY_ID: "bedrock-access-key",
         BEDROCK_AWS_SECRET_ACCESS_KEY: "bedrock-secret-key",
@@ -241,6 +260,10 @@ describe("resident serve authority split", () => {
       runtimeChildEnvironment(
         {
           CLASSIFY_PROVIDER: "bedrock",
+          // Explicit for the same reason as the "Bedrock IAM is forwarded..." test above: an
+          // implicit tier-2 fallback must be reachable (ceiling 2) for the dedicated-credential
+          // check below to run at all under the unset-env default of 1 (W4-9).
+          CLOUD_MAX_TIER: "2",
           AWS_ACCESS_KEY_ID: "shared-access-key",
           AWS_SECRET_ACCESS_KEY: "shared-secret-key",
           AWS_REGION: "us-east-1",
@@ -419,7 +442,7 @@ describe("resident serve authority split", () => {
       resticPasswordFile: config.resticPasswordFile,
     };
     const registrations: Array<{ pattern: string; timezone: string }> = [];
-    let schedule: ReturnType<typeof startOwnerMaintenanceSchedule> | undefined;
+    let schedule: Awaited<ReturnType<typeof startOwnerMaintenanceSchedule>> | undefined;
     try {
       process.env.TZ = "Etc/UTC";
       config.tz = "Asia/Singapore";
@@ -428,13 +451,17 @@ describe("resident serve authority split", () => {
       config.resticRepository = "test:repository";
       config.resticPasswordFile = "/test/restic-password";
 
-      schedule = startOwnerMaintenanceSchedule((pattern, options) => {
+      schedule = await startOwnerMaintenanceSchedule((pattern, options) => {
         registrations.push({ pattern, timezone: options.timezone });
         return { nextRun: () => null, stop: () => {} };
       });
 
       expect(process.env.TZ).toBe("Etc/UTC");
-      expect(registrations).toEqual([
+      // Dream/backup are always registered first, in this order (see test/maintenance-lock.test.ts
+      // for dedicated coverage). A 3rd dream catch-up registration may also appear here depending
+      // on whether some other file already wrote a dream:summary event to this shared test
+      // database, so only the first two (deterministic, order-independent) are asserted exactly.
+      expect(registrations.slice(0, 2)).toEqual([
         { pattern: "1 2 * * *", timezone: "Asia/Singapore" },
         { pattern: "3 4 * * *", timezone: "Asia/Singapore" },
       ]);
@@ -463,7 +490,12 @@ describe("resident serve authority split", () => {
     expect(runtimeBlock).not.toContain("dream(");
     expect(serve).toContain("startOwnerMaintenanceSchedule");
     expect(serve).toContain('"--no-env-file"');
-    expect(serve).toContain('run("dream", () => withAdminDbScope(() => dream()))');
+    // W3-7: dream() still runs under admin scope inside the "dream"-labeled run() wrapper: the
+    // wrapper now also checks for a persistent (3-consecutive-night) failure in the same scope.
+    expect(serve).toContain('run("dream", () =>');
+    expect(serve).toContain("withAdminDbScope(async () => {");
+    expect(serve).toContain("const summary = await dream();");
+    expect(serve).toContain("await flagPersistentDreamFailure();");
     expect(serve).toContain('run("db snapshot", dbSnapshot)');
   });
 });

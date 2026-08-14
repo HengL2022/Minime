@@ -7,12 +7,15 @@ import { join } from "node:path";
 import {
   EMBED_PROVIDER_NAMES,
   PROVIDER_NAMES,
+  assertTier2UnlockApprovalWindowMinutes,
   assertTier2UnlockMaxMinutes,
   fillMissingEnv,
   parseDotenv,
   parseEmbedProviderName,
   parseProviderEnvironment,
   parseProviderName,
+  parseRedactAllowlist,
+  parseTier2UnlockApprovalWindowMinutes,
   parseTier2UnlockMaxMinutes,
 } from "../src/util/config";
 import {
@@ -164,16 +167,61 @@ describe("parseDotenv", () => {
   });
 
   test("regression: the .env.example CLOUD_MAX_TIER line parses to a clean integer", () => {
-    // The exact pre-2026-07-18 line. Copied via `cp .env.example .env` and read through
-    // loadRepoDotenv (daemon launched from a non-repo cwd), the value parsed as
-    // "2   # lower..." → Number() = NaN → `tier > NaN` is false → the egress ceiling,
-    // stricter-only route check, and m0 gate all silently passed (invariant review B1).
+    // The exact pre-2026-07-18 line, frozen byte-for-byte as a historical regression fixture —
+    // this does NOT track the current shipped default (see the live-file assertion below) and
+    // must never change. Copied via `cp .env.example .env` and read through loadRepoDotenv
+    // (daemon launched from a non-repo cwd), the value parsed as "2   # lower..." → Number() =
+    // NaN → `tier > NaN` is false → the egress ceiling, stricter-only route check, and m0 gate
+    // all silently passed (invariant review B1).
     const line =
       "CLOUD_MAX_TIER=2                    # lower to 1 to keep journal/interactions local-only";
     expect(parseDotenv(line).CLOUD_MAX_TIER).toBe("2");
-    // and the shipped .env.example itself must always yield a clean integer ceiling
+    // and the shipped .env.example itself must always yield a clean integer ceiling — value
+    // updated to the W4-9 default (DECISIONS.md 2026-08-10: default 1, opt up to 2)
     const example = readFileSync(join(import.meta.dir, "..", ".env.example"), "utf8");
-    expect(Number(parseDotenv(example).CLOUD_MAX_TIER)).toBe(2);
+    expect(Number(parseDotenv(example).CLOUD_MAX_TIER)).toBe(1);
+  });
+});
+
+describe("CLOUD_MAX_TIER default (W4-9, DECISIONS.md 2026-08-10)", () => {
+  // Isolated subprocess, same shape as loadConfigWith above but printing the resolved value:
+  // config.ts is cached per-process, so the only way to observe a fresh env('CLOUD_MAX_TIER', …)
+  // resolution is a fresh process. The spawned env deliberately does NOT spread process.env, so
+  // CLOUD_MAX_TIER is absent unless extraEnv sets it -- this is what "unset anywhere" means here.
+  function loadCloudMaxTier(extraEnv: Record<string, string> = {}) {
+    const database = "postgres://owner:secret@localhost:5432/minime";
+    const proc = Bun.spawnSync(
+      [
+        process.execPath,
+        "--no-env-file",
+        "-e",
+        'const {config} = await import("./src/util/config"); console.log(JSON.stringify({cloudMaxTier: config.cloudMaxTier}));',
+      ],
+      {
+        cwd: join(import.meta.dir, ".."),
+        env: {
+          NODE_ENV: "test",
+          MINIME_SKIP_REPO_DOTENV: "1",
+          ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}),
+          DATABASE_URL: database,
+          MINIME_APP_DATABASE_URL: database,
+          ...extraEnv,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    expect(proc.exitCode, proc.stderr.toString()).toBe(0);
+    return JSON.parse(proc.stdout.toString().trim()) as { cloudMaxTier: number };
+  }
+
+  test("unset CLOUD_MAX_TIER yields the stricter tier-1 ceiling, not the old tier-2 default", () => {
+    expect(loadCloudMaxTier().cloudMaxTier).toBe(1);
+  });
+
+  test("an explicit CLOUD_MAX_TIER in the environment still wins over the default", () => {
+    expect(loadCloudMaxTier({ CLOUD_MAX_TIER: "2" }).cloudMaxTier).toBe(2);
+    expect(loadCloudMaxTier({ CLOUD_MAX_TIER: "0" }).cloudMaxTier).toBe(0);
   });
 });
 
@@ -200,6 +248,73 @@ describe("tier-2 unlock limit", () => {
     for (const value of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 1441]) {
       expect(() => assertTier2UnlockMaxMinutes(value)).toThrow(/TIER2_UNLOCK_MAX_MINUTES/);
     }
+  });
+});
+
+describe("tier-2 unlock approval window", () => {
+  test("accepts only bounded positive decimal integers", () => {
+    expect(parseTier2UnlockApprovalWindowMinutes("1")).toBe(1);
+    expect(parseTier2UnlockApprovalWindowMinutes("10")).toBe(10);
+    expect(parseTier2UnlockApprovalWindowMinutes("60")).toBe(60);
+    for (const raw of ["", "0", "-1", "1.5", "1e2", "NaN", "Infinity", "61"]) {
+      expect(() => parseTier2UnlockApprovalWindowMinutes(raw)).toThrow(
+        /TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES/,
+      );
+    }
+  });
+
+  test("runtime guard fails closed if a test or caller mutates parsed config", () => {
+    for (const value of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 61]) {
+      expect(() => assertTier2UnlockApprovalWindowMinutes(value)).toThrow(
+        /TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES/,
+      );
+    }
+  });
+
+  test("config load rejects an out-of-range or malformed env override", () => {
+    const database = "postgres://owner:secret@localhost:5432/minime";
+    for (const value of ["0", "61", "abc", "-1", "1.5"]) {
+      const result = loadConfigWith(database, database, {
+        TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES: value,
+      });
+      expect(result.code).not.toBe(0);
+      expect(result.output).toContain("TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES");
+    }
+  });
+
+  test("config load defaults to 10 and accepts an explicit in-range override", () => {
+    const database = "postgres://owner:secret@localhost:5432/minime";
+    expect(loadConfigWith(database, database).code).toBe(0);
+    expect(
+      loadConfigWith(database, database, { TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES: "30" }).code,
+    ).toBe(0);
+  });
+});
+
+describe("redact allowlist parsing (W4-10)", () => {
+  test("splits on commas, trims whitespace, and drops blank entries", () => {
+    expect(parseRedactAllowlist("123456789012, 4111111111111111 ,, 9876543210")).toEqual(
+      new Set(["123456789012", "4111111111111111", "9876543210"]),
+    );
+  });
+
+  test("unset or blank input yields an empty set", () => {
+    expect(parseRedactAllowlist(undefined)).toEqual(new Set());
+    expect(parseRedactAllowlist("")).toEqual(new Set());
+    expect(parseRedactAllowlist("   ")).toEqual(new Set());
+  });
+
+  test("a single entry with no comma still parses", () => {
+    expect(parseRedactAllowlist("123456789012")).toEqual(new Set(["123456789012"]));
+  });
+
+  test("config load wires REDACT_ALLOWLIST through without rejecting it", () => {
+    const database = "postgres://owner:secret@localhost:5432/minime";
+    expect(
+      loadConfigWith(database, database, {
+        REDACT_ALLOWLIST: "123456789012,4111111111111111",
+      }).code,
+    ).toBe(0);
   });
 });
 

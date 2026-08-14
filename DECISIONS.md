@@ -2423,3 +2423,1489 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   allowing PostgreSQL's own work to finish naturally under the larger solo-project regression
   suite.
 - **Approved by:** human owner in the approved remediation implementation request on 2026-08-06.
+
+## 2026-08-07 — Journal mood/energy day-averages are agent-readable metrics without a tier-2 unlock
+
+- **Context:** Livability-program task W1-1 (migration 027) seeds `mood`, `energy`, `body_mass`,
+  and `hr_resting` metric definitions and widens `metric_defs_rollup_check` to add an `avg`
+  rollup alongside the `sum`/`last` pair from the 2026-08-06 time-semantics decision (migration
+  026). `mood`/`energy` are day-granularity `round(avg(...), 2)` aggregates over the tier-2
+  `journal_entries.mood`/`.energy` smallint self-report columns — never `entry_md` prose. This
+  extends the existing `journal_streak` precedent — an aggregate that has read tier-2
+  `journal_entries` timestamps (dates only, never content) without an unlock since the original
+  v1 metric seed — to a numeric self-report aggregate from the same tier-2 source. `body_mass`/
+  `hr_resting` are ordinary tier-0 `health_samples` aggregates and raise no new question.
+- **Decision:** Day-granularity mood/energy aggregates computed by `metric_agg` are readable via
+  `minime_query_metric` without a tier-2 unlock, and may surface in `minime_state` metric
+  anomalies alongside every other cached metric. `metric_agg` is `security definer` and remains
+  the only path that can read tier-0/tier-2 source rows to build an aggregate (I3); this decision
+  governs which aggregates the owner curates into `agg_sql`, not a new privilege or write path.
+  If ever reversed, drop the `mood`/`energy` metric_defs rows; `body_mass`/`hr_resting` stand on
+  their own as unambiguous tier-0 aggregates unaffected by this ratification.
+- **Why:** A 1-5 daily mood/energy average is a self-report number, not free text — far less
+  disclosure risk than the journal prose itself, and useful to agent planning (energy-aware
+  scheduling, mood-trend awareness) without a manual unlock for routine use. Widening the rollup
+  vocabulary to `avg`, instead of overloading `sum` or `last`, keeps each metric's week/month
+  combination rule an honest, checked description of its own arithmetic.
+- **Approved by:** human owner, decision 7 of 14 in the upfront livability-program plan
+  ratification (2026-08-07) that authorized this branch's fully autonomous, wave-by-wave
+  execution — not a bespoke per-task approval. Reconfirmed against the program's
+  ratified-decisions record during W1-1 review-finding remediation (2026-08-08); the owner's
+  end-of-program review before GitHub publication (program decision 13) remains the final gate.
+
+## 2026-08-07 — Content tables can record their own supersession, with a column-limited grant
+
+- **Context:** Livability-program task W2-1 (migration 028) is the schema foundation for the W2
+  correction loop: an owner or agent needs to amend, retract, or replace a typed content row
+  (journal entry, task, decision, ...) without ever deleting or silently overwriting it (I5
+  provenance). Every PARENTS-map content table (`src/db/repo.ts`) already carries a forward
+  pointer — `supersedes_id`, stamped on a successor row at write time (002_core.sql; the only
+  existing precedent for stamping it programmatically is `retypeOrgToPerson`'s org→person
+  repair) — but nothing on the OLD row recorded that it had been superseded. Separately, six of
+  the twelve tables (`journal_entries`, `interactions`, `commitments`, `goals`, `values_items`,
+  `principles`) have never held any UPDATE grant for `minime_app` at all: 021_runtime_app_role.sql
+  re-granted full table UPDATE only on the other six (`tasks`, `decisions`, `people`, `pages`,
+  `orgs`, `decision_branches`).
+- **Decision:** Add `superseded_by uuid` and `superseded_at timestamptz` to all twelve content
+  tables — plain untyped columns with no foreign key, matching the existing
+  `derived_from`/`supersedes_id` convention. Encoding: both null = live; `superseded_by` and
+  `superseded_at` both set = superseded by that successor row; `superseded_at` set with
+  `superseded_by` null = retracted (soft-deleted, no successor). A per-table check constraint
+  (`<table>_supersede_check`) rejects the fourth, meaningless combination — a recorded successor
+  with no timestamp. Grant `UPDATE (superseded_by, superseded_at)` — those two columns only,
+  never the row — to `minime_app` on the six tables that previously had no UPDATE grant; the
+  other six already have full table UPDATE from 021, which already covers the new columns
+  without any further grant. The pre-existing `tier_update` policies (007_rls.sql; orgs in
+  008_orgs.sql; decision_branches in 014_decision_interview.sql) already gate every UPDATE,
+  including this one, by the upper bound `tier <= app_allowed_tier()` — no new grant target
+  changes that. This migration also updates the `mood`/`energy` `metric_defs.agg_sql` bodies
+  seeded in 027_life_metrics_seed.sql, adding `and superseded_at is null` to each WHERE clause:
+  `journal_entries` is the one content table in this migration's list whose rows already feed a
+  numeric aggregate, so the column's meaning and the aggregate that reads it move together in the
+  same migration. It also extends the `tier_update` policy itself
+  (`alter policy ... using (tier >= 1 and tier <= app_allowed_tier())`), adding the same
+  `tier >= 1` lower bound that 019_tier0_prose_quarantine.sql already gave `tier_read` and that
+  021_runtime_app_role.sql already gave `tier_delete` — `tier_update` had been untouched since
+  its creation (007/008/013/014) and was the one command type still missing the bound. Coverage
+  is every table where `minime_app` holds any UPDATE grant with a tier column: the twelve
+  PARENTS tables plus `chunks`, `edges`, `calendar_events`, and `inbox_items` — `chunks`
+  matters most, since quarantined tier-0 page prose physically lives in `chunks.text`
+  (`person_aliases`/`org_aliases` already carry the bound from 022; `email_meta` has no UPDATE
+  grant). Deliberate side effect: these policies have no explicit WITH CHECK, so the replaced
+  USING clause also tightens the implicit WITH CHECK — `minime_app` can no longer demote any
+  row to tier 0. Every legitimate tier→0 writer (quarantine, brain-sync, repair) runs on owner
+  connections that bypass RLS; a future child-side quarantine feature will fail loudly here by
+  design rather than silently bypassing the absorbing-state rule.
+- **Why:** A correction feature needs the old row to survive (audit, recoverability, "what did I
+  actually believe on that date") while still being able to name and time its own replacement.
+  Splitting the grant to exactly the two stamp columns keeps the six previously write-locked
+  tables write-locked for everything else — a future correction tool gets only the narrow
+  capability it needs, not a blanket UPDATE that could rewrite journal prose, task titles, or
+  decision content directly. This is a product-visible feature on ordinary content rows, not a
+  change to `events`, which remains insert-only and untouched (I8). Left unfixed, the first amend
+  or retract of a mood/energy self-report (once `minime_correct`, W2-4, ships) would silently
+  double-count: the superseded original's value and its successor's value would both fall inside
+  the same `avg()`, corrupting exactly the numeric surface I6 exists to protect. Fixing the
+  aggregate now, rather than waiting for a future task to remember it, means the metric is never
+  observably wrong even for one release. Separately, without the `tier_update` lower bound, a
+  WHERE-less or constant-predicate UPDATE issued by a locked `minime_app` session could still
+  stamp a tier-0 quarantined row on any of these twelve tables — a row that same session could
+  never discover through any `tier_read`-gated SELECT — because the upper bound alone
+  (`tier <= app_allowed_tier()`) does not exclude tier 0 (`0 <= 1` is true while locked). No
+  `repo.ts`/tool code path issues such an update today, so this was defense-in-depth, not an
+  active leak; closing it keeps I3's "tier 0 is an absorbing quarantine state" postcondition true
+  on the write side, not only for reads and deletes.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W2
+  correction-loop workstream — not a bespoke per-task approval; the owner's end-of-program
+  review before any publication remains the final gate. The `agg_sql` fix above was added during
+  W2-1 review-finding remediation (2026-08-08): a numeric-correctness gap in an aggregate this
+  same migration already governs, not a new privilege or schema-meaning question, so it did not
+  need separate ratification. The `tier_update` lower-bound fix was added in a second W2-1
+  review-finding remediation pass the same day: it strictly tightens an existing policy to match
+  the boundary already documented for `tier_read`/`tier_delete` and already modeled by the test
+  harness (`test/support/app-role.ts`), grants no new access, and was applied directly to
+  migration 028 rather than a follow-up migration because 028 had not shipped past this branch.
+
+## 2026-08-08 — Unfiled-capture text/reason require a tier-2 unlock; the classifier guess does not
+
+- **Context:** Livability-program task W2-2 makes `minime_review_queue`'s `inbox_unfiled`/
+  `duplicate` items agent-usable: today they carry only an `inbox_item_id` pointer, so an agent
+  triaging the queue cannot see what the capture said or why the classifier hesitated without a
+  separate, undocumented DB probe. `inbox_items.tier` is always `1` at insert (`insertInboxItem`/
+  `ensureInboxItemIdentity`, `db/migrations/025_inbox_capture_identity.sql`) — a raw capture gets
+  its real content tier only once filed into a PARENTS-map table — so, unlike every other kind's
+  payload enrichment in `review-queue.ts` (which re-resolves visibility through a parent row's own
+  DB-level `tier <= app_allowed_tier()` predicate via `parentMeta`), there is no existing DB tier
+  boundary to lean on for the capture's own free text. `classify.ts:1-3` already documents the
+  product's stance on this gap: a not-yet-classified raw capture is treated as tier-2-equivalent
+  for cloud-routing purposes ("the most intimate destination it might land in") because it might
+  turn out to be a journal entry or an interaction.
+- **Decision:** `minime_review_queue` list joins the pointed-at `inbox_items` row (read-only,
+  `getInboxItem`) for `inbox_unfiled`/`duplicate` items and adds `payload.capture`. The
+  classifier's `type`/`confidence` guess (parsed via the existing `storedClassification` guard,
+  now exported from `watcher.ts`) is metadata about the capture, not the capture's content, and is
+  always attached, at any tier — an agent can see what the classifier thought without unlocking
+  anything. The classifier's one-line `reason` and a ≤500-char capture-text excerpt are attached
+  only when `allowedTier(ctx.actor) === 2`; otherwise both read `"[above current tier]"` and the
+  tool response carries an explanatory gap. The text is read from the capture's immutable
+  `archive_path` only (new `readArchivedCapture`, sha256-verified against `content_hash`) — never
+  from the mutable `raw_path`, which also never crosses the MCP boundary (unchanged from the
+  existing `OMITTED_KEYS` convention) — and reading fails closed to `"[archive unavailable]"`
+  rather than throwing or fabricating text when the archive is missing or fails verification, so a
+  data-integrity fault on one item's bytes cannot cost that item's already-resolved
+  type/confidence or any other item in the same list call. None of this changes the raw
+  `review_queue.payload` row stored at flag time (still just `{inbox_item_id}` /
+  `{inbox_item_id, candidate_title, ...}`, verified unchanged by the existing `m4`/`m10` direct-SQL
+  payload assertions) — `capture` is computed fresh on every `list` call, the same pattern already
+  used for `existing_title`/`label`/`canonical_name`/`question` on other kinds. Secondary,
+  no-unlock path: a new `minime review` CLI command (`src/cli.ts`, exported `reviewQueueSummaries`)
+  lists the same two kinds with full, unmasked text for the owner triaging their own inbox
+  locally — this is the owner's own machine, not an agent connection, so the tier-2 ceremony would
+  be pure friction. `src/cli.ts`'s unconditional top-level `main()`/`process.exit()` was gated
+  behind `if (import.meta.main)` so `reviewQueueSummaries` is importable and directly testable
+  (the spec's own acceptance bar) without spawning a subprocess or killing the test process; no
+  other file imports `src/cli.ts` as a module today, so this is a no-op for the CLI's own
+  subprocess-spawning tests. `fixtures/mcp-tools-list-sdk-1.29.json` was regenerated (the tool
+  description now documents the enrichment); the only diff is that one description string.
+- **Why:** The masking rule has to live in the MCP tool layer because, for this one content type,
+  there is no DB-level tier to inherit — making that explicit here (rather than silently gating on
+  `inbox_items.tier`, which would wrongly read as "already tier-1-safe") is what keeps the
+  boundary intentional and auditable rather than accidental. Splitting metadata (always visible)
+  from content (unlock-gated) mirrors the classifier's own reasoning being useful for triage
+  ("why does this need a human look") independent of whether the human is currently unlocked, and
+  matches the risk note's fail-closed requirement without weakening it into "hide everything on
+  any fault."
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W2
+  correction-loop workstream — the plan's own default (tier-2 gate for capture text, consistent
+  with `classify.ts`'s existing treatment) was adopted as specified, not a bespoke per-task
+  approval; the owner's end-of-program review before any publication remains the final gate.
+
+## 2026-08-08 — Entity-conflict checks are bound to the caller's own tier
+
+- **Context:** Review-finding remediation for W2-6 (`minime_upsert_person`). Two Postgres
+  conflict signals that `person.ts` translates into a caller-visible `BAD_INPUT` were computed
+  with no bound against the calling session's own `app_allowed_tier()`: (1)
+  `upsert_derived_alias`'s `entity_alias_conflict` exception (`db/migrations/022`; the function is
+  used only by `addAlias`/`addOrgAlias` in `src/db/repo.ts`, which are used only by
+  `minime_upsert_person`), matching any existing alias at tier 1 **or 2**, and (2)
+  `orgs_canonical_name_idx`, unique across tier 1+2 combined. Both fired identically whether the
+  conflicting row was visible to the caller or hidden at a tier above it. That made
+  `minime_upsert_person` a tier-2 existence oracle: a locked (tier-1), never-unlocked session
+  could probe candidate alias/rename strings against a tier-1 target it already controlled, and
+  the ok-vs-`BAD_INPUT` split revealed whether a hidden tier-2 person/org already used that exact
+  string — empirically confirmed live, zero unlocks on the probing session. This contradicted the
+  tool's own documented contract ("a DIFFERENT VISIBLE person/org" / "a readable tier") and the
+  no-tier-2-existence-oracle invariant already enforced elsewhere (W1-5's tier-aware `NOT_FOUND`
+  collapsing in `minime_get_context`).
+- **Decision:** Fixed at the SQL layer, where the signal originates, not by rewording the TS
+  catch blocks. `db/migrations/029_scope_entity_conflicts_by_tier.sql`: (1) `upsert_derived_alias`
+  now adds `p.tier <= app_allowed_tier() and a.tier <= app_allowed_tier()` (org branch:
+  `o.tier <= ...`) to its conflict search, so a conflict hidden above the caller's tier is
+  invisible to the check and the call proceeds exactly like "nothing conflicts" — including
+  actually writing the alias, so a same-caller follow-up resolve can't reopen the oracle a second
+  way. (2) `orgs_canonical_name_idx` changed from `unique (lower(canonical_name)) where tier in
+  (1,2)` to `unique (tier, lower(canonical_name)) where tier in (1,2)` — uniqueness is now scoped
+  per tier, mirroring the tier-0-quarantine-namespace precedent already in migration 022, so a
+  tier-1 and a tier-2 org may share a canonical_name; a rename can no longer collide with a hidden
+  row, and a same-tier collision is by construction always a row the caller could already see.
+  `person.ts`'s `isEntityAliasConflict`/`isUniqueViolation` catch blocks are unchanged — they were
+  already textually correct; only the SQL-level boundary was missing. Regression coverage added
+  to `test/person-tool.test.ts`: three tests reproduce the exact repro shape (a hidden tier-2
+  identity minted by an unlocked owner session; a separate, never-unlocked session then probes)
+  for person `add_alias`, org `add_alias`, and org `rename`, each asserting the hidden-conflict
+  call succeeds identically to a genuinely-unused string, and that a same-tier (mutually visible)
+  conflict is still correctly refused.
+- **Why:** A TS-only fix (reword or suppress the error message) would have left a second channel
+  open — a caller could still distinguish the two cases by immediately re-resolving the alias/name
+  afterward (found vs. not found), since a "pretend success but skip the write" response is
+  observably different from a real write on the very next read. Only making the write itself
+  succeed (by bounding the underlying conflict check to the caller's own tier) closes both the
+  immediate response and the follow-up-probe channel at once. Splitting the org unique index per
+  tier — rather than teaching the TS layer to swallow a cross-tier 23505 — was chosen because the
+  index is a hard physical constraint: a rename to a name a hidden row already owns cannot
+  actually succeed while the index spans both tiers, so no TS-side trick can make "success" true
+  without either silently dropping the write (reopening the same follow-up-probe gap) or relaxing
+  what the index guarantees. Scoping it per tier is the narrowest relaxation available: it removes
+  exactly the cross-tier guarantee that was never load-bearing for any caller (`resolve_or_promote_entity`
+  already merges tier 1+2 into one candidate pool before ever inserting, so it never relied on the
+  index spanning both tiers) while keeping the same-tier guarantee that IS load-bearing (no two
+  mutually visible orgs can share a name). Accepted residual: if a session is later
+  owner-approved-unlocked to tier 2, an alias added while locked may now legitimately match two
+  different entities, and exact-name resolution (no `ORDER BY`, pre-existing) may pick either one
+  nondeterministically — a resolution-ambiguity nuisance for an already-privileged, audited
+  unlock, never a new disclosure to a locked caller. People already tolerate the analogous
+  ambiguity for canonical_name (no uniqueness constraint at all, pending the W2-7 merge tool);
+  this extends the same trade to the alias table and, narrowly, to org canonical_name across
+  tiers.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W2
+  correction-loop workstream, which explicitly includes review-finding remediation passes on
+  already-approved task work; this is a correctness/privacy fix within W2-6's existing scope, not
+  a product-shape change.
+
+## 2026-08-08 — minime_refile interface and its anti-laundering evidence-floor policy
+
+- **Context:** Livability-program task W2-3 added `minime_refile`, the owner's manual-filing path
+  for a pending inbox capture (`status=pending`, whether left by the automatic classifier at
+  too-low confidence or a duplicate match) into one of five typed destinations — closing the
+  triage dead end the W1-2 net-surface entry (MCP door row, `docs/SUBSYSTEMS.md`) already names.
+  The tool reuses the watcher's own `fileRow`/claim machinery
+  (`claimPendingInboxItemForRefile`, `src/db/repo.ts`) rather than a parallel filing path, so a
+  manually-filed row goes through the same date-guardrail, dedup, and person/org-resolution logic
+  the automatic pipeline uses. Despite shipping across commits 5dafa0c..ab5db95, neither the
+  tool's public interface nor its anti-laundering policy had a dedicated entry — this backfills
+  both, found as an open review finding (task W2-3F) during 2026-08-08 remediation.
+- **Decision:** (1) **Interface**: `minime_refile(inbox_item_id, type, ...overrides)`, where
+  `type` is one of `task | journal | note | interaction | decision` and the overrides are
+  per-type fields (`title`, `due`, `person_name`, `kind`, `question`, `choice`, `mood`, and
+  `tier` — the last honored only when `type=note`). The call requires an approved tier-2 unlock
+  (`minime_unlock`) up front, rejects a non-pending item and a duplicate-task match with
+  `BAD_INPUT`, resolves any open `inbox_unfiled`/`duplicate` review-queue rows for the capture on
+  success, and never echoes the capture's own text back in its response. (2) **Anti-laundering
+  policy**: beyond the entry-gate unlock, every refile computes a floor —
+  `max(evidenceFloor(stored classifier guess), noteHintTier(capture text))` — from the capture's
+  OWN evidence, read at claim time (`claim.item`, never the pre-claim snapshot, so a concurrent
+  classifier pass landing in the gap is not missed). `journal`/`interaction` are unconditionally
+  tier 2 (`insertJournal`/`insertInteraction` default `tier=2` regardless of any override), so
+  those two destinations need no floor check of their own. A `type=note` refile is floored, never
+  lowered: `fields.tier = max(params.tier ?? floor, floor)`. `type=task`/`type=decision` are
+  REJECTED outright (`BAD_INPUT`) whenever the floor is 2, rather than silently filed at their
+  permanent tier-1 default — neither table has any tier-2 pathway through this tool, so there is
+  no lower-tier-but-still-safe fallback to downgrade into.
+- **Why:** A capture's free text is tier-2-gated before it is filed (2026-08-08, unfiled-capture
+  entry above) precisely because it might turn out to be journal/interaction-grade; a manual
+  filing path that let a caller pick a permanently-unlocked destination type would reopen exactly
+  that laundering channel the read-side gate closes. journal/interaction cannot be the channel
+  (tier 2 unconditionally), so the risk concentrates on task/decision (no tier-2 representation at
+  all) and note (tier is caller-choosable) — rejecting task/decision outright, rather than
+  downgrading, is the only sound response once the evidence says tier-2, since neither table can
+  represent "tier-2 but stored here." Applying that SAME evidence floor to task/decision, not a
+  narrower guard, was a fix made during 2026-08-08 W2-3 review-finding remediation: the
+  first-landed version only guarded `type=note`, so a capture whose stored evidence already said
+  journal/interaction could be refiled verbatim into tasks/decisions — the exact laundering path
+  this mechanism exists to close.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W2
+  correction-loop workstream — the interface and its anti-laundering default were adopted as
+  planned, not a bespoke per-task approval. The reject-vs-floor policy shape described in (2) was
+  designed during 2026-08-08 W2-3 review-finding remediation, within that same ratification's
+  explicit cover for review-finding remediation on already-approved task work; the owner's
+  end-of-program review before any publication remains the final gate.
+
+## 2026-08-08 — Task recurrence primitive + habit_streak metric
+
+- **Context:** Livability-program task W3-1: a completed recurring task ("water the plants
+  every week") used to just vanish — the owner had to re-create it by hand every cycle. Migration
+  030 adds `recur_freq`/`recur_interval`/`recur_anchor` columns directly to `tasks` (not a new
+  `task_templates` table — dropping `recur_freq` back to null is the whole "stop recurring"
+  story) and seeds a `habit_streak` metric. The task's own spec text targeted migration 027,
+  already taken by `027_life_metrics_seed.sql`; migration 029 was landed in the interim by an
+  unrelated W2-6 review fix (`029_scope_entity_conflicts_by_tier.sql`), so this shipped as 030,
+  the true next free number as of this migration — noted here since it is a numbering deviation
+  from the task's own spec, not because renumbering itself is a contract decision.
+- **Decision:** (1) **Materialization**: `repo.upsertTask`'s existing done-transition path (the
+  one that already stamps/clears `completed_at`, W1-3) is extended to, on a false→'done'
+  transition for a row with `recur_freq` set and `superseded_at` still null, INSERT one successor
+  task copying title/body/goal_id/tier/recur_freq/recur_interval/recur_anchor verbatim, with
+  `due = nextDue(...)` (new pure util `src/util/recurrence.ts`), `source='recurrence'`,
+  `derived_from=<completed task id>`, `created_by='system:recurrence'` — full I5 provenance, and
+  guarded idempotent (`select 1 from tasks where derived_from=... and source='recurrence'`) so a
+  repeat done-update, or the dream job's new step 5b crash-safety sweep for a done recurring task
+  that somehow bypassed `upsertTask` entirely, can never mint a second successor. `recur_anchor`
+  is copied verbatim rather than re-derived from each successor's own (possibly
+  end-of-month-clamped) due, and defaults to the supplied due date only at task creation — see
+  `recurrence.ts`'s module comment for why re-deriving it from a clamped date would permanently
+  downgrade a monthly-on-the-31st habit to the 28th instead of recovering the 31st. Because this
+  lives inside `upsertTask` itself, both `minime_upsert_task` and the watcher's inbox dedup-close
+  path ("water the plants — done" matching an open recurring task) materialize identically with
+  no separate code path. (2) **habit_streak tier scope**: unlike every other labeled metric
+  (`spend_by_category`'s category, or `journal_streak`/`mood`/`energy`'s null label), this
+  metric's label is the task's own title — free-form content, not a count or a short catalog
+  string — streamed through `minime_query_metric`, which (spec §7) carries no unlock gate of its
+  own; `metric_defs.agg_sql` IS the whitelist boundary. The agg_sql is therefore restricted to
+  `tier = 1` (excluding both tier-0, absolute per CLAUDE.md, and tier-2, which must stay behind
+  its normal time-boxed unlock) — a locked-down widening of the existing "labeled metrics are
+  live-only" precedent (`dream.ts` rollupMetrics) into "labeled metrics that expose real content
+  must also be tier-scoped in their own SQL." `superseded_at is null` mirrors 028's mood/energy
+  fix, ahead of need: tasks are explicitly out of scope for `minime_correct` today, so a done
+  recurring task cannot actually be superseded yet.
+- **Why:** (1) reuses the exact done-transition/provenance machinery two other paths (the MCP
+  tool and the watcher) already share, rather than adding a third bespoke "close a task" code
+  path with its own materialization logic to keep in sync. (2) `minime_query_metric` being
+  unconditionally reachable (no session-tier check anywhere in `src/mcp/tools/metric.ts`) means
+  every future content-bearing label has to defend itself in its own agg_sql — there is no
+  shared enforcement point to lean on. Restricting to tier 1 costs nothing in practice
+  (`minime_upsert_task` never exposes a tier parameter, so every agent-created task is already
+  tier 1) while closing off the alternative, which would have let a tier-2 recurring task's title
+  leak to any caller with zero unlock ceremony — exactly the disclosure I3's unlock requirement
+  exists to prevent.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W3 workstream
+  — the recurrence primitive and metric were adopted as planned; the tier-1 restriction on
+  habit_streak's agg_sql is a conservative, invariant-preserving implementation detail within
+  that same scope, not a product-shape change. The owner's end-of-program review before any
+  publication remains the final gate.
+
+## 2026-08-08 — Calendar occurrence identity: (uid, occurrence_start) expansion + future-only pruning
+
+- **Context:** Livability-program task W3-2: the calendar importer (`src/importers/calendar.ts`)
+  keyed `calendar_events` on `uid` alone, so a recurring `RRULE` event (a weekly standup, a
+  yearly birthday) only ever imported its `DTSTART` as one row — every future occurrence was
+  invisible to `minime_state`'s calendar window and the `deep_work_minutes` metric. Migration 031
+  changes `calendar_events`' identity to `(uid, occurrence_start)` and a new pure module
+  (`src/importers/rrule.ts`) expands `RRULE`/`RDATE`/`EXDATE` into concrete occurrence rows. The
+  task's own spec text targeted migration 028, already taken by
+  `028_correction_supersede.sql`; the program's reassignment (030) was ALSO taken in the interim
+  by `030_task_recurrence.sql` (W3-1, landed on this branch first). This shipped as 031, the true
+  next free number as of this migration — noted here since it is a numbering deviation from the
+  task's own spec, not because renumbering itself is a contract decision (same convention as
+  030's own migration-comment/DECISIONS precedent).
+- **Decision:** (1) **Schema**: `calendar_events` gains `occurrence_start timestamptz not null`
+  (backfilled `= starts_at` for every existing row), and `unique(uid)` is replaced by
+  `unique(uid, occurrence_start)`. `occurrence_start` and `starts_at` are always written equal by
+  today's importer; they are kept as separate columns so a future single-instance edit (move just
+  this Tuesday's meeting) could change `starts_at` without changing the row's recurrence
+  identity. Migration 031 also grants `minime_app` `DELETE` on `calendar_events` and adds a
+  `tier_delete` RLS policy (`tier >= 1 and tier <= app_allowed_tier()`), mirroring the exact
+  chunks/edges `tier_delete` precedent in `021_runtime_app_role.sql` — the first content table
+  needing deletion since chunks/edges. (2) **Expansion**: `expandOccurrences` (pure: no DB, no
+  clock, no network) supports `FREQ=DAILY/WEEKLY/MONTHLY/YEARLY`, `INTERVAL`, `COUNT`, `UNTIL`
+  (UTC datetime or bare `DATE`), and `WEEKLY`-only plain-code `BYDAY` (no ordinals, `WKST` only
+  when absent or `MO`); `MONTHLY`/`YEARLY` reproduce RFC 5545's actual "day doesn't exist this
+  cycle → skip it, don't clamp" rule (Jan 31 has no February occurrence; Feb 29 only fires on
+  leap years) — deliberately different from `src/util/recurrence.ts`'s end-of-month CLAMPING for
+  task due-dates (030), a separate, simpler design for a different call site. Any other RRULE
+  part (`BYMONTHDAY`, `BYSETPOS`, ordinal `BYDAY`, non-`MO` `WKST`, both `COUNT` and `UNTIL`,
+  `UNTIL` before `DTSTART`, an unrecognized/empty rule) makes the whole rule "unsupported": the
+  importer falls back to importing `DTSTART` alone (RDATE/EXDATE not applied in that fallback)
+  and logs a new content-free audit event, verb `import:rrule-unsupported`
+  (`auditPayload.importMalformed` gains a `calendar`-only `reason: "unsupported_rrule"`,
+  mirroring the existing `import:malformed` shape) — never silent guessing at partial semantics.
+  Each import expands a rolling window (import time → +12 months, cap ~500 occurrences/uid).
+  (3) **Pruning**: `repo.deleteCalendarOccurrencesNotIn(uid, fromInstant, keepInstants)` deletes
+  that uid's rows with `occurrence_start >= fromInstant` not in `keepInstants` — called for
+  *every* imported uid (not only ones with an active `RRULE` this time), so a uid whose export
+  dropped its recurrence entirely (converted to a one-off, same UID) also loses its stale future
+  occurrences. `fromInstant` is always the current import's own "now", so occurrences already
+  dated in the past are structurally excluded from the delete filter regardless of
+  `keepInstants` — re-running an identical import is a no-op, and a superseded rule can never
+  delete history, only prevent stale future rows from lingering.
+- **Why:** Recurring calendar data is the common case for the events the whole point of a
+  calendar mirror is to surface (standups, 1:1s), so importing only `DTSTART` silently made most
+  of a real export invisible — not a corner case. Keying identity on `(uid, occurrence_start)`
+  rather than inventing a separate "expanded occurrence" table keeps the mirror a single flat
+  table (`minime_state`'s calendar query and the `deep_work_minutes` agg_sql needed zero
+  changes — they already just read `starts_at`) and keeps every write going through the same
+  `upsertCalendarEvent` upsert path. Falling back to DTSTART-only (rather than, say, silently
+  dropping the whole event, or guessing at an ordinal/BYMONTHDAY semantic this importer doesn't
+  implement) matches every other importer's established degrade contract in this codebase
+  (`logMalformed`): a human owner can always see *something* for a real calendar entry and the
+  audit trail flags exactly which ones need a closer look, rather than either silently losing
+  data or silently fabricating an occurrence pattern that might be wrong. Scoping pruning's
+  DELETE to `occurrence_start >= fromInstant` (never "not seen in this file" alone) is the
+  reversibility guarantee the risk assessment for this task specifically called for: the importer
+  can only ever destroy mirror data it could regenerate from a subsequent export of the same
+  calendar, and only within the forward-looking window it itself just computed — a stale or
+  buggy `RRULE` change can never retroactively erase a historical record of what actually
+  happened on a past date.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W3
+  workstream — the `(uid, occurrence_start)` identity change and future-only pruning contract
+  were adopted as planned, ratified as part of that same upfront program approval. The owner's
+  end-of-program review before any publication remains the final gate.
+
+## 2026-08-08 — minime_timeline: per-kind locked count as a bounded-range tier-2 disclosure
+
+- **Context:** Livability-program task W3-3 shipped `minime_timeline` (commit eb5404b): a
+  tier-gated date-range read across calendar/journal/interaction/task/decision, answering period
+  questions (`minime_agenda` and `minime_state` cannot, being forward-looking/today-anchored).
+  Every other tier-2-locked signal in the codebase is a boolean existence flag folded into a
+  `gaps` string — `context.ts`'s interaction gap, `review-queue.ts`'s masked-capture gap, and
+  `unlock.ts`'s pending-request gap all say "locked", never how much. `repo.timelineRows`
+  instead returns an exact per-kind numeric count (`{ journal, interaction }`) of the tier-2 rows
+  a caller's OWN chosen `from`/`to` window matched but the session cannot read — a stronger
+  disclosure than any existing precedent, since a caller can narrow `from`/`to` to a single day
+  (the schema allows `from === to`) and repeat across a range to recover the exact per-day count
+  of locked journal/interaction rows (never their content, ids, or titles) without ever holding a
+  tier-2 unlock — e.g. reconstructing which days the owner journaled and how often. The task's own
+  spec ("risk" field) flagged this exact area up front as "New content read path — I3-sensitive
+  ... Orchestrator invariant review required," and CLAUDE.md's workflow rules call for a
+  DECISIONS.md entry for a public interface introducing new schema-meaning/privacy-relevant
+  behavior; the original commit shipped the code but not the entry (caught in first-pass review)
+  — this entry closes that gap for a design that was already built and reviewed as specified, not
+  a new or changed behavior.
+- **Decision:** Keep the per-kind numeric locked count as shipped, computed only when the session
+  is below tier 2 (`allowedTier(actor) < 2`) and only for a kind the caller actually requested via
+  `types` (a caller scoped to `types:['calendar']` gets no journal/interaction accounting, locked
+  or not) — matching `repo.ts`'s own description of the mechanism as "a deliberate, narrow
+  exception to 'never disclose what a locked session cannot read'". Tier-0 sources (`transactions`,
+  `health_samples`) are structurally excluded from `timelineRows` entirely (I3) and never
+  contribute to any count. No narrower alternative (a boolean flag, or a count bucketed/capped to
+  obscure the exact number) is substituted in this remediation.
+- **Why:** `minime_timeline` exists specifically to answer bounded period questions ("summarize my
+  June"), so collapsing "1 locked entry this week" and "40 locked entries this week" into the same
+  boolean signal — the existing precedent elsewhere — would defeat the tool's own purpose: an
+  agent caveating an answer about a month needs to know roughly how much of that month is hidden,
+  not just that some of it is. The count leaks volume only, never identity, content, or
+  time-of-day, and the per-day enumeration this finding describes costs exactly as many tool calls
+  (and therefore audited `events` rows, per I8) as reading each day's tier-1 content directly
+  would — the append-only audit trail is the existing control for that accumulation pattern, the
+  same "aggregate is fine, raw content is not" shape I3 already establishes for tier-0 metrics via
+  `agg_sql`, applied here to a tier-2 count instead. A narrower boolean-only signal (matching
+  `context.ts`/`review-queue.ts`/`unlock.ts`) would be strictly safer but is not substituted here:
+  the task's own risk mitigation explicitly specified "locked disclosure is count-only", so a
+  boolean would silently under-deliver on that spec commitment rather than fixing anything the
+  review finding actually raised — the finding asked for this decision to be recorded, not for the
+  mechanism to change.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W3 workstream
+  — the count-only locked-disclosure design was adopted as planned and specified by the task
+  itself, not a bespoke per-task approval. Recording it here in DECISIONS.md was done during
+  2026-08-08 W3-3 review-finding remediation, matching the review-finding-remediation cover
+  already exercised earlier in this file for W2-3's anti-laundering evidence-floor fix (see the
+  `minime_refile` entry above). The owner's end-of-program review before any publication remains
+  the final gate.
+
+## 2026-08-07 — Single maintenance owner: advisory lock in serve + dream missed-run catch-up
+
+- **Context:** Livability-program task W3-5. Before this task, every resident `serve` process
+  unconditionally created its own nightly dream cron and 15-minute backup cron
+  (`startOwnerMaintenanceSchedule`, `src/serve.ts`) — the docs/DEVELOPMENT.md backlog explicitly
+  named this a gap: "coordinate multiple MCP processes so one process owns watcher/dream/backup
+  work with clean takeover." Two concurrent `serve` processes against the same database (e.g. an
+  MCP-host-spawned session alongside a resident owner service) meant duplicate dream runs and
+  duplicate backup snapshots, with no signal to either process that the other existed.
+- **Decision:** Every `serve` process now calls `repo.tryAcquireMaintenanceLock()` — a
+  non-blocking `pg_try_advisory_lock` on a fixed two-int key `(1296649541, 2)`, distinct from
+  `withCompiledNotesLease`'s `(1296649541, 1)` — before creating any cron. The winner's behavior
+  is unchanged (same dream/backup crons, same log lines). A loser logs `"[minime] maintenance
+  owned by another process"` and schedules only a takeover-retry cron (every 5 minutes,
+  `repo.tryAcquireMaintenanceLock()` again); on success it starts the full schedule exactly as the
+  original winner would have. The lock is a session-scoped Postgres advisory lock held on a
+  dedicated reserved connection for the scheduler's lifetime, released explicitly via
+  `repo.releaseMaintenanceLock()` in `close()` or automatically by Postgres if the holding
+  connection/process dies — so a crashed owner cannot deadlock the survivor's takeover. This
+  implements "maintenance OFF unless it wins the lock" with zero configuration; an MCP-host-spawned
+  `serve` simply loses to a resident owner service without needing to know it exists.
+  Watcher/inbox coordination is explicitly **not** addressed here (inbox claims are already
+  fenced via `claimInboxItem`; multi-watcher coordination stays on the DEVELOPMENT.md backlog).
+  Catch-up: immediately after winning the lock (initially or via takeover), the winner reads
+  `repo.lastEventAt('dream:summary')` and asks croner where the dream cron's next fire after that
+  instant would have been. If that instant already passed — or dream has never once run on a
+  database that has any other event at all (`repo.lastEventAt()` with no verb, the "non-fresh"
+  signal) — it runs one `dream()` after a random 30-90s delay through the existing `run()`
+  wrapper, so a failure surfaces exactly like a normal scheduled failure. `dream()` always writes
+  its `dream:summary` event as the last step even when individual steps fail
+  (`pipeline/dream.ts`), so catch-up cannot loop.
+- **Also fixed as a direct prerequisite:** writing `test/maintenance-lock.test.ts`'s catch-up
+  cases (which fire a real `dream()` through the real `run()` wrapper, per the task's own test
+  spec) surfaced a pre-existing, unconditional deadlock: `dream()` always runs under
+  `withAdminDbScope` (`src/serve.ts`, unchanged by this task), and `adminSql` was a single
+  (`max: 1`) connection pool. `repo.withCompiledNotesLease` (dream step `2b_compile_notes`)
+  reserves one connection from whatever pool is ambient and holds it for its whole callback, and
+  that callback's own nested plain reads — plus a *second*, per-candidate
+  `withCompiledNoteTargetLease` reservation nested inside it — need further connections from the
+  same pool. Under admin scope that pool was `adminSql`, so every admin-scoped `compileNotes` call
+  deadlocked waiting on a connection its own outer reservation was already holding — reproduced
+  even on a fully empty database, so this was not data-dependent and was already live in
+  production on every real nightly `dream()` run, independent of this task's lock/catch-up
+  changes. `src/db/client.ts`'s `adminSql` pool is now `max: 5` (matching `runtimePool`'s
+  headroom; verified against the deepest observed nesting of outer lease + inner target lease +
+  one in-flight query, plus the full H1 compiled-notes regression suite). The maintenance lock and
+  `lastEventAt` reads deliberately do **not** use `withAdminDbScope` — `events` SELECT is already
+  granted to the restricted runtime role (`db/migrations/007_rls.sql`), so they use the
+  5-connection runtime pool instead of adding more permanent load to the admin pool.
+- **Why:** A durable two-int advisory-lock key and the "lose silently, retry, take over cleanly"
+  contract are the kind of recovery-adjacent coordination semantics this file exists to pin down —
+  a future change to the key, the retry cadence, or the catch-up freshness heuristic should be a
+  deliberate, recorded choice, not incidental drift. The freshness heuristic (`lastEventAt()` with
+  no verb as "has this database seen any activity at all") is a specific, recorded design choice:
+  it intentionally does not gate on `onboard:complete` specifically, so a database used only
+  through MCP tools without ever running interactive onboarding is still treated as "non-fresh"
+  and gets caught up. The `adminSql` pool bump is recorded here rather than left as a silent diff
+  because it changes a dependency's connection-count behavior and because the bug it fixes was
+  otherwise going to make this task's own acceptance criterion ("a single dream:summary per night
+  in tests") false in practice — dream never running to completion in production is a correctness
+  regression this task's tests would otherwise have had to paper over instead of catching.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W3 workstream,
+  matching the approval cover already used for the other W3 entries above. The `adminSql` pool-size
+  fix is a conservative, additive change (raising a connection ceiling cannot break code that only
+  ever needed one connection at a time) verified against the full H1 compiled-notes regression
+  suite; it is flagged for a follow-up session to review whether the deeper nested-lease pattern
+  itself (not just the pool ceiling) warrants a more principled fix.
+
+## 2026-08-09 — minime doctor CLI + ops_health + ops_failure review kind
+
+- **Context:** Livability-program task W3-7. Nightly `dream()` runs (W3-5's maintenance lock) had
+  no owner-visible health signal: a database whose maintenance had silently broken for days looked
+  identical, from `minime_state`, to one running cleanly — the only way to know was to read the
+  `events` table directly.
+- **Decision:** `db/migrations/033_ops_failure_kind.sql` recreates `review_queue`'s kind
+  constraint (the strict superset of every kind `017_edge_validation.sql` listed — the latest
+  prior recreation; nothing between 017 and this migration touched it) adding `ops_failure`.
+  `util/audit-payload.ts`'s `dreamSummary` payload gains `failed_steps: string[]`, filtered from
+  the fixed `DREAM_STEPS` step-identifier list by KEY, never by a step's VALUE — so even if a
+  future bug put free text in a step's stored result, only its fixed identifier can ever cross
+  into the audit trail (dream.ts's own `step()` wrapper already collapses every failure to the
+  literal string `"failed"`, discarding the real error; this filter is defense in depth on top of
+  that). `repo.ts` adds `recentEventsByVerb(verb, limit)` (newest-first, bounded) and
+  `opsHealth()` — the last `dream:summary` event's `dream_last_at`/`failed_steps` plus the open
+  `ops_failure` count. `opsHealth()` takes no actor and is deliberately NOT tier-gated: none of it
+  is personal content, so it is identical for every actor/session regardless of tier (a narrower
+  read than the spec sketch's `opsHealth(actor)`, adopted because the acceptance bar is literally
+  "no tier leak — facts are content-free" and there is no tier-shaped fact to gate). `stateSnapshot`
+  folds `opsHealth()` into a new `ops_health` field; `minime_state`'s description documents it.
+  `serve.ts`'s maintenance scheduler now calls `flagPersistentDreamFailure()` after every `dream()`
+  run, inside the same `withAdminDbScope`: it inspects the last 3 `dream:summary` events, and only
+  when all 3 have at least one failed step AND no `ops_failure` item is already open does it
+  enqueue one (payload: `failed_steps` from the most recent of the 3, `since` the oldest's
+  timestamp) — one bad night never pages the owner, three in a row does, exactly once, and the
+  item stays open (a later clean run does not auto-resolve it) until a human resolves it.
+  `minime_review_queue` adds `ops_failure` to its kind enum; its payload has no `CONTENT_KEYS` so
+  it renders unmasked with no tier-2 unlock needed, matching its "system health, not owner data"
+  framing. New `src/ops/doctor.ts` (`bun run src/cli.ts doctor`, wired into `cli.ts` BEFORE the
+  `ollamaPreflight` gate, like `backup:pre-update`, so it can report Ollama being down as one line
+  among several instead of dying before printing anything) runs 7 independent, individually
+  try/catch-wrapped checks — Postgres connectivity, Ollama reachability (non-fatal; skips the real
+  network call under `MINIME_MOCK_OLLAMA` unless a test injects a probe), dream
+  freshness/failures/persistent-failure (folded into one worst-first line from `opsHealth()`),
+  backup-dump freshness (`db-dump/minime.sql` mtime + `minime.manifest.json` presence — backup
+  writes no audit verb today, so file mtime is the honest freshness signal), maintenance-lock
+  holder presence (new `repo.maintenanceLockHeld()`, a read-only `pg_locks` query against the
+  existing W3-5 advisory-lock key `(1296649541, 2)`), and disk headroom for `data/` and `db-dump/`
+  separately (`node:fs.statfsSync`, injectable via `DoctorProbes` for tests) — and exits nonzero
+  only when Postgres is unreachable, dream has never run or is stale past 48h, an `ops_failure`
+  item is open, or a disk is critically low (<3% free); every other problem prints `WARN` without
+  forcing a nonzero exit (backups being off is a legitimate, common configuration choice per
+  GUIDE.md, so a missing/stale dump is never fatal on its own). No check ever prints a secret,
+  URL, DSN, path, or raw child/error output — only fixed labels and counts.
+- **Why:** This is the kind of tiered-egress/public-interface boundary this file exists to pin
+  down. `failed_steps` is a narrow, deliberate exception to "dream step results never leave the
+  audit boundary as free text," justified only because it is drawn from a fixed, closed vocabulary
+  of code identifiers and filtered by key, never by a step's actual (possibly-arbitrary) stored
+  value. Making `ops_health` identical for every actor/tier, rather than gating it, is itself a
+  small, explicit privacy-boundary decision: operational facts about the maintenance pipeline are
+  not "the owner's data" in the I3 sense and gain nothing from being hidden behind a tier-2 unlock.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W3 workstream,
+  matching the approval cover already used for the other W3 entries above.
+
+## 2026-08-09 — W3-8: sanitized local ops log amends the H3 content-free-diagnostics contract
+
+- **Context:** H3 (2026-07-23) made backup/repair diagnostics fully content-free: audit events
+  and console/CLI output carry only fixed sentinel strings, never a path, URL, child process
+  output, or secret. That is the right default, but it also means a real, recurring backup
+  failure (a locked restic repository, a full disk, a bad restic password, an unreachable
+  Postgres) looks identical to the owner as any other failure — `minime doctor`/`ops_health`
+  (W3-7) can say a night failed, but not why, and the owner has no local way to tell "the disk is
+  full" from "the restic password file rotted" without re-running the command by hand and reading
+  raw output themselves.
+- **Decision:** Amends H3 to add one narrow, owner-only exception, ratified explicitly for this
+  task (see Approved by) rather than folded into the program's blanket wave approval, per this
+  task's own risk flag ("weakens a recorded privacy posture"). Audit events and console/CLI
+  output are unchanged in shape and stay exactly as content-free as H3 required. A new local file,
+  `data/logs/ops.log`, is the one addition: mode 0600 in a mode-0700 `data/logs/` directory (the
+  same directory the launchd/systemd service templates already redirect `serve`'s own
+  stdout/stderr into, `scripts/install-service.sh`), created/verified with the same symlink-safe
+  `preflightPrivateRoot`/`assertNoSymlinkComponents` conventions `atomic-file.ts` uses for
+  `data/inbox`, and rotated to `ops.log.1` (single generation, lazily checked before each append)
+  once the current file is at/over ~1MB. New `src/ops/ops-log.ts` is the whole surface:
+  `classifyStderrLine(line)` is a fixed, closed regex table — restic "repository is already
+  locked" → `repo_locked`; "no space left on device" → `disk_full`; "unable to open config
+  file"/"wrong password" → `repo_auth`; "connection refused" → `pg_unreachable`; anything else,
+  always, → `unclassified` — and never returns, retains, or logs the line it was given, matched or
+  not. `appendOpsLine({step, code?, errorClass?, detail?})` writes one line (ISO timestamp, fixed
+  step identifier, `exit=<code>` when a process exit code applies, `class=<errorClass or detail>`)
+  and is best-effort: every call site awaits it with `.catch(() => {})` so a logging failure can
+  never interrupt the operation it was trying to record. Three `appendOpsLine` call sites populate
+  it, all with fixed, code-level identifiers only: `backup.ts`'s shared command runner now pipes
+  stderr instead of discarding it (`stdout` is still ignored), bounded to the first 4KB and always
+  drained to completion so a verbose child can never deadlock the runner on a full, unread pipe; on a
+  nonzero exit from the dependency probe, `restic backup`, `restic forget`, or `pg_dump`, the
+  first line of that bounded buffer is classified and appended alongside the exit code (the other
+  `BACKUP_DETAIL` failure modes — data-root rejection, dump staging/cleanup, connection handoff,
+  manifest — have no child process/stderr to classify and are deliberately left unwired, a
+  conservative scope decision, not an oversight). Every `BACKUP_DETAIL` sentinel gains a fixed
+  suffix, `" — see data/logs/ops.log"`, added uniformly at the constant's definition (this is the
+  only change to those strings; the ad hoc "not configured"/"in flight" strings elsewhere in
+  `backup.ts` are untouched, and `dreamSummary`'s audit payload shape and its `DREAM_STEPS`
+  key-only filtering, W3-7, are unchanged). `dream.ts`'s per-step catch (now factored into an
+  exported `runDreamStep` for direct testability) and `serve.ts`'s cron-level catch both append one
+  line naming the fixed step/cron label and `error.constructor.name` only — never `error.message`,
+  which may carry private prose (dream.ts's existing comment on this, predating W3-8). Non-`Error`
+  throws fall back to `typeof error` (`"string"`, `"object"`, …), never the thrown value itself.
+- **Why:** A sanitized, allowlist-only local file that only the owner's own filesystem account can
+  read is a materially different exposure than loosening the audited/console-visible surface H3
+  locked down — it is never audited and never reachable by an agent (I2). It is not, however,
+  isolated from backup: `data/logs/` sits inside `config.dataDir`, and the nightly dream step 7
+  backup command (`restic backup --tag dream … config.dataDir …`, `src/pipeline/backup.ts`) covers
+  that whole tree with no exclusion for `data/logs`, so `ops.log` is backed up along with
+  everything else under `data/` — and per the already-ratified 2026-06-11 decision above,
+  `RESTIC_REPOSITORY` may point at a cloud object store, so on that configuration this file's
+  content does leave the machine, inside the same client-side-encrypted blob as the rest of
+  `data/`. What makes that acceptable is content, not isolation: every field written to it is drawn
+  from a fixed, closed, code-level vocabulary (a regex table's named classes, a process exit code,
+  or a JS constructor name), never free text, matching the same "fixed sentinel, never raw output"
+  discipline H3 itself established for the audited surfaces — so there is nothing sensitive in the
+  file even when it does travel inside an encrypted backup. The adversarial requirement (a crafted
+  stderr line containing a fake secret or private path must classify to `unclassified` and leave
+  zero substring of itself in the file) is the actual test of that boundary, not just the
+  happy-path classification table.
+- **Approved by:** human owner, explicit ratification of this specific amendment (2026-08-07,
+  decision 8 of the livability-program owner review) — called out for dedicated sign-off distinct
+  from the blanket wave-execution approval used for the other W3 entries, because this task's own
+  risk field flagged it as weakening a previously recorded privacy posture (H3) and required
+  invariant review before merge.
+
+## 2026-08-09 — Important dates: person_dates table + 14-day lookahead + minime_set_person_date
+
+- **Context:** Livability-program task W3-10: the owner had no way to be reminded of a birthday
+  or anniversary ahead of time — `minime_state`/the morning brief only ever saw calendar events,
+  tasks, and commitments. Migration 034 adds `person_dates` (birthday/anniversary/custom, one row
+  per person per kind, `custom` distinguished by an owner-supplied label) and a new tool,
+  `minime_set_person_date`. The task's own spec text targeted migration 030, already taken by
+  `030_task_recurrence.sql`; 031/032/033 were also taken in the interim by W3-2/W3-3/W3-7 landing
+  on this branch first. This shipped as 034, the true next free number as of this migration —
+  noted here since it is a numbering deviation from the task's own spec, not because renumbering
+  itself is a contract decision (same convention as 030/031's own precedent).
+- **Decision:** (1) **Schema**: a separate tier-1 table, not columns on `people` — supports
+  multiple/custom dates and never touches the promotion-sensitive `people` row. `label` is
+  nullable (required only for `kind='custom'`, forbidden for `birthday`/`anniversary` — the CHECK
+  ties presence to kind in both directions); the unique index is on
+  `(person_id, kind, coalesce(label, ''))`, not a bare `unique(person_id, kind, label)`, because
+  Postgres never treats two NULLs as equal for uniqueness — a bare constraint would let a repeat
+  "set my birthday" call silently mint a duplicate row every time instead of updating the one row.
+  `repo.upsertPersonDate` names that same `coalesce(label, '')` expression as its `ON CONFLICT`
+  target. Grants/RLS mirror every other tier-1 content table (`tier >= 1 and tier <=
+  app_allowed_tier()`, post-021 predicate form) with SELECT/INSERT/UPDATE only — no DELETE grant;
+  this is an insert/update-only agent write path with no owner-facing delete tool. Deviation from
+  the task's own spec text: the spec said not to add this table to migration 024's frozen
+  engineer-grant list, read as "don't touch 024.sql itself" (migrations are historical and never
+  retroactively edited) — but `test/m15.roles.test.ts` has a live regression test asserting every
+  `tier_read` policy scoped to `minime_app` also covers `minime_engineer_ro`, with its own comment
+  describing catching exactly this omission. `person_dates` is ordinary tier-1 content, the same
+  engineer-readable default every other tier-1 table already has, so migration 034 grants
+  `minime_engineer_ro` SELECT directly (mirroring how `026_time_semantics.sql` extended engineer
+  access to `metric_cache_state` in its own migration, not by editing an earlier one), and the
+  three reviewed allowlists in `test/m15.roles.test.ts` gained `person_dates` alongside it. (2)
+  **Next-occurrence math**: `repo.upcomingPersonDates(today, days, actor)` computes, per row, the
+  earlier of this-year's and next-year's `(month, day)` that is `>= today`, clamping day-of-month
+  to the real last day of that candidate month/year (`least(day, last day of month)`) so a
+  Feb-29 birthday surfaces on Feb 28 in a non-leap year — never skipped, never rolled into March.
+  `minime_state`'s `upcoming_dates` calls this with a fixed 14-day window (`[today, today+13]`,
+  today counted as day one). Visibility is gated on BOTH the date row's own tier and its person's
+  tier — a person promoted to tier 2 makes their tier-1 dates drop out at tier 1 too, accepted as
+  consistent with how every other person-attached fact already behaves once its person is hidden,
+  not special-cased. (3) **Tool**: `minime_set_person_date` targets by `person_name` (resolved
+  like `minime_get_context`) or `person_id`; both branches use the same direct "not found or above
+  current access tier" wording (the id-branch's existing style elsewhere in this codebase), a
+  deliberate departure from `minime_get_context`/`minime_upsert_person`'s softer person-or-org
+  name-branch wording — this tool only ever targets a person, so the extra "a match may exist at
+  tier 2, consider an unlock" hedge those two carry for their org fallback doesn't apply. (4)
+  **Morning brief**: `agents/skills/morning-brief.md`'s existing "Coming up this week" section
+  (added W1-8, sourced from `minime_agenda`) is renamed "Coming up" and now explicitly instructs
+  merging `minime_agenda`'s task deadlines (7-day window) with `minime_state`'s `upcoming_dates`
+  (14-day window, already in hand from the existing `minime_state` call — no new tool call) into
+  one day-grouped, kind-labeled list, rather than adding a second near-identical "Coming up"
+  heading for dates alone. `envelope.ts`'s `DATE_ONLY_KEYS` gains `"date"` (the field name
+  `upcoming_dates` entries use) so it renders as a plain `YYYY-MM-DD`, not reformatted through the
+  caller's timezone the way an `_at` timestamp is — the same pitfall `stateSnapshot`'s own "today"
+  anchoring comment warns about, which would be actively wrong for a birthday.
+- **Why:** A dates table (not columns on `people`) is the conservative, reversible choice the task
+  itself called for: it supports the real shape of the data (a custom date needs a label to be
+  distinguishable; a person has at most one birthday) without ever writing to the row extraction
+  and merge/retype machinery already treats as sensitive. Fixing the NULL-uniqueness gap up front
+  (rather than shipping the bare `unique(person_id, kind, label)` the spec's approach text
+  literally described) was necessary for the spec's own stated acceptance bar — idempotent
+  upsert — to actually hold; the spec's literal column/constraint description and its own
+  behavioral requirement were in tension, and the requirement won. Extending `minime_engineer_ro`
+  access despite the spec's contrary instruction was the same kind of resolution: keeping an
+  existing, deliberately-designed regression test green (and not weakening its blanket rule with a
+  bespoke, untested exception) is more conservative than leaving one new table silently outside an
+  established, tested invariant. Reusing the existing "Coming up" section instead of adding a
+  second one (explicit programmatic instruction for this task) avoids the morning brief reading as
+  two disconnected forward-looking lists when the owner experiences them as one question ("what's
+  coming up").
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W3 workstream
+  — the `person_dates` table, `minime_set_person_date` tool, and morning-brief harmonization were
+  adopted as planned; the NULL-uniqueness fix and the `minime_engineer_ro` grant are conservative,
+  invariant-preserving implementation details within that same scope, not product-shape changes.
+  The owner's end-of-program review before any publication remains the final gate.
+
+## 2026-08-09 — W3-11: local push channel for a counts-only morning-brief notification
+
+- **Context:** Livability-program task W3-11. Everything Minime has produced so far (minime_state,
+  minime_agenda, the morning-brief/evening-review skills) is pull-only — the owner has to open an
+  agent session to see it. This is the first PUSH surface: `serve` itself, unprompted, tells the
+  owner something. The task's own spec shipped with an `owner_decision` block still open (exactly
+  how much content the notification carries, and whether an optional network-adjacent fallback
+  target is wanted at all) — both resolved by the owner ahead of this task's execution as part of
+  the same upfront program ratification the other W3 entries cite (see Approved by), landing as
+  the adopted defaults below; this entry is called out for its own dedicated paragraph, not folded
+  silently into that blanket approval, because a push channel is a materially new class of surface
+  for this codebase regardless of how narrow its content is.
+- **Decision:** New `src/ops/push.ts` + `BRIEF_CRON`/`NTFY_URL` in `src/util/config.ts`.
+  (1) **Content is counts-only, by construction, not by discipline.** `buildBriefText` never reads
+  a title/question/name field off `stateSnapshot()` (`minime_state`'s underlying read) — it reads
+  only `.length` on five of its arrays and the raw `review_queue_open` integer, plus
+  `ops_health.failed_steps`
+  (W3-7's already-content-free fixed dream-step vocabulary) folded to the word `OK` or
+  `failed(<step,...>)`. The rendered line is fixed shape: `Minime: N events today, M tasks due, K
+  decision reviews, R review items, D upcoming dates; maintenance OK/failed(...)`. This is
+  deliberate for a channel whose whole point is rendering on a locked phone/desktop screen where
+  ordinary tier gating (I3) does not apply — a notification banner has no unlock prompt, so it
+  must be safe to show unconditionally, at every tier, at every screen-lock state, always. The
+  no-actor `stateSnapshot()` call this closure makes has a second, load-bearing consequence for
+  that same reason: `allowedTier()`'s SQL (`app_allowed_tier()`, migration 023) reads the
+  `minime.actor`/`minime.session_id` session GUCs to find a live tier-2 approval, and this call
+  sets neither, so it deterministically resolves tier 1 regardless of any real tier-2 unlock open
+  elsewhere at the instant the cron fires — the counts can never be inflated by, or hint at the
+  existence of, a coincidental unlock. (2) **Delivery is local-first, opt-in, off by default.**
+  `BRIEF_CRON` (empty string, default) gates a new cron registered inside
+  `startOwnerMaintenanceSchedule`'s `beginOwnedMaintenance` — same lock-winner-only pattern
+  `BACKUP_CRON`/`RESTIC_CHECK_CRON` already use (W3-5/W3-9), so exactly one resident `serve`
+  ever fires it. `deliverBrief` attempts every applicable channel independently rather than
+  falling back through a priority list — the OS notifier (macOS `osascript -e 'display
+  notification …'`, Linux `notify-send`, resolved via `Bun.which` and invoked as an execv array,
+  never a shell string) and, separately, an optional `NTFY_URL` POST — because they are different
+  destinations (this machine's screen vs. a subscribed phone) the owner may reasonably want both
+  firing, not one superseding the other. `NTFY_URL` is the one genuinely new decision, distinct
+  from the counts-only content question: it is validated once at config load
+  (`parseNtfyUrl`), FAIL CLOSED, to an exact loopback literal (`localhost`/`127.0.0.1`/`::1`,
+  after `new URL()`'s own ambiguous-numeric-IPv4 canonicalization) — unlike `RERANK_URL`
+  (`src/search/rerank.ts`), which fails OPEN (silently disables) because a flaky reranker must
+  never break search. A misconfigured push target protects no such caller, and the owner just
+  tried to turn a brand-new surface on, so a loud refusal at startup beats a notification that
+  silently never arrives. This keeps I1 intact: no external network dependency is introduced,
+  because everything NTFY_URL can ever reach is the owner's own loopback interface. (3) **Delivery
+  failure is local-only; the audit event is not.** A total delivery failure throws inside the
+  cron's `run()`-wrapped callback (the same wrapper dream/backup steps already use), which logs
+  the fixed label `"push brief"` plus `error.constructor.name` — never the message — to
+  `data/logs/ops.log` (W3-8) and swallows the rejection so the scheduler itself never crashes.
+  Independently, one `push:brief` audit event is written per delivery ATTEMPT regardless of
+  outcome, through a new `auditPayload.pushBrief` constructor (`src/util/audit-payload.ts`) —
+  six fields, five bounded non-negative integers and one boolean, the identical numbers that were
+  rendered into the notification text, nothing else; `expectedPayloadKind`'s closed verb→shape
+  map gained the one new `"push:brief"` entry this requires (the same allowlist that already
+  makes an unregistered verb/payload pairing a hard `invalid_audit_payload` throw, not a silent
+  gap). No new MCP tool, no schema/interface change on the agent-facing door (I2) — this is a
+  supervisor-only surface, invisible to and unreachable by any agent.
+- **Why:** The content-only-by-construction design (reading nothing but counts off the snapshot,
+  ever) is a stronger guarantee than "remember not to include titles" would have been, and matches
+  how tier-0/I3 boundaries are enforced elsewhere in this codebase — structurally, not by
+  convention. Deterministically pinning the read to tier 1 (by never setting the actor/session
+  GUCs) closes a subtle edge the spec text did not call out explicitly: without it, a brief that
+  happened to fire while the owner had a tier-2 session open elsewhere would silently carry
+  different, unlock-shaped numbers, which defeats the entire "safe on a lock screen, always" bar
+  the counts-only design was chosen for. Reusing the exact lock-winner cron pattern already proven
+  for backup/restic-check (W3-5/W3-9) rather than inventing a second scheduling mechanism keeps
+  the maintenance supervisor as the one place that owns timing decisions. Fail-closed for
+  `NTFY_URL` (the opposite of `RERANK_URL`'s fail-open) is not an inconsistency: the two settings
+  sit at different points on the same "does silence or refusal serve the owner better here"
+  question, and the reranker and the brief land on opposite sides of it because a search stage
+  that quietly degrades is safe while a push channel that quietly never arrives is not.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W3 workstream
+  and, within it, explicitly resolved this task's own open `owner_decision` (counts-only content;
+  optional loopback-only `NTFY_URL` wanted) as the adopted defaults implemented here — called out
+  in its own paragraph above rather than folded silently into that blanket approval, as the W3-8
+  ops-log entry did for the same reason, because this is a new class of surface (the first the
+  system pushes to the owner unprompted) even though its content is minimal by construction.
+
+## 2026-08-09 — Goals live: minime_upsert_goal, goal_review dream kind, least-privilege goals UPDATE
+
+- **Context:** Goals (`002_core.sql`) have existed since v1 but were product-dead: `insertGoal`
+  had no update counterpart at all, no MCP tool ever called it (only `onboard.ts` and demo/test
+  fixtures did), `insertGoal` never called `indexParent` so no goal was ever searchable, and the
+  `quarter` horizon — valid per the table's own check constraint and already used in seed data —
+  was unreachable through any interface. `minime_app`'s grants (`021_runtime_app_role.sql`) never
+  included UPDATE on goals at all; `028_correction_supersede.sql` later opened exactly the two
+  supersede columns, still not enough to change a goal's own statement/why/status/parent_id.
+- **Decision:** New MCP tool `minime_upsert_goal` (`src/mcp/tools/goals.ts`): `id?`, `horizon`
+  (life|year|quarter, required on create, fixed thereafter — not part of the update path at all),
+  `statement` (required on create, optional on an id-only update — coalesce semantics, the same
+  "resend only what changed" ergonomic `upsertTask` established, reindexing the STORED row rather
+  than raw params so an id-only status change never blanks the search text), `why?`, `status?`
+  (active|achieved|dropped), `parent_id?` (three-state: omit keeps, explicit null clears,
+  matching `upsertTask`'s own due/goal_id handling). `repo.ts` gains `updateGoal` and
+  `goalsOverview` (tier-bounded active-goal list: horizon, statement, an open-task count scoped
+  to inbox/active/waiting, and the most recent activity across any linked task regardless of
+  status), which now feeds a new `goals_active` section in `minime_state`. Migration 035
+  recreates `review_queue_kind_check` as the strict superset adding `'goal_review'`, and grants
+  `minime_app` ordinary table-wide UPDATE on goals — the `tier_update` RLS policy already existed
+  and was already correctly bounded (`007_rls.sql`, tightened by `021`/`028`); only the missing
+  table-level grant was blocking it. Recorded in `src/ops/runtime-role-privileges.ts`'s reviewable
+  allow-list. `dream.ts` gains two steps: `2d_goal_backlog_index` (idempotent `indexParent`
+  backfill for any goal with no chunks yet — chiefly onboarding-era and seed/fixture rows written
+  before this task) and `6b_goal_reviews` (flags an active goal untouched, with no linked task
+  touched either, for 90+ days — deduped like every other kind; the queue payload carries
+  `goal_id` only, never the statement, which `minime_review_queue` resolves fresh at the caller's
+  own tier via the same `visibleTitle`/`parentMeta` path `decision_review` already uses).
+  `onboard.ts`'s `sectionGoals` now also asks a third "this quarter's goal" loop and calls
+  `indexParent` for every goal it creates — previously the one onboarding section that never
+  indexed its own writes.
+- **Why:** Goals were schema-complete but functionally inert — nothing could edit one, search
+  for one, or be reminded that one had gone stale, and a third of the horizon vocabulary the
+  schema itself defines was unreachable by any caller. This closes exactly that gap using the
+  patterns W2/W3 already established for tasks/decisions/commitments (coalesce id-only update,
+  PARENTS-map indexing at write plus a bounded dream-step backfill for what predates it, flag-only
+  dream-step review with fresh tier-scoped resolution, and a narrowly-scoped least-privilege grant
+  expansion recorded in the reviewable allow-list) rather than inventing new ones.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W3 workstream
+  — task W3-12, implemented as specified (migration renumbered 031→035 only because 031-034 were
+  already taken by other W3 tasks landing first on this branch, the same numbering-deviation
+  precedent 030/031/034 each already documented; not a product or scope decision in itself).
+
+## 2026-08-09 — Commitments live: promise capture on minime_log_interaction, minime_upsert_commitment close path, least-privilege commitments UPDATE
+
+- **Context:** Commitments (`002_core.sql`) existed since v1 but were populated only by the demo
+  seed: `insertCommitment` had no update counterpart, no MCP tool ever called it in production,
+  and it silently dropped `tier`/`derived_from` even though its own `Std` parameter type carried
+  both — while three tools (`minime_state`, `minime_get_context`, `minime_search`'s underlying
+  index) and four skills (morning-brief, person-brief, evening-review, decision-brief) narrated an
+  "open commitments" section that could never contain anything but seed rows, and evening-review's
+  own capture step routed a promise through `minime_upsert_task` instead — the wrong table, with
+  no `to_whom`. A review flagged this as a fork: implement the write path for real, or strip the
+  dead read surface. The owner chose to implement (Option A).
+- **Decision:** `minime_log_interaction` (`src/mcp/tools/interactions.ts`) gains an optional
+  `promise: {what, due?}` param: when present, the same call that logs the interaction also opens
+  a commitment via `insertCommitment`, with `to_whom` read back as the resolved subject's own
+  canonical name (not the caller's raw, possibly-aliased input) via a new `personCanonicalName`/
+  `orgCanonicalName` pair in `repo.ts`, resolved lazily — only when a promise is actually given,
+  never on a plain log-interaction call. Both route through a new security-definer SQL function,
+  `entity_canonical_name(entity_kind, id)` (migration 036, mirroring `person_has_nonworking_relation`/
+  `touch_person_last_contact`'s existing style: a fixed `'person'|'org'` `CASE`, floored to `tier
+  in (1,2)`), rather than a plain `select canonical_name from people/orgs where id = ...`: an
+  ordinary select is bound by the CALLER's own `tier_read` RLS policy and returns zero rows for a
+  locked caller reading back a brand-new tier-2 subject it just minted in this same call — caught
+  by `test/entity-tier-provenance.test.ts`'s restricted-role subprocess harness, which runs
+  `minime_log_interaction` through an actual RLS-bound connection rather than the owner connection
+  every other test uses. The new function is recorded in `src/ops/runtime-role-privileges.ts`'s
+  `applicationFunctions` allow-list alongside its siblings. `derived_from` is the interaction's id
+  (I5), and `tier` is 2 — matching the interaction itself, since a promise made
+  during a logged, relationship-tier contact is the same class of content as the contact that
+  carries it (tier-2 gating therefore applies identically: hidden from a locked `minime_state`/
+  `minime_get_context`, visible after the owner approves an unlock, same as any other tier-2 task
+  or decision already behaves). The write receipt stays byte-identical to the pre-existing
+  `{interaction_id}` shape when no promise is given; `commitment_id` (and its source entry) is
+  added only when one is. New MCP tool `minime_upsert_commitment` (`src/mcp/tools/commitments.ts`,
+  `id?`, `what`, `to_whom`, `due?`, `status?` open|kept|renegotiated|broken) creates a
+  commitment directly (tier 1, for a promise with no interaction to hang it on) or, id-only,
+  closes/reschedules one — `what`/`to_whom` are fixed at creation and not part of the update path,
+  the same "resend only what changed" ergonomic `upsertTask`/`upsertGoal` already established, via
+  a new `repo.ts` `updateCommitment(id, {status?, due?})` (`due` three-state: omit keeps, explicit
+  null clears). Both write paths call `indexParent("commitment", ...)` — previously never called
+  for a commitment at all, so none was ever searchable. Migration 036 grants `minime_app` ordinary
+  table-wide UPDATE on commitments — the `tier_update` RLS policy already existed and was already
+  correctly bounded (`007_rls.sql`, tightened by `021`/`028`); only the missing table-level grant
+  was blocking it, recorded in `src/ops/runtime-role-privileges.ts`'s reviewable allow-list, same
+  shape as `035_goal_review_kind.sql`'s identical goals fix. Separately, `stateSnapshot`'s
+  `commitments_open` and `openItemsFor`'s open-items query (`repo.ts`) gain the `superseded_at is
+  null` guard every other PARENTS-table read already carries (`028_correction_supersede.sql`
+  added the column to commitments along with the other eleven, but these two reads were never
+  updated) — dead code before this task since no writer could supersede a commitment, live now
+  that commitments have a real write path. evening-review.md's promise step now routes through
+  `minime_log_interaction`'s `promise` param (or `minime_upsert_commitment` directly) instead of
+  the wrong-table `minime_upsert_task` workaround; person-brief.md and morning-brief.md gain a
+  one-line mention of capturing/closing a commitment at the points where each skill already talks
+  to `minime_log_interaction`/reports on open items; GUIDE.md documents both paths under "People
+  and interactions". Classifier promise-kind detection (auto-recognizing a promise from inbox
+  capture text) is explicitly out of scope — a follow-up backlog item, not this task.
+- **Why:** Commitments were schema-complete but functionally inert in exactly the shape W3-12
+  found goals in — closing that gap with the identical, already-proven pattern (coalesce id-only
+  update, PARENTS-map indexing at write, a narrowly-scoped least-privilege grant expansion
+  recorded in the reviewable allow-list) rather than inventing a new one, but additionally wiring
+  the one integration point that makes a commitment's origin cheap to capture in the first place:
+  a promise is usually made ⁠— and therefore best recorded — in the middle of logging the contact
+  it was made during, not as a separate follow-up call.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W3 workstream
+  — task W3-13, Option A per the owner's explicit choice between the review's two spec'd
+  resolutions (implement vs. remove the read surface), implemented as specified (migration
+  renumbered 032→036 only because 032-035 were already taken by other W3 tasks landing first on
+  this branch, the same numbering-deviation precedent 030/031/034/035 each already documented; not
+  a product or scope decision in itself).
+
+## 2026-08-09 — Identity/content tier split: resolving an existing identity no longer promotes its tier
+
+- **Context:** Since migration 022, every entity resolution promoted tier via
+  `greatest(current, requested)`: `resolve_or_promote_entity`, `resolve_or_promote_extracted_person`/
+  `_org`, and `upsert_derived_alias` all raised an EXISTING person/org row's stored tier (and
+  bulk-bumped its other aliases) merely because it was resolved again from more-private content,
+  and the `keep_entity_tier_monotonic` trigger forbade any demotion outright. One tier-2 journal
+  mention of a tier-1 friend therefore swallowed their whole identity card — canonical name,
+  relation, `last_contact_at` — into tier 2 permanently, and `minime_log_interaction` (and the
+  watcher's own auto-filed/refiled interaction path) minted every new interaction subject straight
+  at tier 2, so simply logging a call with someone hid their own identity by default.
+- **Decision:** Migration 037 (`db/migrations/037_identity_content_tier_split.sql`) splits identity
+  from content. Resolving an EXISTING person/org/alias row never raises (or lowers) its stored
+  tier regardless of the requested tier — only `derived_from` is backfilled when absent — across
+  `resolve_or_promote_entity`, `resolve_or_promote_extracted_person`, `resolve_or_promote_extracted_org`,
+  and `upsert_derived_alias`; a brand-new row minted by a tier-2 derivation still mints at tier 2,
+  unchanged, and the tier-0 quarantine absorb (`when tier = 0 then 0`) is preserved verbatim
+  everywhere. `keep_entity_tier_monotonic` is replaced by `keep_entity_tier_guarded`: a raise is
+  still always allowed, a tier-0 transition still absorbs unconditionally for the owner connection
+  but is flatly refused for `minime_app`, and a demotion (nonzero tier N to a lower nonzero tier)
+  is allowed only inside a transaction that has explicitly set `minime.allow_tier_demotion = '1'`
+  AND is not running as `minime_app` — the sanctioned owner-CLI review/backfill path W4-2 will add;
+  nothing in this migration's own functions ever exercises that path, since none of them touch the
+  tier column on an existing row anymore. `retypeOrgToPerson` and `mergePersonIntoPerson`
+  (`src/db/repo.ts`) get the same treatment: reusing/merging into an existing person keeps that
+  person's own tier (still floored to 0 by the same tier-0 absorb) instead of raising it to
+  `greatest(tier, incoming)`. `minime_log_interaction` (`src/mcp/tools/interactions.ts`) and the
+  watcher's own auto-filed/refiled interaction path (`src/pipeline/watcher.ts` — the identical
+  product behavior reached through a different entry point) now call `ensurePerson`/`ensureOrg`
+  with `tier: 1` instead of `tier: 2` for a new subject — an owner-initiated contact is
+  identity-tier data, not content — while the interaction row itself, its indexed chunk, and any
+  captured promise/commitment stay tier 2, unchanged. No existing row is rewritten by this
+  migration; a review/backfill pass over history already promoted under the old rule is W4-2,
+  deliberately out of scope here.
+- **Supersedes (identity fields only):** narrows the 2026-08-06 "Derived identities inherit source
+  privacy and provenance" entry's "Promotion is monotonic from tier 1 to tier 2" clause for a
+  person/org row's own identity fields (`canonical_name`, `relation`, `last_contact_at`)
+  specifically — those now live at the identity row's own tier and are never raised merely because
+  the entity is mentioned in, or resolved by, tier-2 content; this discloses at tier 1 that contact
+  happened and roughly when, but never what. That entry's other provisions are unchanged and still
+  govern: the tier-0 absorbing quarantine is never lifted; a brand-new alias spelling or graph edge
+  genuinely DERIVED from tier-2 prose still mints at tier 2 (content, not identity); every derived
+  row still records its real `source`/`created_by`/`derived_from`; and the alias
+  privacy-namespace/RLS mechanics are untouched.
+- **Why:** Locating a contact ("I know Alice, we last spoke Tuesday") is meaningfully less
+  sensitive than the content of that contact ("what Alice and I discussed"). The prior monotonic
+  rule conflated the two: one private mention of a public contact permanently hid that contact's
+  own identity card, and every routine `minime_log_interaction` call minted a brand-new phantom
+  identity nobody could find again without an unlock — defeating the tool's basic purpose.
+  Splitting identity from content keeps content strictly tier-gated (I3) while making identity
+  behave like the rest of the owner's address book: writable and locatable at tier 1, regardless
+  of what tier-2 content later happens to mention it.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W4 workstream
+  — task W4-1, the program's own stated highest-risk change, implemented as specified (the
+  ratified split: identity fields stay at the identity's own tier even when the entity is
+  mentioned in tier-2 content; `minime_log_interaction` subjects become tier-1 identities).
+  Migration numbered 037 (the spec's own file list named it "032_identity_content_tier_split.sql
+  (new, provisional number)") only because 032-036 were already taken by other tasks landing first
+  on this branch — the same numbering-deviation precedent 030/031/034/035/036 each already
+  documented; not a product or scope decision in itself.
+
+## 2026-08-09 — Entity demotion path: owner-CLI-only restore, entity_promotion review kind, migration 038 backfill
+
+- **Context:** 037_identity_content_tier_split.sql (W4-1) stopped NEW entity resolves from
+  raising an existing person/org's stored tier, and built the guarded `keep_entity_tier_guarded`
+  trigger that allows a 2→1 demotion only on a non-app connection with the transaction-local
+  `minime.allow_tier_demotion` GUC explicitly set — but nothing yet used that mechanism, and every
+  row the pre-037 monotonic rule had already swallowed into tier 2 stayed there, deliberately left
+  as "a review/backfill pass over history is W4-2, out of scope here" (037's own header comment).
+- **Decision:** Three pieces close that gap. (1) Migration 038 recreates `review_queue`'s kind
+  check constraint to add `'entity_promotion'` (strict superset of 035's list) and backfills one
+  deduped review item per "previously swallowed" tier-2 person/org — owner-created (`created_by
+  = 'human'` or `source in ('onboard','manual')`) OR tier-1-evidenced (at least one tier-1 edge
+  touches it, or it carries a tier-1 alias) — payload `{entity_type, entity_id}` only; no schema
+  change beyond the constraint, no grant change. (2) Ongoing detection: `ensurePerson`/`ensureOrg`
+  (`src/db/repo.ts`) now flag the identical situation live — a tier-1-requested resolve (the
+  default) that finds an EXISTING identity still reading tier 2 via `readable_source_tier`
+  (bypassing RLS the same way `sourceTierForParent` already does) inserts a deduped
+  `entity_promotion` item and otherwise changes nothing; this never runs for extraction's own
+  `ensureExtractedPerson`/`ensureExtractedOrg`, only the owner-facing resolve path
+  (`minime_log_interaction`, onboarding, the watcher's auto-filed interaction path). (3) The owner
+  CLI `entity:restore-tier <person|org> <id>` (`src/cli.ts`, placed ahead of the `ollamaPreflight`
+  gate like `unlock:approve`) wraps a new `restoreEntityTier` (`src/db/repo.ts`) in
+  `withAdminDbTransaction`: it sets the demotion GUC, demotes ONLY that person/org row's own
+  tier — any alias or edge minted BY a tier-2 extraction stays tier 2, stated in the CLI's own
+  output — resolves the matching open review item, and audits verb `entity:tier:restored` via a
+  new fixed-allowlist `auditPayload.entityTierRestored` constructor carrying the entity id only,
+  never its name. `entity:restore-tier --list` prints pending items WITH names (owner-terminal
+  read, `pendingEntityPromotions`, unmasked like the existing `minime review` CLI listing).
+  `minime_review_queue` (`src/mcp/tools/review-queue.ts`) gains the `entity_promotion` kind,
+  masked through the same tier-filtered `visibleTitle` pattern as `phantom_person`/`goal_review`
+  — the name reads `[above current tier]` until the caller's own tier covers it. There is no MCP
+  tool, and no change to any MCP tool, that can move a tier: `restoreEntityTier` is never called
+  from `src/mcp/tools/`. `review-triage.md`/`evening-review.md` are updated to surface the flag
+  and point at the CLI command, never to claim the agent can show the masked name or perform the
+  restore itself.
+- **Ratified (owner boundary):** (1) Demotion approval lives in the owner terminal — the CLI
+  command running on the owner/control-plane connection — never in MCP tool resolution; an agent
+  can surface an `entity_promotion` flag and, once unlocked, read the name it resolves to, but no
+  tool call can execute the privacy downgrade itself. (2) The backfill heuristic — owner-created
+  OR tier-1-evidenced — is the definition of "previously swallowed" for migration 038's one-time
+  history pass.
+- **Why:** A demotion is the first sanctioned tier-DOWN write in the system, so it gets the
+  narrowest legitimate path available: a local, owner-authenticated terminal session, gated a
+  second time by a GUC only that connection can set, auditable by id without ever writing the
+  now-more-exposed name into the durable log. Flagging is cheap and reversible (an open queue
+  item); executing a downgrade is not something worth trusting to an automated heuristic or an
+  agent's judgment, however well-evidenced — the owner reads the name and decides. Confining
+  restoration to the identity row itself (not cascading to extraction-derived aliases/edges) keeps
+  the same identity/content boundary 037 drew: restoring a card to tier 1 discloses that the
+  contact exists again, never what tier-2 prose said about them.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W4 workstream
+  — task W4-2, implemented as specified, including both boundary questions the spec flagged for
+  ratification (demotion-lives-in-the-CLI-never-MCP; the owner-created-OR-tier-1-evidenced
+  backfill heuristic) within that same upfront authorization. Migration numbered 038 (the spec's
+  own file list named it "033_entity_promotion_backfill.sql (new, provisional number)") only
+  because 033-037 were already taken by other tasks landing first on this branch — the same
+  numbering-deviation precedent 030/031/034/035/036/037 each already documented; not a product or
+  scope decision in itself.
+
+## 2026-08-09 — W4-4: minime_search discloses a tier-2 locked match count
+
+- **Context:** `ftsCandidates`/`vectorCandidates` (repo.ts) both filter `c.tier >= 1 and c.tier <=
+  allowed` in their own SQL, so a locked session's `minime_search` silently drops any chunk above
+  its current tier — the result list is just shorter (or empty), with no signal that a real match
+  exists at tier 2. W3-3 (`032_timeline_locked_count.sql`) already established the pattern for
+  this exact gap on `minime_timeline`: a SECURITY DEFINER function that counts what a locked
+  session's own RLS would hide and returns only a bare integer, never a row. W1-8's honesty pass
+  (`agents/skills/query.md`, 2026-08-08) deliberately did NOT extend that promise to search,
+  instructing agents to "never state or imply a count of what's hidden (the envelope carries
+  none)" — true at the time, since no such count existed for search. This task builds it and
+  updates that instruction now that it is real.
+- **Decision:** Migration 039 (`039_suppressed_hit_count.sql`; the spec's own file list named it
+  "034_suppressed_hit_count.sql (new, provisional number)" — 034-038 were already taken by other
+  tasks landing first on this branch, the same numbering-deviation precedent 030/031/034-038 each
+  already documented, not a product or scope decision itself) adds
+  `suppressed_candidate_count(q text, q_vec vector(768), k int) returns integer`: SECURITY
+  DEFINER, mirroring `ftsCandidates`'/`vectorCandidates`' own candidate SQL (same `chunks` table,
+  same `tier >= 1` floor — tier 0 is never touched, I3 — same fts/vector top-k ordering) but
+  without their `tier <= allowed` ceiling, then counting distinct `(parent_type, parent_id)` pairs
+  whose tier exceeds `app_allowed_tier()` (read inside the function itself, so an already-unlocked
+  caller gets a structural 0 even if the JS-side gate is ever bypassed). `k` is clamped to 50 —
+  ftsCandidates/vectorCandidates' own top-50 cap — regardless of what a caller passes. Retracted
+  parents (`superseded_at` set, `superseded_by` null — 028/W2-5) are excluded via the same
+  twelve-PARENTS-table union `parentMeta` itself filters against, since a retracted row will never
+  reappear after an unlock and counting it as "locked" would overstate what an unlock buys. The
+  function returns ONLY the bare integer — no id, title, or snippet, which would let a caller
+  enumerate what is locked rather than merely know something is. `repo.ts` gains a shared
+  `ftsOrQuery` helper (extracted from `ftsCandidates`, used by both it and the new
+  `suppressedCandidateCount`) so the count can never silently answer a differently-folded query
+  than the one `ftsCandidates` itself ran. `hybrid.ts` gains `hybridSearchDetailed` (re-runs the
+  unchanged `hybridSearch` for hits, then computes the count separately) so `hybridSearch` itself,
+  and every caller that only wants `Hit[]` (eval harness, pmb/longmemeval scripts, m3/m5 tests),
+  needs no changes; `search.ts` switches to it and pushes
+  `"N matching results are tier-2 locked — an owner-approved unlock (minime_unlock) would include
+  them"` into `gaps` whenever the count is nonzero, independent of (and possibly alongside) the
+  existing zero-hit gap. `query.md`, `morning-brief.md`, and `evening-review.md` are updated to
+  instruct agents to relay this new real count (and `minime_timeline`'s existing one) verbatim,
+  while every other locked signal (`minime_get_context`'s interaction gap, a tier-aware
+  `NOT_FOUND`) stays existence-only and must never have a count invented for it.
+  **Correction (review-finding remediation, 2026-08-09, applied directly to migration 039 since it
+  had not shipped past this branch — the same precedent 028's own review-finding fix already
+  documented):** the original three-argument function was NOT narrowed by the caller's `types`
+  filter at all, which this decision entry at the time justified by analogy to `from`/`to` also
+  being unmirrored. That analogy does not hold: `from`/`to` truly are absent from
+  `ftsCandidates`'/`vectorCandidates`' own candidate SQL (their date narrowing happens later, in
+  `hybrid.ts`, against `parentMeta.event_at`, so there is no date predicate in the candidate SQL to
+  mirror in the first place), but `types` genuinely IS a predicate there
+  (`and (${types === null} or c.parent_type = any(${types ?? []}))`, repo.ts) — omitting it was a
+  real fidelity gap, not an inherent property of "the candidate SQL" the way the date-window
+  omission is. Concretely: a locked `types:["task"]` search whose only matching content was a
+  tier-2 journal entry (no task fixture existed at all) still disclosed "1 matching result is
+  tier-2 locked," a false claim for that exact request — unlocking would have added zero tasks.
+  `suppressed_candidate_count` now takes a fourth `types text[] default null` argument applying
+  the identical predicate to both its `fts_top` and `vec_top` CTEs, and `hybridSearchDetailed`
+  threads `opts.types` (normalized `[] -> null`, the same normalization `hybridSearch` itself
+  applies before its own `ftsCandidates`/`vectorCandidates` calls) into it. The remaining scope
+  limit — the count is not narrowed by `from`/`to` — stands as originally recorded, since that gap
+  really is inherent to what the candidate SQL itself does.
+- **Why:** `minime_search` is the primary lookup path, so silently returning fewer hits while
+  locked — indistinguishable from "nothing else exists" — defeats the same purpose W3-3 already
+  fixed for date-range reads: an agent caveating an answer needs to know that more exists, not
+  just infer it from an oddly-short list. The count leaks volume only, never identity, content, or
+  which specific match — the same "aggregate is fine, raw content is not" boundary I3 already
+  draws for tier-0 metrics via `metric_agg()`, applied here to a tier-2 existence count instead.
+  Reading `app_allowed_tier()` inside the definer function (rather than only gating in JS, as
+  `timeline_locked_count` does with a hardcoded `tier = 2`) is a deliberate strengthening: it
+  makes the function self-limiting even if `repo.ts`'s own skip-when-unlocked check is ever
+  removed or bypassed by a future change. Not narrowing by date was accepted rather than widening
+  the function's signature further, keeping the new SECURITY DEFINER surface only as large as this
+  task's own risk note asked for ("keep k bounded... to bound work") at the cost of a minor,
+  disclosed precision gap — but not narrowing by `types` was a fidelity bug, not an accepted
+  precision limit (correction above): a caller who scoped `types` could be told a nonzero count
+  that did not correspond to their request at all, which is the "drift = misleading counts" risk
+  this task's own spec named up front as the reason invariant-review was required for this
+  migration, so it is fixed rather than merely documented.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W4 workstream
+  — the count-only locked-disclosure design was adopted as planned and specified by the task
+  itself (which explicitly named this a "public-interface + privacy surface change" up front), not
+  a bespoke per-task approval. The remaining date precision limit and the in-function
+  `app_allowed_tier()` read are conservative, invariant-preserving implementation details within
+  that same scope. The `types` correction above strictly tightens an existing disclosure to match
+  what this entry always intended (a count scoped to the caller's own request), grants no new
+  access, and adds no new SECURITY DEFINER surface beyond one more parameter on the same function
+  — so, like 028's own review-finding fix, it did not need separate ratification. The owner's
+  end-of-program review before any publication remains the final gate.
+
+## 2026-08-10 — W4-5: owner-terminal tier-0 CLI reads (`tx list` / `health list`), a recorded exception to "never log, print, or snapshot tier-0 contents"
+
+- **Context:** CLAUDE.md's non-negotiable invariants close with a standalone rule — "Never log,
+  print, or snapshot the contents of tier-0 rows. Row IDs are fine." — enforced everywhere in the
+  system so far: no MCP tool reads `transactions`/`health_samples` content (I3), importers audit
+  only counts (`auditPayload.importSummary`), and `minime_query_metric` is the sole numeric path
+  (I6). That left the owner with no way to eyeball their own raw transaction or health rows short
+  of a manual `psql` session against the owner DSN — real friction for routine bookkeeping
+  ("did June's rent transaction import correctly?") that the product otherwise tries to keep
+  inside Minime's own tools.
+- **Decision:** Two new owner-terminal-only commands, `tx list --month YYYY-MM [--match text]
+  [--limit N]` and `health list --kind <kind> [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--limit N]`
+  (`src/cli.ts`, placed ahead of the `ollamaPreflight` gate like `unlock:approve`/
+  `entity:restore-tier` so reads work without Ollama running), print tier-0 rows directly to
+  stdout — the first place in the system that ever does. Three layers keep this narrow: (1) **TTY
+  gate**: a single function, `renderTier0Lines` (`src/cli.ts`), is the only call site in the file
+  allowed to print a transaction/health field, and its first statement refuses — fixed error,
+  fixed exit code 4 — unless `process.stdout.isTTY` is true, so an agent's Bash tool piping,
+  redirecting, or capturing either command's output gets a refusal instead of rows; both command
+  handlers build their output lines and call this one function rather than ever calling
+  `console.log` themselves (test/tier0-cli-read.test.ts (7) pins this at the source level).
+  `MINIME_ALLOW_NON_TTY_TIER0=1` is a test-only seam (a piped `Bun.spawn` child is deterministically
+  never a TTY) — documented as test-only everywhere it appears, never as an owner-facing setting.
+  (2) **Count-only audit**: every invocation that reaches a real read — whether or not the TTY
+  gate then lets it print — logs one `events` row (`cli:tx:list` / `cli:health:list`) via two new
+  fixed-allowlist `auditPayload` constructors (`src/util/audit-payload.ts`) carrying only
+  `{month|kind, row_count, match_used}` — never the `--match` text, a merchant, a category, or a
+  sample value. Auditing happens before the TTY check, not after, so a refused/piped attempt still
+  leaves a real, count-only forensic trace rather than none at all. (3) **Owner DSN, no new
+  grants**: `listTransactions`/`listHealthSamples` (`src/db/repo.ts`) run inside
+  `withAdminDbTransaction`, the same owner/control-plane connection (`config.databaseUrl`)
+  `insertTransaction`/`insertHealthSample` already write through; the owner role bypasses RLS and
+  007/018's "deliberately no grants" for `minime_app`/`minime_engineer_ro` on these two tables is
+  unchanged — no migration, no new grant, either engineer-RO or app role can still read zero rows
+  of either table. `match` filters merchant/category by case-insensitive substring with
+  LIKE-metachar escaping (a literal `100%_off` search does not become two wildcards); `from`/`to`
+  are inclusive local-calendar-date bounds in the configured owner time zone, the same
+  `(at at time zone $tz)::date` convention 027's `metric_defs.agg_sql` already uses.
+- **Ratified (owner boundary):** the owner-terminal, TTY-gated, count-only-audited surface
+  described above is the sanctioned exception to "never log, print, or snapshot tier-0 contents."
+  The invariant's scope is otherwise unchanged: it still binds every log line, every audit
+  payload, every error message, every snapshot/manifest, and every MCP-reachable surface in the
+  system — nothing about this task loosens what an agent, a log file, or a durable record may ever
+  contain. No MCP tool, and no change to any MCP tool, can reach `listTransactions`/
+  `listHealthSamples`; both are called only from `src/cli.ts`.
+- **Why:** A local, owner-authenticated terminal session is the same trust boundary the product
+  already carves out for `unlock:approve` and `entity:restore-tier` — the one place stricter than
+  "agent-readable" rules do not need to apply, because the reader is provably the owner sitting at
+  their own keyboard, not an agent acting on their behalf. The TTY gate is what makes that
+  provable in practice rather than aspirational: an agent's shell tool can invoke the command, but
+  cannot capture its output, because piped/redirected stdout is never a TTY. Auditing before the
+  render gate (rather than only on a successful print) was a deliberate choice over the cheaper
+  alternative of skipping audit on refusal: a non-interactive attempt is itself a signal worth a
+  durable, content-free record, not a silent no-op. Row counts and filter identifiers (month,
+  kind) are aggregate-shaped information the rest of the system already treats as safe to audit
+  (I3's own `metric_agg()` boundary is "aggregate is fine, raw content is not") — only the `tx
+  list`/`health list` stdout stream itself, gated to a real terminal, ever carries the raw fields.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W4 workstream
+  — task W4-5's own spec named the TTY gate, the count-only audit design, and the recorded
+  invariant exception up front and flagged the owner-ratification requirement explicitly
+  (`owner_decision` in the task spec); the design here implements exactly that, with no
+  broadening. `docs/GUIDE.md` documents both commands and the tier-0 exception inline next to the
+  existing "tier 0: no agent ever sees a row" text they now narrowly qualify.
+
+## 2026-08-10 — W4-6: minime_log_expense, the first agent write path into tier 0
+
+- **Context:** Every existing agent write lands in tier 1 or tier 2 (journal, tasks, interactions,
+  decisions, …); tier 0 (`transactions`, `health_samples`) has only ever been written by the
+  owner's own importers, never by an agent. That left cash and unbanked spend — the one expense
+  category a bank CSV import structurally cannot see — with no way into Minime's own spend metrics
+  short of the owner hand-editing a CSV before import. The gap is narrow (one table, one
+  direction) but new in kind: it is the first migration that grants an MCP tool a write path onto
+  a tier-0 table.
+- **Decision:** `minime_log_expense` (`src/mcp/tools/expense.ts`) inserts one row into
+  `transactions` (`account_label` fixed `'agent-log'`, `source` `'agent:log_expense'`,
+  `created_by` the calling actor) and returns only `{transaction_id, deduped}` — never merchant,
+  amount, category, or note, on either the fresh-insert or the dedupe path (test-verified: the
+  full envelope, including its audit-trail encoding, is scanned for every input field the caller
+  supplied). No migration grant changes accompany it: 021_runtime_app_role.sql already gave
+  minime_app INSERT-only on `transactions` (no SELECT, no UPDATE) as part of its blanket
+  revoke-then-curated-regrant, and 040_transactions_note.sql's own new `note` column inherits that
+  same table-scoped boundary for free. Three mechanisms keep this insert-only surface honest:
+  1. **Deterministic id, not `RETURNING`.** Postgres requires SELECT privilege for an INSERT's
+     `RETURNING` output, not just INSERT — a fact the existing importer code already avoided
+     (`insertTransaction` has never used `RETURNING`). Rather than add a SELECT/UPDATE grant to
+     recover a row's id after the fact, the tool derives the row's uuid deterministically from a
+     sha256 of `date|amount_cents|currency|merchant|note` (same fields, disjoint byte ranges, as
+     the dedupe key below) — the id is known before the INSERT runs, on both the fresh-insert and
+     the re-log path, with zero additional privilege and zero reads.
+  2. **Self-dedupe.** `external_ref = sha256(date|amount_cents|currency|merchant|note).slice(24)`,
+     unique with `account_label`. Re-logging the identical expense (any subset of fields omitted
+     the same way both times) hits the existing `unique(account_label, external_ref)` constraint
+     and returns `deduped: true` with the same `transaction_id` as the original call — no second
+     row, and (because the id is the same deterministic value both times) no fabricated id that
+     matches nothing in the table.
+  3. **CSV-collision review flag.** `importTransactions` (`src/importers/transactions.ts`) now
+     checks, after each newly-inserted bank row, whether an `agent-log` row already exists for the
+     same date and amount (`findAgentLoggedTxMatch`, `src/db/repo.ts`) and if so enqueues one
+     `review_queue` item (`kind: 'duplicate'`, payload `{transaction_id, existing_transaction_id}`
+     — ids only) instead of silently letting both rows count toward `spend_total`. That lookup is a
+     genuine SELECT against `transactions`, so it always runs inside `withAdminDbScope` — the
+     importer is an owner-run batch command (`bun run src/cli.ts import:transactions`), not an
+     agent-facing path, so admin scope there does not touch I2's agent-facing boundary. Spend is
+     always stored negative (006_metrics_seed.sql's sign convention — `spend_total`/
+     `spend_by_category` only count `amount_cents < 0`); the tool forces this regardless of the
+     sign the caller typed, so "-12.50" and "12.50" log the same expense.
+  Also: `note text` (migration 040, nullable, no grant change — see its own comment), and
+  `MINIME_DEFAULT_CURRENCY` (optional 3-letter fallback when the caller omits `currency`; absent
+  ⇒ BAD_INPUT, never a silent guess), plumbed through `src/util/config.ts` and `serve.ts`'s
+  `RUNTIME_SETTING_ENV` pass-through the same way every other optional runtime setting is.
+- **Why:** I3's floor is "tier-0 content never enters agent context," not "tier 0 is agent-
+  read-only" — the two are different claims, and 021 already drew the line precisely at the first
+  one (insert-only, no read grant of any kind). Extending that exact line to a second write path
+  costs nothing new to police: the boundary this tool must never cross (SELECT on `transactions`)
+  is the same boundary the importer has respected since 021, enforced the same way (a GRANT the
+  migration never adds), and tested the same way (m15.roles/m6.leak's existing "no SELECT grant on
+  transactions" assertions stay green untouched, plus this task's own runtime-app-role probe).
+  Double-counting against a future bank import is the one real new risk a write-only, dedupe-only
+  tool introduces, so it gets an explicit, reviewable mitigation (the review-queue flag) rather
+  than being left as a silent data-quality gap.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W4 workstream
+  — task W4-6's own spec named the new agent write surface into tier 0 up front and required this
+  entry; the design here implements exactly that (insert-only, no read-back, dedupe semantics),
+  with no broadening beyond what the spec described. The deterministic-id mechanism and the
+  importer's admin-scoped collision lookup are conservative, invariant-preserving implementation
+  details needed to make that exact design work under minime_app's real insert-only grant — not a
+  scope change in themselves.
+
+## 2026-08-10 — W4-8: `metric:add` CLI — vetted templates are the only non-migration path onto the agg_sql aggregate door
+
+- **Context:** Every metric_defs row before this task was seeded by a migration (006, 026, 027,
+  030, 035) — a human-reviewed, committed SQL file. That is safe but heavyweight: an owner who
+  wants one more day-bucketed aggregate (a body-mass trend, spend at one merchant) had no way to
+  add it without hand-writing a migration. metric_defs.agg_sql is I3's one legal window onto
+  tier-0 content (`transactions`, `health_samples`), so any new way to populate it has to inherit
+  that same care without requiring a migration for every single metric.
+- **Decision:** `metric:add` (`src/cli.ts`, owner-terminal-only, placed ahead of the
+  `ollamaPreflight` gate like `unlock:approve`/`entity:restore-tier`/`tx list`/`health list`) mints
+  a new `metric_defs` row from one of five fixed templates in `src/util/metric-templates.ts`:
+  `health-sum`, `health-avg`, `health-count` (health_samples, filtered by `--kind`, exact match)
+  and `spend-by-category` (transactions, filtered by `--category`, exact match) / `spend-by-
+  merchant` (transactions, filtered by `--merchant-pattern`, substring ILIKE — raw bank merchant
+  text is messy enough that exact match would be impractical there, unlike the already-clean
+  category vocabulary `config/tx-categories.json`'s rules assign). Every template is a fixed
+  skeleton returning exactly `(period_start date, value numeric, label text)`, group-by-day,
+  matching the current 026/027 agg_sql contract ($1/$2 inclusive local dates, $3 the explicitly
+  requested IANA zone): health_samples templates bucket via `(at at time zone $3)::date` (the
+  026/027 timestamp contract); the two transactions templates reference no $3 at all, because
+  `occurred_at` is already a plain `date` — the same split 026_time_semantics.sql's own comment
+  documents ("date-backed transactions need no conversion; timestamp-backed metrics do"), and the
+  same shape `spend_total`/`spend_by_category` have kept, unmodified, since 006. Neither source
+  table is in repo.ts's PARENTS supersession map (028_correction_supersede.sql) — both are
+  read-only import mirrors, not owner-authored content — so no template adds a `superseded_at`
+  filter; there is nothing to filter. The one owner-supplied scalar a template accepts (a health
+  kind, a category, or a merchant substring) is validated against `/^[\p{L}\p{N} _.-]{1,64}$/u`
+  (no quote, percent, backslash, semicolon, or other SQL punctuation survives that class) and
+  SQL-literal-escaped (quotes doubled) before being spliced into the skeleton text — defense in
+  depth, since the class already rejects anything an escape step would need to touch.
+  `spend-by-merchant` additionally backslash-escapes any literal `%`/`_` before wrapping the value
+  in its own `%...%` wildcards, so an owner-typed substring containing `_` can never be misread as
+  a LIKE any-one-character wildcard (test-verified: an unescaped literal `_` would have inflated a
+  fictional merchant-spend sum by matching an unrelated row). There is deliberately no `--sql`
+  flag and no other way to reach this file's skeletons — free-form SQL stays migration-only, same
+  as always. `repo.insertMetricDef` (owner DSN; `minime_app` has SELECT-only on `metric_defs`
+  since 007_rls.sql:44) validates `--name` against `/^[a-z][a-z0-9_]{1,63}$/`, rejects an existing
+  name, inserts the row, and then — inside that same `withAdminDbTransaction` — dry-runs the fresh
+  def through `runMetricAgg(name, today, today, configuredTimeZone())`: any error (a template bug,
+  an unexpected schema mismatch) throws out through the transaction and rolls back the insert, so
+  a broken definition can never persist — only one already proven to execute once. Each successful
+  add audits verb `cli:metric:add` with `{metric, template}` only — never the kind/category/
+  pattern value — the same content-free posture `cli:tx:list`/`cli:health:list` (2026-08-10)
+  already established.
+- **Why:** The safety property that matters is structural, not procedural: every string this
+  feature can ever write into `agg_sql` is one of five fixed, reviewed skeletons with exactly one
+  substitution point, so no combination of CLI flags can produce a row-returning query or reach a
+  table other than `health_samples`/`transactions` — the shape is fixed at review time, not at
+  runtime. The transaction-scoped dry run is a second, independent backstop: even if a future
+  template were subtly wrong, its def is provably unable to reach any caller (owner or agent)
+  without first executing cleanly once, inside the same transaction that would otherwise have
+  persisted it. Restricting matching to exact-value (kind, category) plus one substring template
+  (merchant) keeps the vetted set small and each shape auditable by inspection, rather than
+  growing toward a general filter language.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W4 workstream
+  — task W4-8's own spec named the vetted-template design, the character-class-plus-escape
+  splicing, and the transaction-scoped dry-run rollback up front and required this entry; the
+  design here implements exactly that, with no broadening. The spec's own migration half (seeding
+  `body_mass`/`hr_resting` defs, provisionally numbered 036) was dropped from this task's scope by
+  the program's cross-check dedup: 027_life_metrics_seed.sql already seeded both, matching the
+  exact 026 agg_sql contract, before this task began — confirmed here by a direct
+  `minime_query_metric`-shaped test over fixture data, closing the same UNKNOWN_METRIC repro the
+  spec cited without adding a redundant migration.
+
+## 2026-08-10 — W4-9: CLOUD_MAX_TIER default flips 2 → 1; tier-2 cloud egress becomes opt-up
+
+- **Context:** The 2026-06-11 "Cloud LLM providers" decision recorded `CLOUD_MAX_TIER` default 2
+  as the owner's choice: once any cloud provider was configured, an unset-env install would send
+  tier-2 content (journal entries, interaction notes — the most private prose in the system) to
+  that provider by default, ahead of the far more mundane tier-1 notes/tasks. The livability
+  program review flagged this as the wrong shipped default and the owner ratified flipping it
+  (2026-08-07, program decision 3).
+- **Decision:** Flip both hardcoded fallbacks together, since they parse the same env var
+  independently by design: `src/util/config.ts`'s `env("CLOUD_MAX_TIER", "1")` (was `"2"`) and
+  `src/serve.ts`'s `cloudMaxTier()` runtime-child-boundary parse (`source.CLOUD_MAX_TIER ?? "1"`,
+  was `?? "2"`). `.env.example`'s shipped `CLOUD_MAX_TIER=1` line moves the same direction, since
+  it is the byte-for-byte seed for any freshly created `.env` (`cp .env.example .env` in
+  `scripts/setup-env.sh`, and by hand for anyone who skips the wizard). `scripts/setup-env.sh`'s
+  CLOUD_MAX_TIER prompt keeps its existing 1-or-2 numeric-choice mechanic unchanged (preserving
+  `test/setup-env.test.ts`'s existing explicit-answer coverage of both values) but now defaults to
+  1 and leads with the local-only option marked recommended; the preceding "cloud provider(s)"
+  menu line was reworded so choosing cloud at the top level no longer reads as implying tier-2 is
+  included. `docs/GUIDE.md`, `README.md`, and `AGENTS.md` had their "(default 2)" /
+  "set CLOUD_MAX_TIER=1 to keep tier 2 local too" language corrected to match: tier-2 staying
+  local is now the starting point, and reaching tier-2 cloud egress is the explicit opt-up. An
+  owner's existing `.env` is unaffected either way — `env(name, fallback)` only substitutes the
+  fallback when the variable is entirely absent from the environment, so this changes behavior
+  only for unset-env installs (fresh, or an owner who deliberately unsets the key). Two tests
+  were found relying on the old implicit default without setting `CLOUD_MAX_TIER` themselves and
+  were given explicit values so they keep testing what they were written to test, not the shipped
+  default: `test/serve-boundary.test.ts`'s "Bedrock IAM is forwarded..." test now pins
+  `CLOUD_MAX_TIER: "2"` (it specifically exercises a *reachable* implicit tier-2 fallback
+  forwarding credentials, which requires ceiling 2); `test/config.dotenv.test.ts`'s
+  `.env.example`-parses-cleanly regression now expects 1 for the live file in its second
+  assertion, while its first assertion stays an untouched, frozen byte-for-byte snapshot of the
+  pre-2026-07-18 buggy line (unrelated to the current default, it must never change).
+  `test/m13.provider-routing.test.ts` already exercised the ceiling with explicit
+  `config.cloudMaxTier` values in every case that mattered, so nothing there needed correcting; a
+  new test was added instead, asserting the acceptance scenario directly: default env (no
+  `CLOUD_MAX_TIER` anywhere) plus a cloud `CLASSIFY_PROVIDER` plus tier-2 content resolves to zero
+  cloud egress end to end. `test/config.dotenv.test.ts` also gained a subprocess-isolated
+  assertion that an unset `CLOUD_MAX_TIER` resolves `config.cloudMaxTier` to 1.
+- **Why:** I3's floor is "tier-0 content never enters agent context"; I1's local-first default has
+  always meant an env-less install stays byte-for-byte local. `CLOUD_MAX_TIER=2` as a *default*
+  sat awkwardly between those two commitments: I1's env-less-local claim only ever covered the
+  no-provider-configured case, so the moment an owner configured any cloud provider at all, the
+  previous default silently added the *most* private tier to what left the box, not the least.
+  Flipping the default inverts that: configuring a cloud provider now buys cloud tier-1 for free,
+  and tier-2 only by a second, explicit decision — matching the "opt-in enhancement, not opt-out
+  from privacy" posture the rest of the provider-routing design (per-tier `PROVIDER_ROUTE_*`, the
+  stricter-only ceiling check, the runtime-child credential scrubbing) already establishes
+  elsewhere. The one behavioral consequence — an owner who configures a cloud classifier and does
+  not additionally opt into local Ollama for tier-2 will see more raw captures land in the
+  `inbox_unfiled` review queue than before, until they either opt up or add a local route — is
+  absorbed by the already-existing degraded/manual-review fallback (an implicit cloud route above
+  the ceiling never throws at startup; it only rejects the individual job, per AGENTS.md's
+  per-tier-routing paragraph, unchanged by this task): a deliberately conservative failure mode
+  (manual filing), never a silent one (cloud egress). `classifyProviderForTier`'s stricter-only
+  ceiling enforcement and the `runtime_child_boundary_invalid` fail-closed checks in `serve.ts`
+  are themselves untouched — this task changes only which value is assumed absent a setting, never
+  how the ceiling is enforced once known (the classify-routing fix for the inbox fallback the
+  program review also flagged had already landed pre-program, commit 19fc7d1).
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W4 workstream,
+  with an explicit same-day ratification of this specific default flip (program decision 3)
+  superseding the 2026-06-11 "CLOUD_MAX_TIER default 2, owner's choice" recording.
+
+## 2026-08-10 — W4-10: bare-digit redaction context-gated; owner allowlist; redaction count disclosed in gaps
+
+- **Context:** Outbound redaction (spec §8, `src/mcp/redact.ts`) scrubs three shapes from every
+  string leaving the server: IBANs, Luhn-valid card numbers, and any bare 9+ digit run. That last
+  rule fired unconditionally, so real phone numbers, courier tracking numbers, and Unix epoch
+  timestamps — none of which are secrets — were silently mangled into `[REDACTED:account]`
+  whenever they happened to be 9+ digits long, alongside genuine account numbers. There was also
+  no way for the owner to declare a specific number safe, and no way for an agent to know a
+  returned value had been altered rather than reading it as the real number.
+- **Decision:** Three changes, IBAN and Luhn-card rules left fully intact and unconditional:
+  1. The bare `\d{9,}` rule now fires only when an account/card-context word appears within 40
+     characters of the match: `account`, `acct`, `a/c`, `iban`, `routing`, `swift`,
+     `acct.no`/`acct no`, `account number`, and the CJK terms 账号/账户/卡号 (the owner's own
+     content mixes English and Chinese — see `src/util/cjk.ts`'s existing bilingual handling).
+     The CJK terms are matched without a `\b` word-boundary wrapper — verified that JS's `\b` is
+     ASCII-`\w`-only and never matches adjacent to a Han character (`/\b账号\b/.test("账号
+     123456789")` is `false`), so wrapping them in `\b` the same way as the ASCII terms would have
+     silently made the CJK gate unreachable.
+  2. A new env var `REDACT_ALLOWLIST` (comma-separated exact digit strings, parsed once by
+     `parseRedactAllowlist` in `src/util/config.ts` into `config.redactAllowlist`) exempts an
+     owner-declared exact number from every redaction rule, including Luhn. It is env-sourced
+     only: no MCP tool schema anywhere takes a parameter that reaches `redact.ts`'s allowlist
+     check, so no agent request can add to, read, or otherwise influence it — the owner is the
+     only writer, by construction, not by convention. `src/serve.ts`'s `RUNTIME_SETTING_ENV` now
+     includes `REDACT_ALLOWLIST` so the scrubbed MCP-reachable runtime child — the only process
+     that actually redacts agent-facing tool output — still receives it; omitting that one line
+     would have made the setting silently inert for real traffic while still looking configured
+     in the supervisor's own environment.
+  3. `redact.ts` gained counting siblings of `redactString`/`redactDeep`
+     (`redactStringCounted`/`redactDeepCounted`); the public `redactString`/`redactDeep` exports
+     are unchanged in signature and behavior. `executeTool` (`src/mcp/tools/registry.ts`) now
+     calls `redactDeepCounted` on its success path and appends
+     `"outbound redaction replaced N number-like string(s)"` to the envelope's `gaps` when `N >
+     0`, alongside any gaps the handler itself set. The error path also calls
+     `redactDeepCounted` (so a `ToolError` message is still redacted the same as before) but
+     discards the count: `ToolResult`'s error shape (`{ code, message, retry? }`) has no `gaps`
+     array to disclose into.
+  `test/m2.tools.test.ts`'s existing redaction fixture ("...IBAN...re account 123456789012")
+  needed no change — its digit run already sits immediately next to the word "account" — and no
+  other fixture in the suite relies on unconditional bare-digit redaction; the search was a
+  repo-wide grep for `[REDACTED` literals and for 9+ digit / IBAN-shaped strings across
+  `test/**` and `fixtures/**`, cross-checked against every `.gaps).toEqual(` assertion in the
+  suite for accidental new-gap collisions.
+- **Why:** Redaction is spec §8's blunt server-side safety net, not judgment — the tier boundary
+  (I3), not redaction, is Minime's actual privacy backstop for content that reaches an agent at
+  all. An unconditional bare-digit rule was destroying non-secret, useful information (a phone
+  number the owner asked an agent to recall) for no privacy benefit, since anything sensitive
+  enough to need scrubbing is already the kind of number that shows up near the words that
+  describe it ("account", "iban", "卡号"). Gating on nearby context keeps the intended catch while
+  releasing the false positives, without touching the two rules (IBAN shape, Luhn validity) that
+  need no semantic hint to be confident about. The owner allowlist exists because even a
+  well-gated heuristic can still misfire — a personal reference number that happens to be
+  Luhn-valid, or that sits near a context word by coincidence — and letting the *owner*, never an
+  agent, declare a narrow exact exemption is strictly safer than disabling a rule outright.
+  Disclosing the redaction count in `gaps` follows the same principle every other gap in the
+  codebase already follows (search's tier-2-suppressed count, timeline's locked count, unlock's
+  locked notice): an agent must never present a `[REDACTED:*]` placeholder as if it were the real
+  number, and now it doesn't have to guess that one is there — it is told, as a bare count, never
+  which rule fired or what the original value was, matching I5/§8's disclose-rather-than-
+  confabulate contract without adding a second leak surface.
+- **Approved by:** human owner, in the upfront livability-program plan ratification (2026-08-07)
+  that authorized this branch's fully autonomous, wave-by-wave execution across the W4 workstream
+  — task W4-10's own spec named this narrowing, the allowlist, and the disclosure up front and
+  required this entry as a privacy/public-interface change to redaction semantics.
+
+## 2026-08-14 — Deterministic multi-entity inbox companions
+
+- **Context:** The 2026-08-06 inbox-identity decision left general model-driven multi-entity
+  segmentation on the backlog. A capture that names several companies or people still files as
+  one typed row; the other names survive only in that row's body. When that row is a tier-2
+  interaction, those names are invisible to search without an unlock. This changes the inbox
+  filing contract and adds a public audit verb. It does not add an LLM call, a new review-queue
+  kind, or a first-class org/person capture type.
+- **Decision:** Before auto-file, derive a deterministic entity plan from the capture bytes
+  (`planCaptureEntities`). The plan is inert unless the text has two or more legal-suffix
+  organizations or an explicit supplier/vendor/company enumeration — "met Alice and Bob" stays
+  on the single-classify path. A confident plan of 2–8 names files the existing single-label
+  primary row, then mints leftover orgs/people at tier 1 with `derived_from = inbox_item.id`
+  and name-only search chunks (never the capture body). The interaction subject is not minted
+  twice. The split commits in the same fenced inbox transaction as the other conservative
+  companions and is audited as `inbox:split-entities` with ids and counts, never names. An
+  unparseable cue, or more than eight names, lowers classifier confidence to ≤0.4 so the
+  existing `inbox_unfiled` path runs; the owner files or recaptures rather than the system
+  guessing. Replay of an already-filed capture does not mint again.
+- **Why:** The classifier remains single-label; guessing extra rows from a model segmenter
+  would be a larger, less reversible contract. Restricting the cue and capping the count keeps
+  ordinary captures at one classify call. Tier-1 name-only companions make the named
+  suppliers resolvable without copying tier-2 narrative onto a lower-tier chunk. Uncertainty
+  reuses `inbox_unfiled` so there is no new review kind to teach or mask.
+- **Approved by:** owner request to continue the current-state plan through the multi-entity
+  inbox splitter (2026-08-14).
+
+## 2026-08-14 — Single inbox-watcher owner in the runtime child
+
+- **Context:** W3-5 gave dream/backup a single maintenance owner and left watcher coordination
+  on the backlog. Inbox claims are already fenced, but every `serve:runtime` child still started
+  its own chokidar watcher, so two MCP hosts against the same database double-drained the inbox.
+  Moving the watcher into the supervisor would file captures on the owner DSN and break the
+  app-role child boundary.
+- **Decision:** The runtime child acquires a non-blocking advisory lock on
+  `(1296649541, 3)` — distinct from compiled-notes `(…, 1)` and maintenance `(…, 2)` — before
+  starting the watcher. The winner watches; a loser logs that another process owns the watcher
+  and retries every 5 minutes. Close or process death releases the lock so a survivor can take
+  over. Direct `startWatcher()` callers (tests, one-shot drains) are unchanged.
+- **Why:** Two watchers are wasted work, not a correctness hole, but they are the remaining
+  half of "one process owns watcher/dream/backup." Keeping the lock in the child preserves
+  privilege separation. A third key keeps watcher takeover independent of the supervisor's
+  dream/backup lock, so a crashed MCP child can hand off watching without stealing maintenance.
+- **Approved by:** owner request to continue the current-state plan through the ordinary
+  backlog (2026-08-14).

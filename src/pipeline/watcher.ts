@@ -35,7 +35,7 @@ import {
   upsertPage,
   upsertTask,
 } from "../db/repo";
-import { drainEmbedBacklog, indexParent } from "../search/index-parent";
+import { drainEmbedBacklog, indexParent, indexParentIfEmpty } from "../search/index-parent";
 import {
   assertNoSymlinkComponents,
   atomicCreatePrivate,
@@ -53,18 +53,19 @@ import {
   splitActionDecision,
 } from "./classify";
 import { findDuplicate } from "./dedup";
+import { planCaptureEntities } from "./segment";
 
 const ACTOR = "agent:classifier";
 const CONFIDENCE_FLOOR = 0.7;
 const RETRY_BACKOFF_MS = 5_000;
-type FiledTable = "tasks" | "journal_entries" | "interactions" | "pages" | "decisions";
+export type FiledTable = "tasks" | "journal_entries" | "interactions" | "pages" | "decisions";
 
-interface NoteProjection {
+export interface NoteProjection {
   absolutePath: string;
   body: string;
 }
 
-interface FiledResult {
+export interface FiledResult {
   primary: [FiledTable, string];
   projection?: NoteProjection;
 }
@@ -162,6 +163,37 @@ async function verifyOrHealStoredArchive(item: InboxItem, bytes: Uint8Array): Pr
   await publishSnapshot(absolutePath, bytes, item.content_hash);
 }
 
+/**
+ * Best-effort read of a capture's immutable archived text, hash-verified against the inbox
+ * row's own content_hash (W2-2: review-queue read path). Reads ONLY the archive — never
+ * item.raw_path, which is mutable, may have moved/been deleted, and must never cross the MCP
+ * boundary. Returns null (never throws) whenever the bytes cannot be proven authentic: missing
+ * identity, missing file, or a hash mismatch. A caller gating this behind a tier-2 unlock can
+ * therefore fail closed on the text alone, rather than losing an otherwise-good enriched
+ * review-queue item (e.g. its classifier type/confidence) to an unrelated archive fault.
+ */
+export async function readArchivedCapture(item: InboxItem): Promise<string | null> {
+  if (!item.archive_path || !item.content_hash) return null;
+  let bytes: Buffer;
+  try {
+    bytes = await readPrivateFile(item.archive_path);
+  } catch {
+    return null;
+  }
+  if (sha256(bytes) !== item.content_hash) return null;
+  return bytes.toString("utf8");
+}
+
+const AGENT_SESSION_HINT_RE = /<!-- hint: agent work session -->/;
+
+// Default note tier from the capture text alone: agent-session captures (SessionEnd hook)
+// carry a fixed hint marker and file at tier 2 like journal/interactions; everything else
+// defaults to tier 1. Exported so minime_refile (W2-3) can reuse the same signal when it
+// floors an owner-requested note tier override against the capture's own evidence.
+export function noteHintTier(text: string): 1 | 2 {
+  return AGENT_SESSION_HINT_RE.test(text) ? 2 : 1;
+}
+
 function firstLineOf(text: string): string {
   return text
     .split("\n")[0]!
@@ -186,7 +218,7 @@ function noteProjection(c: Classification, text: string, inboxId: string): NoteP
   };
 }
 
-async function publishNoteProjection(projection: NoteProjection): Promise<void> {
+export async function publishNoteProjection(projection: NoteProjection): Promise<void> {
   await publishSnapshot(
     projection.absolutePath,
     Buffer.from(projection.body),
@@ -194,7 +226,7 @@ async function publishNoteProjection(projection: NoteProjection): Promise<void> 
   );
 }
 
-function storedClassification(value: unknown): Classification | null {
+export function storedClassification(value: unknown): Classification | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<Classification>;
   if (
@@ -212,10 +244,95 @@ function storedClassification(value: unknown): Classification | null {
 // Insert the typed row for a classification. Returns its primary row plus an optional note
 // projection when filed, "duplicate" when it matched an existing open task (the duplicate review
 // item is queued here), or null when unfileable. The caller owns the surrounding transaction.
-async function fileRow(
+// `actor` stamps created_by (and ensureOrg/ensurePerson's creator) on every row this call
+// creates — it defaults to ACTOR for the watcher's own automatic-pipeline callers, but
+// minime_refile (W2-3) passes its ctx.actor so an owner-initiated filing is attributed to the
+// real MCP caller instead of the classifier (I5 provenance; invariant-review 2026-08-08). The
+// bookkeeping events below (inbox:duplicate, inbox:split-decision, inbox:split-done-task,
+// inbox:split-entities, inbox:closed-existing-task) still log actor=ACTOR either way — the
+// wrapping tool:minime_refile and inbox:refiled audit events already record the true actor
+// for a refile-triggered call.
+export async function fileRow(
   c: Classification,
   text: string,
   inboxId: string,
+  actor: string = ACTOR,
+): Promise<FiledResult | "duplicate" | null> {
+  const result = await filePrimaryRow(c, text, inboxId, actor);
+  if (result && result !== "duplicate") {
+    await fileCompanionEntities(c, text, inboxId, actor);
+  }
+  return result;
+}
+
+function sameEntityName(a: string, b: string): boolean {
+  return (
+    a.replace(/\s+/g, " ").trim().toLowerCase() === b.replace(/\s+/g, " ").trim().toLowerCase()
+  );
+}
+
+// After the single-label primary row, mint any extra named orgs/people the capture
+// confidently listed. Identity only (tier 1, name-only chunks) — never copy the capture
+// body onto a companion, or a tier-2 interaction would leak into a tier-1 org chunk.
+// Existing names are reused, not duplicated; the interaction subject is skipped.
+async function fileCompanionEntities(
+  c: Classification,
+  text: string,
+  inboxId: string,
+  actor: string,
+): Promise<void> {
+  const plan = planCaptureEntities(text);
+  if (plan.kind !== "entities") return;
+  const subject =
+    c.type === "interaction" && typeof c.fields.person_name === "string"
+      ? c.fields.person_name
+      : null;
+  const orgIds: string[] = [];
+  const personIds: string[] = [];
+  const indexOpts = { ...INDEX_OPTIONS, extractEdges: false };
+  for (const entity of plan.entities) {
+    if (subject && sameEntityName(entity.name, subject)) continue;
+    if (entity.kind === "org") {
+      const org = await ensureOrg(entity.name, actor, "capture", {
+        tier: 1,
+        derivedFrom: inboxId,
+      });
+      await indexParentIfEmpty("org", org.id, entity.name, entity.name, 1, indexOpts);
+      orgIds.push(org.id);
+    } else {
+      const person = await ensurePerson(entity.name, actor, "capture", {
+        tier: 1,
+        derivedFrom: inboxId,
+      });
+      await indexParentIfEmpty("person", person.id, entity.name, entity.name, 1, indexOpts);
+      personIds.push(person.id);
+    }
+  }
+  if (orgIds.length === 0 && personIds.length === 0) return;
+  await logEvent({
+    actor: ACTOR,
+    verb: "inbox:split-entities",
+    entityType: "inbox_item",
+    entityId: inboxId,
+    payload: auditPayload.inboxSplitEntities({ orgIds, personIds }),
+  });
+}
+
+function applyUncertainEntityPlan(c: Classification, text: string): Classification {
+  const plan = planCaptureEntities(text);
+  if (plan.kind !== "uncertain") return c;
+  return {
+    ...c,
+    confidence: Math.min(c.confidence, 0.4),
+    reason: plan.reason,
+  };
+}
+
+async function filePrimaryRow(
+  c: Classification,
+  text: string,
+  inboxId: string,
+  actor: string,
 ): Promise<FiledResult | "duplicate" | null> {
   const firstLine = firstLineOf(text);
   switch (c.type) {
@@ -254,7 +371,7 @@ async function fileRow(
             id: dup.match.id,
             title: dup.match.title,
             status: "done",
-            createdBy: ACTOR,
+            createdBy: actor,
           });
           await indexParent("task", dup.match.id, text, dup.match.title, 1, INDEX_OPTIONS);
           await logEvent({
@@ -307,7 +424,7 @@ async function fileRow(
           : text,
         due,
         status: done ? "done" : undefined,
-        createdBy: ACTOR,
+        createdBy: actor,
         source: "capture",
         derivedFrom: inboxId,
       });
@@ -320,7 +437,7 @@ async function fileRow(
           options: [],
           choice: null,
           reasoning: `${text}\n\n[split from task ${id}: decision portion of a compound action+decision capture]`,
-          createdBy: ACTOR,
+          createdBy: actor,
           source: "capture",
           derivedFrom: inboxId,
         });
@@ -339,7 +456,7 @@ async function fileRow(
       const { id } = await insertJournal({
         entryMd: text,
         mood: typeof c.fields.mood === "number" ? c.fields.mood : null,
-        createdBy: ACTOR,
+        createdBy: actor,
         source: "capture",
         derivedFrom: inboxId,
       });
@@ -362,31 +479,38 @@ async function fileRow(
       const existingOrg = await exactActiveOrgExists(name);
       const st = c.fields.subject_type;
       const useOrg = !!existingOrg || st === "org" || (st !== "person" && orgCue(name));
+      // W4-1 identity/content tier split: this is the same "log an interaction with a subject"
+      // product behavior as minime_log_interaction (interactions.ts), just triggered from the
+      // watcher's own auto-classify-and-file pipeline (and, via fileRow, minime_refile) instead
+      // of a direct tool call — the subject's identity mints at tier 1, matching interactions.ts,
+      // while the interaction row/chunk indexed below stay tier 2. Resolving an EXISTING
+      // person/org never changes its stored tier either way (resolve_or_promote_entity,
+      // 037_identity_content_tier_split.sql).
       if (useOrg) {
-        const org = await ensureOrg(name, ACTOR, "capture", {
-          tier: 2,
+        const org = await ensureOrg(name, actor, "capture", {
+          tier: 1,
           derivedFrom: inboxId,
         });
         const { id } = await insertInteraction({
           orgId: org.id,
           kind,
           summary: text,
-          createdBy: ACTOR,
+          createdBy: actor,
           source: "capture",
           derivedFrom: inboxId,
         });
         await indexParent("interaction", id, text, undefined, 2, INDEX_OPTIONS);
         return { primary: ["interactions", id] };
       }
-      const person = await ensurePerson(name, ACTOR, "capture", {
-        tier: 2,
+      const person = await ensurePerson(name, actor, "capture", {
+        tier: 1,
         derivedFrom: inboxId,
       });
       const { id } = await insertInteraction({
         personId: person.id,
         kind,
         summary: text,
-        createdBy: ACTOR,
+        createdBy: actor,
         source: "capture",
         derivedFrom: inboxId,
       });
@@ -399,7 +523,7 @@ async function fileRow(
         options: Array.isArray(c.fields.options) ? c.fields.options : [],
         choice: typeof c.fields.choice === "string" ? c.fields.choice : null,
         reasoning: text,
-        createdBy: ACTOR,
+        createdBy: actor,
         source: "capture",
         derivedFrom: inboxId,
       });
@@ -416,7 +540,7 @@ async function fileRow(
           title: doneTitle,
           body: `${text}\n\n[split from decision ${id}: completed-work portion of a mixed capture]`,
           status: "done",
-          createdBy: ACTOR,
+          createdBy: actor,
           source: "capture",
           derivedFrom: inboxId,
         });
@@ -435,8 +559,18 @@ async function fileRow(
       // notes become brain pages so they live in the markdown archive (I4). Agent-session
       // captures (SessionEnd hook) carry verbatim prompt/outcome text from arbitrary
       // projects, so they file at tier 2 like journal/interactions — searchable, but
-      // reads stay behind the unlock gate (§12; invariant-review 2026-06-12).
-      const tier = /<!-- hint: agent work session -->/.test(text) ? 2 : 1;
+      // reads stay behind the unlock gate (§12; invariant-review 2026-06-12). A caller may
+      // pin an explicit tier via c.fields.tier (minime_refile, W2-3), but c.fields is not a
+      // trusted channel by itself: the automatic pipeline passes classify()'s raw parsed JSON
+      // straight through (classify.ts), and a replayed storedClassification is equally
+      // unsanitized, so a stray or prompt-injected "tier" in the model's own JSON output must
+      // never be able to UNDERCUT the text's own hint-based floor (BLOCKER, invariant-review
+      // 2026-08-08). Floor whatever tier the fields carry (or the ordinary tier-1 default when
+      // absent) against noteHintTier(text) so a pin can only ever RAISE the tier — it can raise
+      // an ordinary note to tier 2 (minime_refile's floored override), but can never launder an
+      // agent-session capture down to tier 1.
+      const pinned = c.fields.tier === 1 || c.fields.tier === 2 ? c.fields.tier : 1;
+      const tier = Math.max(pinned, noteHintTier(text)) as 1 | 2;
       const projection = noteProjection(c, text, inboxId);
       const relPath = relative(join(config.dataDir, "brain"), projection.absolutePath);
       const hash = sha256(projection.body);
@@ -445,7 +579,7 @@ async function fileRow(
         title: c.fields.title || firstLine,
         bodyMd: projection.body,
         contentHash: hash,
-        createdBy: ACTOR,
+        createdBy: actor,
         source: "capture",
         derivedFrom: inboxId,
         tier,
@@ -494,10 +628,12 @@ async function processInboxSnapshot(
     let c = storedClassification(claim.item.classifier_output);
     if (!c) {
       c = await classify(text);
-      // Persist the model plan under the fenced claim before finalization. If the process dies,
-      // a stale claimant reuses the same plan instead of asking the model to segment differently.
-      await setInboxClassification(item.id, claim.token, c);
     }
+    // Deterministic entity plan is derived from the bytes, not the model. An unparseable
+    // multi-entity cue must land in inbox_unfiled (never guess names); persist the lowered
+    // plan so a stale-claim replay does not re-ask the model and then auto-file.
+    c = applyUncertainEntityPlan(c, text);
+    await setInboxClassification(item.id, claim.token, c);
 
     const outcome = await withDbTransaction(async () => {
       await assertInboxClaim(item.id, claim.token);

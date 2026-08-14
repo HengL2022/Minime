@@ -4,6 +4,7 @@
 import {
   type ParentType,
   chunksMissingEmbedding,
+  parentHasChunks,
   replaceChunks,
   replacePageChunksMonotonic,
   setChunkEmbedding,
@@ -57,6 +58,21 @@ export async function indexParent(
   // graph edges commit with the parent, while network-backed embeddings drain after commit.
   if (!options.deferEmbeddings) await drainEmbedBacklog(64).catch(() => {});
   return chunks.length;
+}
+
+// Companion identities minted after extract-edges may already exist (created=false)
+// but still have no chunks. Index only the empty ones so a pre-existing org's
+// richer chunks are never replaced with a name-only stub.
+export async function indexParentIfEmpty(
+  parentType: ParentType,
+  parentId: string,
+  md: string,
+  title: string | undefined,
+  tier: number,
+  options: IndexParentOptions = {},
+): Promise<number> {
+  if (await parentHasChunks(parentType, parentId)) return 0;
+  return indexParent(parentType, parentId, md, title, tier, options);
 }
 
 export async function drainEmbedBacklog(batch = 256): Promise<number> {

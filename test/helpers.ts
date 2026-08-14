@@ -25,6 +25,7 @@ export async function resetDb(): Promise<void> {
     "app_request_tier2_unlock",
     "metric_agg",
     "keep_entity_tier_monotonic",
+    "keep_entity_tier_guarded",
     "cascade_entity_tier_to_aliases",
     "set_entity_alias_tier",
     "person_has_nonworking_relation",
@@ -36,6 +37,8 @@ export async function resetDb(): Promise<void> {
     "resolve_or_promote_extracted_org",
     "upsert_derived_alias",
     "upsert_extracted_edge",
+    "timeline_locked_count",
+    "suppressed_candidate_count",
   ];
   for (const f of fns) {
     await sql.unsafe(`drop function if exists ${f} cascade`);

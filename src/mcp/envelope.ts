@@ -10,6 +10,7 @@ export interface SourceRef {
   updated_at?: Date | string;
   created_by?: string;
   derived?: boolean;
+  superseded?: boolean;
 }
 
 export interface Envelope<T = unknown> {
@@ -39,7 +40,20 @@ export function stalenessOf(
   return ageDays > 30 ? `${what} is ${ageDays} days old` : undefined;
 }
 
-const DATE_ONLY_KEYS = new Set(["due", "review_at", "period_start", "valid_from", "valid_to"]);
+// "date" (added W3-10, minime_state's upcoming_dates: a person_dates next-occurrence day) is a
+// `date` SQL column with no time-of-day component, same shape as "due"/"review_at" below — it
+// must render as a plain YYYY-MM-DD, never reformatted through the caller's timezone the way an
+// "_at" timestamp is. Formatting it as a full datetime would risk shifting the calendar day
+// backward a day for a negative-UTC-offset caller (the exact pitfall stateSnapshot's own "today"
+// comment warns about), which would be actively wrong for a birthday.
+const DATE_ONLY_KEYS = new Set([
+  "due",
+  "review_at",
+  "period_start",
+  "valid_from",
+  "valid_to",
+  "date",
+]);
 
 function isTimestampKey(key?: string): boolean {
   if (!key || DATE_ONLY_KEYS.has(key)) return false;

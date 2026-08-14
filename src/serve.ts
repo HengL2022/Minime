@@ -1,8 +1,25 @@
 import { join } from "node:path";
 import { Cron } from "croner";
 import { withAdminDbScope } from "./db/client";
-import { dbSnapshot } from "./pipeline/backup";
+import {
+  type MaintenanceLockHandle,
+  type PendingTier2UnlockRequest,
+  insertReviewItem,
+  lastEventAt,
+  logEvent,
+  openReviewItems,
+  pendingTier2UnlockRequests,
+  recentEventsByVerb,
+  releaseMaintenanceLock,
+  stateSnapshot,
+  tryAcquireMaintenanceLock,
+} from "./db/repo";
+import { appendOpsLine } from "./ops/ops-log";
+import { briefCounts, buildBriefText, deliverBrief } from "./ops/push";
+import { dbSnapshot, resticCheck } from "./pipeline/backup";
 import { dream } from "./pipeline/dream";
+import { auditPayload } from "./util/audit-payload";
+import { configuredTimeZone } from "./util/clock";
 import { REPO_ROOT, config, parseProviderEnvironment } from "./util/config";
 import { parseLocalPostgresUrl } from "./util/postgres-url";
 
@@ -17,6 +34,7 @@ const RUNTIME_SETTING_ENV = new Set([
   "EMBED_PROVIDER",
   "MINIME_APP_DATABASE_URL",
   "MINIME_DATA_DIR",
+  "MINIME_DEFAULT_CURRENCY",
   "MINIME_RUNTIME_CHILD",
   "MINIME_SKIP_REPO_DOTENV",
   "OLLAMA_URL",
@@ -28,6 +46,10 @@ const RUNTIME_SETTING_ENV = new Set([
   "OPENROUTER_MODEL",
   "PROVIDER_ROUTE_TIER1",
   "PROVIDER_ROUTE_TIER2",
+  // W4-10: owner-only outbound-redaction exemption list (src/mcp/redact.ts). Must be forwarded
+  // or the MCP-reachable runtime child silently stops honoring an owner setting that exists
+  // specifically to affect that child's tool-call traffic.
+  "REDACT_ALLOWLIST",
   "RERANK_MODEL",
   "RERANK_TOP_IN",
   "RERANK_URL",
@@ -44,8 +66,11 @@ const OPTIONAL_PROVIDER_CREDENTIAL_ENV: Record<string, readonly string[]> = {
   bedrock: ["BEDROCK_AWS_SESSION_TOKEN"],
 };
 
+// Default 1, matching config.ts's own CLOUD_MAX_TIER fallback (W4-9, DECISIONS.md
+// 2026-08-10) -- this is an independent parse of the same env var for the runtime-child
+// boundary check, so the two literals must be kept in agreement by hand.
 function cloudMaxTier(source: NodeJS.ProcessEnv): number {
-  const tier = Number(source.CLOUD_MAX_TIER ?? "2");
+  const tier = Number(source.CLOUD_MAX_TIER ?? "1");
   if (!Number.isInteger(tier) || tier < 0 || tier > 2) {
     throw new Error("runtime_child_boundary_invalid");
   }
@@ -217,37 +242,169 @@ type MaintenanceCronFactory = (
 const createMaintenanceCron: MaintenanceCronFactory = (pattern, options, callback) =>
   new Cron(pattern, options, callback);
 
-/** Trusted maintenance scheduler. The MCP child never receives restic or owner DB credentials. */
-export function startOwnerMaintenanceSchedule(
-  createCron: MaintenanceCronFactory = createMaintenanceCron,
-): OwnerMaintenanceSchedule {
-  const crons: MaintenanceCron[] = [];
-  const active = new Set<Promise<unknown>>();
-  const run = (label: string, work: () => Promise<unknown>) => {
-    const task = work()
-      .then((result) => {
-        if (
-          typeof result === "object" &&
-          result !== null &&
-          "ran" in result &&
-          result.ran === false &&
-          "detail" in result
-        ) {
-          console.error(`[minime] ${label} skipped: ${String(result.detail)}`);
-        }
-      })
-      .catch((error) => {
-        console.error(
-          `[minime] ${label} failed: ${error instanceof Error ? error.message : error}`,
-        );
-      });
-    active.add(task);
-    void task.finally(() => active.delete(task));
-  };
+// Every resident `serve` runs this scheduler; only the process holding the maintenance advisory
+// lock (repo.tryAcquireMaintenanceLock) actually runs dream/backup. A process that loses the
+// lock retries takeover on this cadence, so a killed owner hands off within one interval with
+// zero configuration (docs/DEVELOPMENT.md's "coordinate multiple MCP processes" backlog item).
+const MAINTENANCE_RETRY_CRON = "*/5 * * * *";
+// A catch-up dream run fires after a short random delay so that if several processes were all
+// waiting on a takeover (e.g. after a shared outage), they do not all hit the database at once.
+const DREAM_CATCH_UP_MIN_DELAY_MS = 30_000;
+const DREAM_CATCH_UP_MAX_DELAY_MS = 90_000;
 
-  const nightly = createCron(config.dreamCron, { timezone: config.tz }, () =>
-    run("dream", () => withAdminDbScope(() => dream())),
+// The remaining scheduler pieces below take their state as explicit parameters (crons to append
+// to, runDream/run to invoke) instead of closing over startOwnerMaintenanceSchedule's locals --
+// everything here is read-only with respect to that state except appending to `crons`. Only
+// attemptTakeover (which must mutate `lock` and stop `retry`) stays a closure inside it.
+
+// Catch-up (W3-5): immediately after winning the lock, ask when dream last finished. If the
+// schedule's next fire after that instant has already passed -- or dream has never once run on a
+// database that otherwise has history -- run it once, shortly, instead of waiting for tonight's
+// cron. dream() always writes its dream:summary event as the last step even when individual
+// steps fail (pipeline/dream.ts), so this can never loop.
+//
+// Deliberately NOT withAdminDbScope: adminSql is a single-connection pool that dream() itself
+// holds exclusively for its whole run, and the lock holds one runtime connection for the
+// scheduler's entire lifetime. events SELECT is already granted to the restricted runtime role
+// (db/migrations/007_rls.sql), so the plain runtime pool (5 connections) is both sufficient and
+// starvation-free here.
+async function scheduleDreamCatchUp(
+  createCron: MaintenanceCronFactory,
+  crons: MaintenanceCron[],
+  runDream: () => void,
+): Promise<void> {
+  const lastDreamAt = await lastEventAt("dream:summary");
+  let needsCatchUp: boolean;
+  if (lastDreamAt) {
+    const scheduledAfterLastDream = new Cron(config.dreamCron, {
+      timezone: config.tz,
+    }).nextRun(lastDreamAt);
+    needsCatchUp =
+      scheduledAfterLastDream !== null && scheduledAfterLastDream.getTime() <= Date.now();
+  } else {
+    // No dream has ever run. On a brand-new install that is simply tonight's first-ever
+    // schedule, not a miss. On a database with other history, dream was never scheduled or kept
+    // failing to start, so catch up now rather than waiting for tonight.
+    needsCatchUp = (await lastEventAt()) !== null;
+  }
+  if (!needsCatchUp) return;
+  const delayMs =
+    DREAM_CATCH_UP_MIN_DELAY_MS +
+    Math.floor(Math.random() * (DREAM_CATCH_UP_MAX_DELAY_MS - DREAM_CATCH_UP_MIN_DELAY_MS));
+  const fireAt = new Date(Date.now() + delayMs);
+  const catchUp = createCron(fireAt.toISOString(), { timezone: config.tz }, runDream);
+  crons.push(catchUp);
+  console.error(
+    `[minime] dream catch-up scheduled: ${fireAt.toISOString()} (last run: ${
+      lastDreamAt ? lastDreamAt.toISOString() : "never"
+    })`,
   );
+}
+
+// Resident pending-unlock surfacing (W4-12): every ~5s (croner's optional leading seconds
+// field -- see its own README quick-start example), not a minute-resolution pattern, because the
+// default approval window is only 10 minutes and a pending minime_unlock request otherwise sits
+// silent until the owner happens to run `unlock:status` or `audit --summary`.
+const UNLOCK_WATCH_CRON = "*/5 * * * * *";
+
+/**
+ * The resident supervisor's one printed line per newly-seen pending tier-2 request -- request id
+ * and requested minutes only ("print request id + minutes only"); requestedBy (the requesting
+ * actor) never appears here, unlike unlock:status's fuller owner-terminal listing, because this
+ * is ambient background console output rather than something the owner explicitly asked to see in
+ * full. requestedAt is read only to derive the approval window's own close time (HH:MM) -- in the
+ * *configured owner* time zone, deliberately not Date's local getters, which read the daemon
+ * process's own zone and drift on a system-localtime-UTC host (see util/clock.ts's own note on
+ * exactly that failure mode).
+ */
+export function formatPendingUnlockLine(
+  request: PendingTier2UnlockRequest,
+  approvalWindowMinutes: number,
+  timeZone: string = config.tz,
+): string {
+  const windowExpiresAt = new Date(request.requestedAt.getTime() + approvalWindowMinutes * 60_000);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: configuredTimeZone(timeZone),
+    hourCycle: "h23",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).formatToParts(windowExpiresAt);
+  const hour = parts.find((part) => part.type === "hour")?.value ?? "00";
+  const minute = parts.find((part) => part.type === "minute")?.value ?? "00";
+  return (
+    `tier-2 unlock requested (${request.requestedMinutes}min): ` +
+    `bun run src/cli.ts unlock:approve ${request.id} — expires ${hour}:${minute}`
+  );
+}
+
+// Owner DSN only: 023_session_unlock_approval.sql revokes every privilege on session_unlocks from
+// minime_app and minime_engineer_ro, so this must run under withAdminDbScope, same as
+// runDream/dbSnapshot/resticCheck above -- the MCP-reachable child could not read this table even
+// if it tried. Registered unconditionally (unlike backup/restic-check/brief above): the unlock
+// ceremony has no separate enable flag.
+function scheduleUnlockWatch(
+  createCron: MaintenanceCronFactory,
+  crons: MaintenanceCron[],
+  run: (label: string, work: () => Promise<unknown>) => void,
+): void {
+  // Ids already printed this residency, so a still-pending request is announced once, not every
+  // ~5s until it is approved, revoked, or falls out of the approval window. Pruned to exactly the
+  // ids still actually pending on every tick, so this can never grow unbounded over a
+  // long-running residency.
+  const surfaced = new Set<string>();
+  const watch = createCron(UNLOCK_WATCH_CRON, { timezone: config.tz }, () =>
+    run("unlock watch", () =>
+      withAdminDbScope(async () => {
+        const pending = await pendingTier2UnlockRequests();
+        const stillPending = new Set(pending.map((request) => request.id));
+        for (const id of surfaced) {
+          if (!stillPending.has(id)) surfaced.delete(id);
+        }
+        for (const request of pending) {
+          if (surfaced.has(request.id)) continue;
+          surfaced.add(request.id);
+          console.error(
+            `[minime] ${formatPendingUnlockLine(request, config.tier2UnlockApprovalWindowMinutes)}`,
+          );
+        }
+      }),
+    ),
+  );
+  crons.push(watch);
+}
+
+// Persistent-failure detector (W3-7): after each dream run, look at the last 3 dream:summary
+// events (this run plus the two before it). Only when all 3 failed at least one step AND no
+// ops_failure item is already open does this enqueue one -- one bad night never pages the owner,
+// but three in a row (a real, not transient, problem) does exactly once, and it stays quiet while
+// that item is open (no re-flag storm on every subsequent failing night). failed_steps/since are
+// fixed dream-step identifiers and a timestamp, never prose (see audit-payload.ts's dreamSummary).
+// Exported so tests can seed events directly and call this without running a real dream().
+export async function flagPersistentDreamFailure(): Promise<void> {
+  const recent = await recentEventsByVerb("dream:summary", 3);
+  if (recent.length < 3) return;
+  const failedSteps = recent.map((event) =>
+    Array.isArray(event.payload?.failed_steps)
+      ? (event.payload.failed_steps as unknown[]).filter(
+          (step): step is string => typeof step === "string",
+        )
+      : [],
+  );
+  if (failedSteps.some((steps) => steps.length === 0)) return; // at least one clean run in the window
+  if ((await openReviewItems("ops_failure")).length > 0) return; // already flagged and still open
+  await insertReviewItem("ops_failure", {
+    failed_steps: failedSteps[0],
+    since: recent[recent.length - 1]!.at,
+  });
+}
+
+async function beginOwnedMaintenance(
+  createCron: MaintenanceCronFactory,
+  crons: MaintenanceCron[],
+  run: (label: string, work: () => Promise<unknown>) => void,
+  runDream: () => void,
+): Promise<void> {
+  const nightly = createCron(config.dreamCron, { timezone: config.tz }, runDream);
   crons.push(nightly);
   console.error(
     `[minime] dream scheduled: ${config.dreamCron} (next: ${nightly.nextRun()?.toISOString()})`,
@@ -267,12 +424,148 @@ export function startOwnerMaintenanceSchedule(
     );
   }
 
+  // W3-9: weekly repository integrity check. Independent of BACKUP_CRON (it verifies the
+  // repository, it doesn't create a snapshot) but the same restic-configured + lock-winner guard
+  // as the db snapshot cron above.
+  if (config.resticCheckCron && config.resticRepository && config.resticPasswordFile) {
+    const check = createCron(config.resticCheckCron, { timezone: config.tz }, () =>
+      run("restic check", resticCheck),
+    );
+    crons.push(check);
+    console.error(
+      `[minime] restic check scheduled: ${config.resticCheckCron} (next: ${check.nextRun()?.toISOString()})`,
+    );
+  } else {
+    console.error(
+      "[minime] restic check disabled (set RESTIC_REPOSITORY and RESTIC_PASSWORD_FILE to enable)",
+    );
+  }
+
+  // W3-11: opt-in local morning-brief notification (counts-only; src/ops/push.ts). Same
+  // lock-winner gating as the crons above, but no restic-style external prerequisite -- BRIEF_CRON
+  // alone is enough to arm it, since the OS notifier needs no configuration and NTFY_URL is
+  // optional.
+  if (config.briefCron) {
+    const brief = createCron(config.briefCron, { timezone: config.tz }, () =>
+      run("push brief", () =>
+        withAdminDbScope(async () => {
+          // No actor is passed: stateSnapshot()'s tier check (allowedTier -> app_allowed_tier())
+          // reads the minime.actor/minime.session_id GUCs, which are unset on this plain
+          // admin-pool call -- so this always resolves to tier 1, deterministically, regardless
+          // of any owner tier-2 unlock that happens to be active elsewhere at the moment the cron
+          // fires. That is exactly the safe behavior for a lock-screen-safe count: it can never
+          // be inflated by a coincidental unlock, and its magnitude never hints that one is open.
+          const snapshot = await stateSnapshot();
+          const text = buildBriefText(snapshot);
+          const delivery = await deliverBrief(text);
+          // Logged once per delivery attempt regardless of outcome -- counts only, never content
+          // (audit-payload.ts's pushBrief). Delivery success/failure itself is local-only,
+          // reported below via the thrown error -> run()'s ops.log path, not this audited row.
+          await logEvent({
+            actor: "system:push",
+            verb: "push:brief",
+            payload: auditPayload.pushBrief(briefCounts(snapshot)),
+          });
+          if (!delivery.ok) throw new Error("push_brief_delivery_failed");
+        }),
+      ),
+    );
+    crons.push(brief);
+    console.error(
+      `[minime] push brief scheduled: ${config.briefCron} (next: ${brief.nextRun()?.toISOString()})`,
+    );
+  }
+
+  await scheduleDreamCatchUp(createCron, crons, runDream);
+
+  // Registered last so it never shifts the index of anything above (dream/backup/restic-check/
+  // brief/catch-up) that test/maintenance-lock.test.ts already pins by position.
+  scheduleUnlockWatch(createCron, crons, run);
+}
+
+/** Trusted maintenance scheduler. The MCP child never receives restic or owner DB credentials. */
+export async function startOwnerMaintenanceSchedule(
+  createCron: MaintenanceCronFactory = createMaintenanceCron,
+): Promise<OwnerMaintenanceSchedule> {
+  const crons: MaintenanceCron[] = [];
+  const active = new Set<Promise<unknown>>();
+  let lock: MaintenanceLockHandle | null = null;
+  let retry: MaintenanceCron | undefined;
+
+  const run = (label: string, work: () => Promise<unknown>) => {
+    const task = work()
+      .then((result) => {
+        if (
+          typeof result === "object" &&
+          result !== null &&
+          "ran" in result &&
+          result.ran === false &&
+          "detail" in result
+        ) {
+          console.error(`[minime] ${label} skipped: ${String(result.detail)}`);
+        }
+      })
+      .catch(async (error) => {
+        console.error(
+          `[minime] ${label} failed: ${error instanceof Error ? error.message : error}`,
+        );
+        // Same sanitization discipline as dream.ts's runDreamStep: the fixed cron label and
+        // the exception's own constructor name only, never error.message, into the local
+        // owner-only ops log. Best-effort -- a logging failure here must never throw back
+        // into this cron's own error path.
+        const errorClass = error instanceof Error ? error.constructor.name : typeof error;
+        await appendOpsLine({ step: label, errorClass }).catch(() => {});
+      });
+    active.add(task);
+    void task.finally(() => active.delete(task));
+  };
+
+  const runDream = () =>
+    run("dream", () =>
+      withAdminDbScope(async () => {
+        const summary = await dream();
+        await flagPersistentDreamFailure();
+        return summary;
+      }),
+    );
+
+  const attemptTakeover = async (): Promise<void> => {
+    // Also the runtime pool, not admin scope -- see scheduleDreamCatchUp above.
+    const handle = await tryAcquireMaintenanceLock();
+    if (!handle) return;
+    lock = handle;
+    retry?.stop();
+    await beginOwnedMaintenance(createCron, crons, run, runDream);
+  };
+
+  const initialLock = await tryAcquireMaintenanceLock();
+  if (initialLock) {
+    lock = initialLock;
+    await beginOwnedMaintenance(createCron, crons, run, runDream);
+  } else {
+    console.error("[minime] maintenance owned by another process");
+    retry = createCron(MAINTENANCE_RETRY_CRON, { timezone: config.tz }, () =>
+      run("maintenance takeover", attemptTakeover),
+    );
+    crons.push(retry);
+  }
+
   let closing: Promise<void> | undefined;
   return {
     close() {
       closing ??= (async () => {
+        retry?.stop();
+        // Let any in-flight takeover finish first -- it may still be about to register the
+        // dream/backup/catch-up crons a successful takeover creates, and those must be stopped
+        // too, not leaked past close().
+        await Promise.allSettled([...active]);
         for (const cron of crons) cron.stop();
         await Promise.allSettled([...active]);
+        if (lock) {
+          const handle = lock;
+          lock = null;
+          await releaseMaintenanceLock(handle);
+        }
       })();
       return closing;
     },

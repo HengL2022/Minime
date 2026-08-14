@@ -1,23 +1,29 @@
 // Nightly dream job (spec §10), 8 steps in order. Each step is best-effort: a failure is
 // recorded and the remaining steps still run. Flags, never auto-resolves (step 3).
 
-import { withAdminDbScope, withAdminDbTransaction } from "../db/client";
+import { withAdminDbScope, withAdminDbTransaction, withDbTransaction } from "../db/client";
 import {
   chunkPairsSharingPerson,
   clearDreamMetricRefreshWindow,
   decisionsNeedingReview,
+  goalsNeedingReview,
+  goalsWithoutChunks,
   insertReviewItem,
   listMetricDefs,
   logEvent,
+  materializeRecurrence,
   parentsNeedingExtraction,
   phantomPersonCandidates,
   prepareMetricCache,
+  recurringTasksNeedingSuccessor,
   reviewItemExists,
   runMetricAgg,
   staleItems,
+  staleRecentlyFlagged,
   upsertMetricValue,
 } from "../db/repo";
-import { drainEmbedBacklog } from "../search/index-parent";
+import { appendOpsLine } from "../ops/ops-log";
+import { drainEmbedBacklog, indexParent } from "../search/index-parent";
 import { auditPayload } from "../util/audit-payload";
 import { configuredTimeZone, todayStr } from "../util/clock";
 import { config } from "../util/config";
@@ -42,6 +48,29 @@ export async function entityLinkPass(limit = 500): Promise<number> {
     linked += stats?.edges ?? 0;
   }
   return linked;
+}
+
+// -- step 2d: goal search backfill -------------------------------------------
+//
+// insertGoal never indexes itself (unlike upsertTask/insertDecision, indexing is the caller's
+// job) -- this drains whatever a caller missed, chiefly onboarding-era goals written before
+// W3-12 and demo/fixture seed data, so they eventually become searchable. Bounded and
+// idempotent (goalsWithoutChunks, repo.ts): a goal drops off the list as soon as it's indexed.
+export async function goalBacklogIndex(limit = 200): Promise<number> {
+  let indexed = 0;
+  for (const goal of await goalsWithoutChunks(limit)) {
+    const ok = await indexParent(
+      "goal",
+      goal.id,
+      [goal.statement, goal.why ?? ""].filter(Boolean).join("\n\n"),
+      goal.statement,
+      goal.tier === 2 ? 2 : 1,
+    )
+      .then(() => true)
+      .catch(() => false);
+    if (ok) indexed++;
+  }
+  return indexed;
 }
 
 // -- step 3: contradiction scan --------------------------------------------
@@ -123,6 +152,40 @@ export async function phantomPersonScan(): Promise<number> {
   return flagged;
 }
 
+// -- step 4: stale detection -------------------------------------------------
+//
+// staleItems(referencedSinceDays, untouchedDays) already applies the untouched-AND-referenced
+// conjunction (repo.ts); this loop's own job is re-flag suppression. staleRecentlyFlagged
+// (unlike the plain reviewItemExists other steps use) also counts recently-created dismissed
+// items, so a dismissal stays quiet for its suppression window instead of being re-flagged the
+// very next night (review-triage.md: "dismissed means dismissed").
+export async function staleScan(): Promise<number> {
+  let flagged = 0;
+  for (const item of await staleItems(7, 180)) {
+    if (await staleRecentlyFlagged(item.id)) continue;
+    await insertReviewItem("stale", { id: item.id, type: item.type, label: item.label });
+    flagged++;
+  }
+  return flagged;
+}
+
+// -- step 5b: recurrence crash-safety net ------------------------------------
+//
+// upsertTask's own done-transition materialization (repo.ts) already mints a recurring task's
+// next instance inside the SAME transaction as the completing update, so this should normally
+// find nothing. It exists for the path that transaction never ran at all — a done recurring
+// task written by some future code that bypasses upsertTask, a restored/replayed row, or any
+// other way status='done' could land without going through the one write path that knows to
+// materialize. Runs before rollups (not lettered after 5 like the other N-vs-Nb steps) so a
+// crash-recovered task's next due date is in place before the night's numbers are read.
+export async function recurrenceBackfill(): Promise<number> {
+  let materialized = 0;
+  for (const task of await recurringTasksNeedingSuccessor()) {
+    if (await withDbTransaction(() => materializeRecurrence(task))) materialized++;
+  }
+  return materialized;
+}
+
 // -- step 5: metric rollups -------------------------------------------------
 
 export async function rollupMetrics(days = 90): Promise<number> {
@@ -190,6 +253,21 @@ export async function enqueueDecisionReviews(asOfDate: string): Promise<number> 
   return queued;
 }
 
+// -- step 6b: goal reviews ----------------------------------------------------
+//
+// goal_review payload carries goal_id only (never the statement — review-queue.ts resolves it
+// fresh at read time via visibleTitle, the same tier-aware path decision_review's question
+// uses), so a locked-tier goal's wording is never written unmasked into review_queue.
+export async function enqueueGoalReviews(): Promise<number> {
+  let queued = 0;
+  for (const goal of await goalsNeedingReview()) {
+    if (await reviewItemExists("goal_review", "goal_id", goal.id)) continue;
+    await insertReviewItem("goal_review", { goal_id: goal.id });
+    queued++;
+  }
+  return queued;
+}
+
 // -- step 7: backup ----------------------------------------------------------
 
 // re-export for callers that import backup from this module. `backup` itself is
@@ -199,17 +277,31 @@ export { backup };
 
 // -- orchestration -----------------------------------------------------------
 
+// One dream step, best-effort: a thrown exception is recorded as the literal "failed" in the
+// in-memory summary (printed by the owner CLI and reduced into the dream:summary audit event --
+// auditPayload.dreamSummary filters by DREAM_STEPS key, never by this value) and, separately,
+// as one sanitized line in the local owner-only ops log (data/logs/ops.log). Provider/SQL/
+// filesystem exceptions may contain private prose or paths, so only the exception's own
+// constructor name -- never error.message -- ever leaves this catch. Exported so tests can
+// drive it directly without running the full dream() pipeline. appendOpsLine is itself
+// best-effort (`.catch(() => {})`): a logging failure here must never stop the remaining steps.
+export async function runDreamStep(
+  summary: Record<string, unknown>,
+  name: string,
+  fn: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    summary[name] = await fn();
+  } catch (error) {
+    summary[name] = "failed";
+    const errorClass = error instanceof Error ? error.constructor.name : typeof error;
+    await appendOpsLine({ step: name, errorClass }).catch(() => {});
+  }
+}
+
 export async function dream(): Promise<Record<string, unknown>> {
   const summary: Record<string, unknown> = {};
-  const step = async (name: string, fn: () => Promise<unknown>) => {
-    try {
-      summary[name] = await fn();
-    } catch {
-      // The summary is printed by the owner CLI as well as reduced into an audit event.
-      // Provider/SQL/filesystem exceptions may contain private prose or paths.
-      summary[name] = "failed";
-    }
-  };
+  const step = (name: string, fn: () => Promise<unknown>) => runDreamStep(summary, name, fn);
 
   await step("1_embed_backlog", () => drainEmbedBacklog());
   await step("2_entity_link", () => entityLinkPass());
@@ -227,23 +319,18 @@ export async function dream(): Promise<Record<string, unknown>> {
     const { candidates, compiled, skipped } = await compileDecisionDigests();
     return { candidates, compiled, skipped };
   });
+  await step("2d_goal_backlog_index", () => goalBacklogIndex());
   await step("3_contradictions", () => contradictionScan());
   await step("3b_phantom_persons", () => phantomPersonScan());
   await step("3c_validate_edges", async () => {
     const { validateEdges } = await import("./validate-edges");
     return validateEdges();
   });
-  await step("4_stale", async () => {
-    let flagged = 0;
-    for (const item of await staleItems(7, 180)) {
-      if (await reviewItemExists("stale", "id", item.id)) continue;
-      await insertReviewItem("stale", { id: item.id, type: item.type, label: item.label });
-      flagged++;
-    }
-    return flagged;
-  });
+  await step("4_stale", () => staleScan());
+  await step("5b_recurrence", () => recurrenceBackfill());
   await step("5_rollups", () => rollupMetrics());
   await step("6_decision_reviews", () => enqueueDecisionReviews(todayStr(config.tz)));
+  await step("6b_goal_reviews", () => enqueueGoalReviews());
   await step("7_backup", () => backup());
 
   // step 8: the summary event

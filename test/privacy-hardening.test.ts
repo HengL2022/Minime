@@ -3,6 +3,7 @@
 // or review-queue payloads.
 
 import { beforeEach, describe, expect, test } from "bun:test";
+import postgres from "postgres";
 import {
   chunkPairsSharingPerson,
   chunksMissingEmbedding,
@@ -14,7 +15,8 @@ import {
 } from "../src/db/repo";
 import { toolByName } from "../src/mcp/tools";
 import { invokeTool } from "../src/mcp/tools/registry";
-import { resetDb, testSql as sql } from "./helpers";
+import { expectSqlReject, resetDb, testSql as sql } from "./helpers";
+import { dropTestAppRole, mintTestAppRole } from "./support/app-role";
 import { requestAndApproveTier2, sessionToolCtx } from "./support/unlock";
 
 const ctx = sessionToolCtx("agent:privacy-test");
@@ -354,5 +356,160 @@ describe("tier-2 privacy hardening", () => {
         (row) => row.a_text.includes(sentinel) || row.b_text.includes(sentinel),
       ),
     ).toBe(false);
+  });
+
+  // W2-1: migration 028 grants minime_app UPDATE on exactly (superseded_by, superseded_at) for
+  // the six content tables that previously had no UPDATE grant at all. This is the real runtime
+  // `minime_app` role (SET ROLE, not the independently-cloned test app-role boundary), so it
+  // exercises the actual production grant + the existing tier_update RLS policy together.
+  test("minime_app can stamp superseded_by/at only under its own approved tier-2 unlock, and only on those two columns", async () => {
+    await sql`delete from session_unlocks`;
+    const [original] = await sql`
+      insert into journal_entries (entry_md, tier) values ('ZQX-SUPERSEDE-ORIGINAL', 2) returning id`;
+    const [successor] = await sql`
+      insert into journal_entries (entry_md, tier, supersedes_id)
+      values ('ZQX-SUPERSEDE-SUCCESSOR', 2, ${original!.id}) returning id`;
+
+    const appRole = await mintTestAppRole(process.env.DATABASE_URL!);
+    await sql.unsafe(`grant minime_app to "${appRole.roleName}"`);
+    const app = postgres(appRole.databaseUrl, { max: 1, onnotice: () => {} });
+    const probeCtx = sessionToolCtx("agent:supersede-grant-probe");
+    const stamp = () =>
+      app.begin(async (tx) => {
+        await tx`set local role minime_app`;
+        await tx`select set_config('minime.actor', ${probeCtx.actor}, true)`;
+        await tx`select set_config('minime.session_id', ${probeCtx.sessionId as string}, true)`;
+        return tx`
+          update journal_entries set superseded_by = ${successor!.id}, superseded_at = now()
+          where id = ${original!.id}`;
+      });
+
+    try {
+      // Locked (tier 1 default): the tier_update RLS policy filters the tier-2 row out, so the
+      // grant succeeds at the privilege check but the statement touches zero rows.
+      const locked = await stamp();
+      expect(locked.count).toBe(0);
+      const [stillLive] = await sql`
+        select superseded_by, superseded_at from journal_entries where id = ${original!.id}`;
+      expect(stillLive).toEqual({ superseded_by: null, superseded_at: null });
+
+      await requestAndApproveTier2(probeCtx);
+
+      // Unlocked: the same statement now stamps the row through the column-limited grant.
+      const unlocked = await stamp();
+      expect(unlocked.count).toBe(1);
+      const [superseded] = await sql`
+        select superseded_by, superseded_at from journal_entries where id = ${original!.id}`;
+      expect(superseded!.superseded_by).toBe(successor!.id);
+      expect(superseded!.superseded_at).not.toBeNull();
+
+      // The grant is column-limited: minime_app still cannot touch entry_md directly, even
+      // unlocked and even on the very same row.
+      await expectSqlReject(
+        app.begin(async (tx) => {
+          await tx`set local role minime_app`;
+          await tx`select set_config('minime.actor', ${probeCtx.actor}, true)`;
+          await tx`select set_config('minime.session_id', ${probeCtx.sessionId as string}, true)`;
+          return tx`update journal_entries set entry_md = 'tampered' where id = ${original!.id}`;
+        }),
+        /permission denied/,
+      );
+    } finally {
+      await app.end({ timeout: 2 });
+      await dropTestAppRole(appRole);
+    }
+  });
+
+  // W2-1 review finding (2026-08-08): the tier_update RLS policies on these tables carried only
+  // the upper bound (`tier <= app_allowed_tier()`); unlike tier_read
+  // (019_tier0_prose_quarantine.sql/021_runtime_app_role.sql) and tier_delete
+  // (021_runtime_app_role.sql), they never got the `tier >= 1` lower bound. A WHERE-less or
+  // constant-predicate UPDATE from a LOCKED session could therefore still stamp a tier-0
+  // quarantined row -- one that same session could never discover via any tier_read-gated SELECT.
+  // This is the real runtime minime_app role and the actual tier_update policy from the
+  // migrations, not the independently-cloned test app-role boundary.
+  test("minime_app cannot stamp superseded_at on a tier-0 quarantined row via a WHERE-less update, even locked", async () => {
+    await sql`delete from session_unlocks`;
+    const [quarantined] = await sql`
+      insert into journal_entries (entry_md, tier) values ('ZQX-TIER0-QUARANTINE-SUPERSEDE', 0)
+      returning id`;
+
+    const appRole = await mintTestAppRole(process.env.DATABASE_URL!);
+    await sql.unsafe(`grant minime_app to "${appRole.roleName}"`);
+    const app = postgres(appRole.databaseUrl, { max: 1, onnotice: () => {} });
+    const probeCtx = sessionToolCtx("agent:supersede-tier0-probe");
+
+    try {
+      // Locked (tier 1 default) and no WHERE clause at all: before the lower-bound fix, this
+      // bulk statement matched every row the UPDATE policy's upper bound alone didn't exclude --
+      // including tier 0, since 0 <= 1. It must now touch zero rows.
+      const bulk = await app.begin(async (tx) => {
+        await tx`set local role minime_app`;
+        await tx`select set_config('minime.actor', ${probeCtx.actor}, true)`;
+        await tx`select set_config('minime.session_id', ${probeCtx.sessionId as string}, true)`;
+        return tx`update journal_entries set superseded_at = now()`;
+      });
+      expect(bulk.count).toBe(0);
+
+      const [stillLive] = await sql`
+        select superseded_by, superseded_at from journal_entries where id = ${quarantined!.id}`;
+      expect(stillLive).toEqual({ superseded_by: null, superseded_at: null });
+    } finally {
+      await app.end({ timeout: 2 });
+      await dropTestAppRole(appRole);
+    }
+  });
+
+  test("minime_app can neither re-promote a tier-0 chunk nor demote any row to tier 0", async () => {
+    await sql`delete from session_unlocks`;
+    // Quarantined tier-0 page prose physically lives in chunks.text (019). Before 028's
+    // tier_update lower bound covered chunks, a WHERE-less `update chunks set tier = 1` from a
+    // locked minime_app session re-promoted it to the agent-readable tier (invariant review,
+    // 2026-08-08). Both directions must now fail closed: no re-promotion out of tier 0, and no
+    // demotion into it (the replaced USING clause is also the implicit WITH CHECK).
+    const [page] = await sql`
+      insert into pages (path, title, body_md, content_hash, tier, source, created_by)
+      values ('probe/zqx-quarantined.md', 'ZQX quarantine probe', 'fictional probe body',
+              'zqxprobehash0000', 1, 'manual', 'human')
+      returning id`;
+    const [chunk] = await sql`
+      insert into chunks (parent_type, parent_id, ord, text, tier)
+      values ('page', ${page!.id}, 0, 'ZQX-TIER0-QUARANTINED-CHUNK-PROSE', 0)
+      returning id`;
+
+    const appRole = await mintTestAppRole(process.env.DATABASE_URL!);
+    await sql.unsafe(`grant minime_app to "${appRole.roleName}"`);
+    const app = postgres(appRole.databaseUrl, { max: 1, onnotice: () => {} });
+    const probeCtx = sessionToolCtx("agent:tier0-chunk-probe");
+
+    try {
+      const repromote = await app.begin(async (tx) => {
+        await tx`set local role minime_app`;
+        await tx`select set_config('minime.actor', ${probeCtx.actor}, true)`;
+        await tx`select set_config('minime.session_id', ${probeCtx.sessionId as string}, true)`;
+        return tx`update chunks set tier = 1`;
+      });
+      expect(repromote.count).toBe(0);
+      const [still0] = await sql`select tier from chunks where id = ${chunk!.id}`;
+      expect(still0!.tier).toBe(0);
+
+      let demoteError = "";
+      try {
+        await app.begin(async (tx) => {
+          await tx`set local role minime_app`;
+          await tx`select set_config('minime.actor', ${probeCtx.actor}, true)`;
+          await tx`select set_config('minime.session_id', ${probeCtx.sessionId as string}, true)`;
+          return tx`update pages set tier = 0 where id = ${page!.id}`;
+        });
+      } catch (e) {
+        demoteError = e instanceof Error ? e.message : String(e);
+      }
+      expect(demoteError).toContain("row-level security");
+      const [still1] = await sql`select tier from pages where id = ${page!.id}`;
+      expect(still1!.tier).toBe(1);
+    } finally {
+      await app.end({ timeout: 2 });
+      await dropTestAppRole(appRole);
+    }
   });
 });

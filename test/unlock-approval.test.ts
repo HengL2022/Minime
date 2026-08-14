@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import postgres from "postgres";
@@ -255,5 +255,111 @@ describe("owner-approved session unlock", () => {
     expect(`${stdout}\n${stderr}`).not.toContain("OLLAMA_URL");
     expect(`${stdout}\n${stderr}`).not.toContain(sessionId);
     expect(await allowedTier("agent:cli-order", sessionId)).toBe(2);
+  });
+});
+
+async function spawnUnlockApprove(
+  args: string[],
+  env: Record<string, string> = {},
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const child = Bun.spawn(
+    [process.execPath, "--no-env-file", "run", "src/cli.ts", "unlock:approve", ...args],
+    {
+      cwd: new URL("..", import.meta.url).pathname,
+      env: { ...process.env, ...env },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [code, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  return { code, stdout, stderr };
+}
+
+describe("unlock:approve --latest", () => {
+  // --latest lists every pending request regardless of actor, so leftover rows from earlier
+  // tests in this shared scratch database would make these counts nondeterministic.
+  beforeEach(async () => {
+    await testSql`delete from session_unlocks`;
+  });
+
+  test("approves the single pending request and prints who requested it", async () => {
+    const sessionId = crypto.randomUUID();
+    const request = await withActorDbSession(
+      "agent:cli-latest-single",
+      () => requestTier2Unlock(5),
+      sessionId,
+    );
+    const { code, stdout, stderr } = await spawnUnlockApprove(["--latest"]);
+    expect(code).toBe(0);
+    expect(stdout).toContain(`approved tier-2 request ${request.id}`);
+    expect(stdout).toContain("agent:cli-latest-single");
+    expect(`${stdout}\n${stderr}`).not.toContain(sessionId);
+    expect(await allowedTier("agent:cli-latest-single", sessionId)).toBe(2);
+  });
+
+  test("refuses and lists every pending id when more than one request is pending", async () => {
+    const sessionA = crypto.randomUUID();
+    const sessionB = crypto.randomUUID();
+    const requestA = await withActorDbSession(
+      "agent:cli-latest-multi-a",
+      () => requestTier2Unlock(5),
+      sessionA,
+    );
+    const requestB = await withActorDbSession(
+      "agent:cli-latest-multi-b",
+      () => requestTier2Unlock(5),
+      sessionB,
+    );
+    const { code, stdout, stderr } = await spawnUnlockApprove(["--latest"]);
+    expect(code).toBe(1);
+    const combined = `${stdout}\n${stderr}`;
+    expect(combined).toContain(requestA.id);
+    expect(combined).toContain(requestB.id);
+    expect(combined).toContain("agent:cli-latest-multi-a");
+    expect(combined).toContain("agent:cli-latest-multi-b");
+    expect(combined).not.toContain(sessionA);
+    expect(combined).not.toContain(sessionB);
+    expect(await allowedTier("agent:cli-latest-multi-a", sessionA)).toBe(1);
+    expect(await allowedTier("agent:cli-latest-multi-b", sessionB)).toBe(1);
+  });
+
+  test("refuses when no request is pending", async () => {
+    const { code, stdout, stderr } = await spawnUnlockApprove(["--latest"]);
+    expect(code).toBe(1);
+    expect(`${stdout}\n${stderr}`).toContain(
+      "no pending unlock request within the approval window",
+    );
+  });
+
+  test("TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES honors a narrower or wider window end-to-end", async () => {
+    const sessionId = crypto.randomUUID();
+    const request = await withActorDbSession(
+      "agent:cli-window-override",
+      () => requestTier2Unlock(5),
+      sessionId,
+    );
+    await testSql`
+      update session_unlocks set requested_at = clock_timestamp() - interval '2 minutes'
+      where id = ${request.id}::uuid`;
+
+    const tooNarrow = await spawnUnlockApprove([request.id], {
+      TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES: "1",
+    });
+    expect(tooNarrow.code).toBe(1);
+    expect(`${tooNarrow.stdout}\n${tooNarrow.stderr}`).toContain(
+      "unlock request is not pending and eligible",
+    );
+    expect(await allowedTier("agent:cli-window-override", sessionId)).toBe(1);
+
+    const wideEnough = await spawnUnlockApprove([request.id], {
+      TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES: "60",
+    });
+    expect(wideEnough.code).toBe(0);
+    expect(wideEnough.stdout).toContain(`approved tier-2 request ${request.id}`);
+    expect(await allowedTier("agent:cli-window-override", sessionId)).toBe(2);
   });
 });

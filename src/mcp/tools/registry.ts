@@ -8,7 +8,7 @@ import { withActorDbSession } from "../../db/repo";
 import { configuredTimeZone } from "../../util/clock";
 import { type AuditSink, eventAuditSink } from "../audit";
 import { type Envelope, ToolError, localizeEnvelopeDates } from "../envelope";
-import { redactDeep } from "../redact";
+import { redactDeepCounted } from "../redact";
 
 export interface ToolCtx {
   actor: string; // 'agent:<client>' | 'human'
@@ -100,7 +100,16 @@ export async function executeTool(tool: ToolDef, params: any, ctx: ToolCtx): Pro
       () => tool.handler(parsed, { ...ctx, timeZone }),
       ctx.sessionId,
     );
-    const redacted = redactDeep(env);
+    const { value: redacted, count } = redactDeepCounted(env);
+    // W4-10: disclose that outbound redaction changed the answer instead of letting an agent
+    // present a [REDACTED:*] placeholder as if it were the real number (spec §8 / I5's
+    // disclose-rather-than-confabulate contract). Only appended when something actually fired.
+    if (count > 0) {
+      redacted.gaps = [
+        ...(redacted.gaps ?? []),
+        `outbound redaction replaced ${count} number-like string${count === 1 ? "" : "s"}`,
+      ];
+    }
     return { ok: true, envelope: redacted };
   } catch (err) {
     const code =
@@ -114,7 +123,10 @@ export async function executeTool(tool: ToolDef, params: any, ctx: ToolCtx): Pro
         : err instanceof Error
           ? err.message
           : String(err);
-    return { ok: false, error: { code, message: redactDeep(message) } };
+    // redactDeepCounted here too, but the count is deliberately discarded: ToolResult's error
+    // shape is { code, message[, retry] } (see the type above) with no gaps array to disclose
+    // into, and inventing one here would break every caller/test matching this fixed shape.
+    return { ok: false, error: { code, message: redactDeepCounted(message).value } };
   }
 }
 

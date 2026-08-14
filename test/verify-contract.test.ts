@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { ALL_TOOLS } from "../src/mcp/tools";
 
 const repoRoot = resolve(import.meta.dir, "..");
 const packageJson = JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf8")) as {
@@ -22,7 +23,7 @@ const agents = readFileSync(resolve(repoRoot, "AGENTS.md"), "utf8");
 const readme = readFileSync(resolve(repoRoot, "README.md"), "utf8");
 
 function makeDryRun(target: string, variables: string[] = []): string {
-  const result = Bun.spawnSync(["make", "-n", target, ...variables], {
+  const result = Bun.spawnSync(["make", "-n", "--no-print-directory", target, ...variables], {
     cwd: repoRoot,
     stdout: "pipe",
     stderr: "pipe",
@@ -30,7 +31,13 @@ function makeDryRun(target: string, variables: string[] = []): string {
   const stdout = new TextDecoder().decode(result.stdout);
   const stderr = new TextDecoder().decode(result.stderr);
   expect(result.exitCode).toBe(0);
-  return `${stdout}\n${stderr}`;
+  // Nested `make verify-offline` sets MAKEFLAGS=--print-directory. The explicit
+  // `--no-print-directory` usually wins, but still strip Entering/Leaving
+  // banners so the assertion is the recipe text, not the invoker's chatter.
+  return `${stdout}\n${stderr}`
+    .split("\n")
+    .filter((line) => !/^make(\[\d+\])?: (Entering|Leaving) directory/.test(line))
+    .join("\n");
 }
 
 describe("authoritative verification contract", () => {
@@ -86,6 +93,19 @@ describe("authoritative verification contract", () => {
     }
   });
 
+  test("dry-run recipe text ignores nested make directory banners", () => {
+    const previous = process.env.MAKEFLAGS;
+    process.env.MAKEFLAGS = "--print-directory";
+    try {
+      expect(makeDryRun("verify-offline").trim()).toBe("bash scripts/verify-offline.sh");
+      expect(makeDryRun("restore-drill").trim()).toBe(
+        "bun --no-env-file run scripts/recovery-ops.ts drill",
+      );
+    } finally {
+      process.env.MAKEFLAGS = previous;
+    }
+  });
+
   test("offline target delegates to one complete canonical coordinator", () => {
     const dryRun = makeDryRun("verify-offline");
     expect(dryRun.trim()).toBe("bash scripts/verify-offline.sh");
@@ -118,6 +138,18 @@ describe("authoritative verification contract", () => {
     expect((installWorkflow.match(/bun-version-file: \.bun-version/g) ?? []).length).toBe(3);
     expect(installWorkflow).toContain("MINIME_PG_PORT=55432");
     expect(installWorkflow).toContain("MINIME_PG_PORT=55433");
+  });
+
+  test("owner and agent docs list every registered MCP tool", () => {
+    const resolver = readFileSync(resolve(repoRoot, "agents/skills/RESOLVER.md"), "utf8");
+    const names = ALL_TOOLS.map((t) => t.name);
+    expect(names).toHaveLength(22);
+    for (const document of [readme, agents, resolver]) {
+      expect(document).not.toMatch(/\b14 (tools|functions)\b/);
+      for (const name of names) {
+        expect(document).toContain(name);
+      }
+    }
   });
 
   test("docs identify verify-offline as fast development gate and verify as release gate", () => {

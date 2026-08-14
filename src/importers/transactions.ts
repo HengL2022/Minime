@@ -2,9 +2,11 @@
 // Idempotent: dedupe on (account_label, external_ref); row-hash fallback when the
 // bank provides no stable reference. Malformed rows are logged, never fatal (M4 AC).
 
-import { createHash } from "node:crypto";
-import { insertTransaction, logEvent } from "../db/repo";
+import { createHash, randomUUID } from "node:crypto";
+import { withAdminDbScope } from "../db/client";
+import { findAgentLoggedTxMatch, insertReviewItem, insertTransaction, logEvent } from "../db/repo";
 import { auditPayload } from "../util/audit-payload";
+import { applyCategoryRules, loadTxCategoryRules } from "../util/tx-categories";
 import type { ImportStats } from "./calendar";
 
 export interface TxProfile {
@@ -91,6 +93,8 @@ export async function importTransactions(
   const stats: ImportStats = { total: 0, inserted: 0, updated: 0, skipped: 0 };
   const rows = parseCsv(csvText, profile.delimiter ?? ",");
   if (rows.length === 0) return stats;
+  // W4-7: loaded once per import call, not once per row (config/tx-categories.json, no SQL).
+  const categoryRules = loadTxCategoryRules();
 
   const hasHeader = profile.has_header ?? true;
   const header = hasHeader ? rows[0]!.map((h) => h.trim()) : [];
@@ -135,17 +139,44 @@ export async function importTransactions(
         ? row[idx.externalRef]!.trim()
         : createHash("sha256").update(row.join("\u0000")).digest("hex").slice(0, 24);
 
+    // Client-generated (not gen_random_uuid()'s DB-side default) so this row's own id is known
+    // here without needing `returning id` -- see insertTransaction's `id` doc (src/db/repo.ts):
+    // minime_app's insert-only grant on `transactions` means RETURNING is never available on this
+    // path either. Functionally identical to the prior DB-generated default (both are random
+    // v4-shaped UUIDs); only used below when this row turns out to collide with an agent-logged
+    // expense worth flagging.
+    const id = randomUUID();
+    const merchant = idx.merchant >= 0 ? row[idx.merchant]?.trim() || null : null;
+    const csvCategory = idx.category >= 0 ? row[idx.category]?.trim() || null : null;
+    // W4-7: config/tx-categories.json fills a blank CSV category; a force:true rule can also
+    // override a CSV-provided one. No match, or no rules configured, leaves csvCategory as-is.
+    const category = applyCategoryRules(merchant, csvCategory, categoryRules);
     const inserted = await insertTransaction({
+      id,
       occurredAt,
       amountCents: amount,
       currency: profile.currency,
-      merchant: idx.merchant >= 0 ? row[idx.merchant]?.trim() || null : null,
-      category: idx.category >= 0 ? row[idx.category]?.trim() || null : null,
+      merchant,
+      category,
       accountLabel: profile.account_label,
       externalRef,
     });
-    if (inserted) stats.inserted++;
-    else stats.updated++; // duplicate: no-op upsert
+    if (inserted) {
+      stats.inserted++;
+      // W4-6: a same-day, same-amount minime_log_expense row already exists -- flag both for
+      // owner review rather than silently letting the bank import double-count a cash expense
+      // the owner already logged by hand. Admin-scoped: findAgentLoggedTxMatch is a genuine
+      // SELECT on `transactions`, and minime_app has no SELECT grant on that table.
+      const match = await withAdminDbScope(() => findAgentLoggedTxMatch(occurredAt, amount));
+      if (match) {
+        await insertReviewItem("duplicate", {
+          transaction_id: id,
+          existing_transaction_id: match.id,
+        });
+      }
+    } else {
+      stats.updated++; // duplicate: no-op upsert
+    }
   }
   await logEvent({
     actor: "importer:transactions",

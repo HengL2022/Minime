@@ -86,14 +86,36 @@ async function sectionValues(io: IO): Promise<number> {
 }
 
 async function sectionGoals(io: IO): Promise<number> {
-  io.say("\n— Goals — long arcs first, then this year.");
+  io.say("\n— Goals — long arcs first, then this year, then this quarter.");
   let n = 0;
   for (const g of await askLoop(io, "Life goal", 3)) {
-    await insertGoal({ horizon: "life", statement: g, createdBy: ACTOR, source: SOURCE });
+    const { id } = await insertGoal({
+      horizon: "life",
+      statement: g,
+      createdBy: ACTOR,
+      source: SOURCE,
+    });
+    await indexParent("goal", id, g, g, 1);
     n++;
   }
   for (const g of await askLoop(io, "This year's goal", 5)) {
-    await insertGoal({ horizon: "year", statement: g, createdBy: ACTOR, source: SOURCE });
+    const { id } = await insertGoal({
+      horizon: "year",
+      statement: g,
+      createdBy: ACTOR,
+      source: SOURCE,
+    });
+    await indexParent("goal", id, g, g, 1);
+    n++;
+  }
+  for (const g of await askLoop(io, "This quarter's goal", 5)) {
+    const { id } = await insertGoal({
+      horizon: "quarter",
+      statement: g,
+      createdBy: ACTOR,
+      source: SOURCE,
+    });
+    await indexParent("goal", id, g, g, 1);
     n++;
   }
   return n;

@@ -1,0 +1,22 @@
+# systemd --user unit template for Minime's resident `serve` (MCP stdio supervisor + inbox
+# watcher + dream/backup cron). Rendered by `make install-service` (scripts/install-service.sh),
+# which substitutes @REPO_ROOT@, @BUN_PATH@, and @HOME@ for this machine and this checkout.
+# Do not edit the rendered copy in ~/.config/systemd/user by hand -- rerun the install instead.
+[Unit]
+Description=Minime resident serve (MCP stdio supervisor, inbox watcher, dream/backup cron)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO_ROOT@
+ExecStart=@BUN_PATH@ run src/cli.ts serve
+Restart=on-failure
+RestartSec=5
+# A user systemd instance usually has HOME/a sane PATH already, but the nightly dream job
+# shells out to restic/pg_dump by bare name, so both are pinned explicitly rather than left
+# to the environment a lingering (no-login) user instance happens to provide.
+Environment=HOME=@HOME@
+Environment=PATH=@HOME@/.bun/bin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin
+
+[Install]
+WantedBy=default.target

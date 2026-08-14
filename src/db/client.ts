@@ -36,8 +36,18 @@ const runtimeDurabilityPool: DbPool = postgres(config.runtimeDatabaseUrl, {
 // it is never reachable through the MCP actor scope. The client object is constructed for the
 // explicit control-plane path. Resident `serve` retains it only in the non-MCP supervisor;
 // the MCP child receives the restricted URL for both configured pools.
+//
+// max must stay above 1: repo.ts's reserved-connection leases (withCompiledNotesLease,
+// withCompiledNoteTargetLease) check out one connection from whatever pool db() currently
+// resolves to and hold it for their whole callback, while that callback's own nested db() calls
+// (and dream step 2b's compileNotes nests a *second* per-candidate target lease inside the
+// first) need further connections from the very same pool. Under admin scope that pool is this
+// one, so max:1 made every admin-scoped compileNotes call -- i.e. every real nightly dream() run,
+// which always executes under withAdminDbScope -- deadlock waiting on a connection its own outer
+// reservation was holding. 5 matches runtimePool's headroom and was verified against the deepest
+// observed nesting (outer lease + inner target lease + one in-flight ambient query).
 export const adminSql: DbPool = postgres(config.databaseUrl, {
-  max: 1,
+  max: 5,
   onnotice: () => {},
 });
 let adminDisabled = false;
@@ -107,17 +117,24 @@ export async function withRuntimeDbTransaction<T>(
   return (await runtimePool.begin((tx) => transactionScope.run(tx, () => work(tx)))) as T;
 }
 
+const outstandingReservations = new Set<DbReservation>();
+
 export async function reserveDb(): Promise<DbReservation> {
   const pool = executorScope.getStore() === "admin" ? adminSql : runtimePool;
   const executor = await pool.reserve();
   let releasePromise: Promise<void> | undefined;
-  return {
+  const reservation: DbReservation = {
     executor,
     release: () => {
-      releasePromise ??= Promise.resolve().then(() => executor.release());
+      releasePromise ??= Promise.resolve().then(async () => {
+        outstandingReservations.delete(reservation);
+        await executor.release();
+      });
       return releasePromise;
     },
   };
+  outstandingReservations.add(reservation);
+  return reservation;
 }
 
 export async function withReservedDb<T>(work: (connection: DbReserved) => Promise<T>): Promise<T> {
@@ -152,6 +169,9 @@ export async function withDurableRuntimeDbTransaction<T>(
 }
 
 export async function closeDb(): Promise<void> {
+  const leftover = [...outstandingReservations];
+  outstandingReservations.clear();
+  await Promise.allSettled(leftover.map((reservation) => reservation.release()));
   const adminClose = adminDisabled ? Promise.resolve() : adminSql.end({ timeout: 5 });
   await Promise.all([
     runtimePool.end({ timeout: 5 }),

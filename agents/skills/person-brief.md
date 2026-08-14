@@ -7,6 +7,9 @@ honest about recency.
 
 1. `minime_get_context` with `person_name` — the dossier: `relation`, `context`,
    `last_contact_at`, typed edges (employer via `works_at`, shared mentions), open items.
+   `NOT_FOUND` here is not proof the owner doesn't know them: people minted only from a
+   logged interaction live at tier 2, invisible to a tier-1 lookup. The error itself says a
+   match may exist at tier 2 — offer an unlock before concluding this is a stranger.
 2. **Interactions are tier 2.** If `interactions` comes back empty and the gap note says
    tier-locked, ask: "Interaction history is locked — want a 15-minute unlock?" Only call
    `minime_unlock` after a yes. Give the owner the returned request ID and local approval
@@ -30,4 +33,6 @@ honest about recency.
 
 - Never fabricate warmth ("you two discussed…") without a cited interaction row.
 - After the meeting happens, offer `minime_log_interaction` — that is how this brief gets
-  better next time.
+  better next time. Promised them something during it? Pass `promise: {what, due?}` on that
+  same call to open a commitment attributed to them. Already fulfilling an old one? Close it —
+  `minime_upsert_commitment` with `status: kept` (or `renegotiated`/`broken`).

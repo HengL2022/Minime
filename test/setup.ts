@@ -71,6 +71,8 @@ for (const name of [
   "MINIME_PG_PORT",
   "MINIME_PG_INSTALL_PENDING",
   "BACKUP_CRON",
+  "BRIEF_CRON",
+  "NTFY_URL",
 ] as const) {
   Reflect.deleteProperty(process.env, name);
 }

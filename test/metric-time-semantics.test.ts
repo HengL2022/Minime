@@ -1,5 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { prepareMetricCache, stateSnapshot } from "../src/db/repo";
+import {
+  insertHealthSample,
+  insertJournal,
+  prepareMetricCache,
+  stateSnapshot,
+} from "../src/db/repo";
 import { queryMetric } from "../src/mcp/tools/metric";
 import { enqueueDecisionReviews, rollupMetrics } from "../src/pipeline/dream";
 import { setNow, todayStr } from "../src/util/clock";
@@ -31,6 +36,18 @@ describe("metric time semantics", () => {
     ]);
     expect(reduceMetricSeries(daily, "month", "last")).toEqual([
       { period_start: "2026-01-01", value: 4 },
+    ]);
+  });
+
+  test("shared reducer averages 'avg' rollup metrics per bucket, independent of other buckets", () => {
+    const daily = [
+      { period_start: "2026-01-03", value: 4, label: null },
+      { period_start: "2026-01-10", value: 3, label: null },
+      { period_start: "2026-02-01", value: 9, label: null },
+    ];
+    expect(reduceMetricSeries(daily, "month", "avg")).toEqual([
+      { period_start: "2026-01-01", value: 3.5 }, // (4 + 3) / 2, unaffected by the separate Feb bucket
+      { period_start: "2026-02-01", value: 9 },
     ]);
   });
 
@@ -350,5 +367,160 @@ describe("metric time semantics", () => {
     expect(staleDream!.n).toBe(0);
     expect(storedOnly).toEqual({ value: 42, source: "manual" });
     expect(manualSourceBacked).toEqual({ value: 77, source: "manual" });
+  });
+
+  test("mood/energy/body_mass/hr_resting are known metrics with day and week aggregates", async () => {
+    // Two entries on 03-02 exercise the per-day SQL avg(); 03-02 and 03-03 share an ISO week
+    // (both Monday/Tuesday) so 'avg'/'last' week rollups combine two distinct day values.
+    await insertJournal({
+      entryMd: "Fictional heavy morning.",
+      mood: 3,
+      energy: 2,
+      at: new Date("2026-03-02T09:00:00Z"),
+      source: "test:life-metrics",
+    });
+    await insertJournal({
+      entryMd: "Fictional lighter afternoon note.",
+      mood: 5,
+      energy: 4,
+      at: new Date("2026-03-02T18:00:00Z"),
+      source: "test:life-metrics",
+    });
+    await insertJournal({
+      entryMd: "Fictional next-day check-in.",
+      mood: 2,
+      energy: 5,
+      at: new Date("2026-03-03T09:00:00Z"),
+      source: "test:life-metrics",
+    });
+    await insertHealthSample({
+      kind: "body_mass",
+      at: new Date("2026-03-02T07:00:00Z"),
+      value: 71.2,
+      unit: "kg",
+      source: "test:life-metrics",
+    });
+    await insertHealthSample({
+      kind: "body_mass",
+      at: new Date("2026-03-03T07:00:00Z"),
+      value: 70.8,
+      unit: "kg",
+      source: "test:life-metrics",
+    });
+    await insertHealthSample({
+      kind: "hr_resting",
+      at: new Date("2026-03-02T07:00:00Z"),
+      value: 58,
+      unit: "bpm",
+      source: "test:life-metrics",
+    });
+    await insertHealthSample({
+      kind: "hr_resting",
+      at: new Date("2026-03-02T20:00:00Z"),
+      value: 62,
+      unit: "bpm",
+      source: "test:life-metrics",
+    });
+    await insertHealthSample({
+      kind: "hr_resting",
+      at: new Date("2026-03-03T07:00:00Z"),
+      value: 56,
+      unit: "bpm",
+      source: "test:life-metrics",
+    });
+
+    const moodDay = await queryMetric("mood", "2026-03-02", "2026-03-03", "day", "UTC");
+    expect(moodDay.data.metric).toBe("mood");
+    expect(moodDay.data.unit).toBe("score");
+    expect(moodDay.data.series).toEqual([
+      { period_start: "2026-03-02", value: 4 }, // round(avg(3, 5), 2)
+      { period_start: "2026-03-03", value: 2 },
+    ]);
+
+    const energyWeek = await queryMetric("energy", "2026-03-02", "2026-03-03", "week", "UTC");
+    expect(energyWeek.data.metric).toBe("energy");
+    expect(energyWeek.data.series).toEqual([
+      { period_start: "2026-03-02", value: 4 }, // avg(day 03-02 = 3, day 03-03 = 5)
+    ]);
+
+    const bodyMassDay = await queryMetric("body_mass", "2026-03-02", "2026-03-03", "day", "UTC");
+    expect(bodyMassDay.data.metric).toBe("body_mass");
+    expect(bodyMassDay.data.unit).toBe("kg");
+    expect(bodyMassDay.data.series).toEqual([
+      { period_start: "2026-03-02", value: 71.2 },
+      { period_start: "2026-03-03", value: 70.8 },
+    ]);
+    const bodyMassWeek = await queryMetric("body_mass", "2026-03-02", "2026-03-03", "week", "UTC");
+    expect(bodyMassWeek.data.series).toEqual([
+      { period_start: "2026-03-02", value: 70.8 }, // 'last': the more recent day wins, not an average
+    ]);
+
+    const hrRestingWeek = await queryMetric(
+      "hr_resting",
+      "2026-03-02",
+      "2026-03-03",
+      "week",
+      "UTC",
+    );
+    expect(hrRestingWeek.data.metric).toBe("hr_resting");
+    expect(hrRestingWeek.data.unit).toBe("bpm");
+    expect(hrRestingWeek.data.series).toEqual([
+      { period_start: "2026-03-02", value: 58 }, // avg(day 03-02 = avg(58, 62) = 60, day 03-03 = 56)
+    ]);
+  });
+
+  test("mood/energy exclude superseded journal rows from the average (W2-1 028 agg_sql fix)", async () => {
+    const original = await insertJournal({
+      entryMd: "Fictional original same-day self-report.",
+      mood: 1,
+      energy: 1,
+      at: new Date("2026-04-06T09:00:00Z"),
+      source: "test:life-metrics",
+    });
+    const successor = await insertJournal({
+      entryMd: "Fictional corrected same-day self-report.",
+      mood: 5,
+      energy: 5,
+      at: new Date("2026-04-06T09:00:00Z"),
+      source: "test:life-metrics",
+    });
+    // Stamp the backward pointer directly (minime_correct is a later W2 task; this test only
+    // exercises the metric-def fix, not the correction tool).
+    await sql`
+      update journal_entries set superseded_by = ${successor.id}, superseded_at = now()
+      where id = ${original.id}`;
+
+    const moodDay = await queryMetric("mood", "2026-04-06", "2026-04-06", "day", "UTC");
+    // Without the superseded_at filter this would be round(avg(1, 5), 2) = 3; the superseded
+    // original must drop out so only the live successor's value counts.
+    expect(moodDay.data.series).toEqual([{ period_start: "2026-04-06", value: 5 }]);
+
+    const energyDay = await queryMetric("energy", "2026-04-06", "2026-04-06", "day", "UTC");
+    expect(energyDay.data.series).toEqual([{ period_start: "2026-04-06", value: 5 }]);
+  });
+
+  test("metric time zone bucketing for a new health_samples metric mirrors the sleep_minutes/steps pattern", async () => {
+    await insertHealthSample({
+      kind: "hr_resting",
+      at: new Date("2026-01-01T16:30:00Z"), // 2026-01-02 00:30 Asia/Singapore, still 2026-01-01 UTC
+      value: 61,
+      unit: "bpm",
+      source: "test:metric-tz-hr",
+    });
+
+    const singapore = await queryMetric(
+      "hr_resting",
+      "2026-01-02",
+      "2026-01-02",
+      "day",
+      "Asia/Singapore",
+    );
+    expect(singapore.data.series).toEqual([{ period_start: "2026-01-02", value: 61 }]);
+
+    const utc = await queryMetric("hr_resting", "2026-01-01", "2026-01-01", "day", "UTC");
+    expect(utc.data.series).toEqual([{ period_start: "2026-01-01", value: 61 }]);
+
+    const elsewhere = await queryMetric("hr_resting", "2026-01-02", "2026-01-02", "day", "UTC");
+    expect(elsewhere.data.series).toEqual([]);
   });
 });

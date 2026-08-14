@@ -42,7 +42,11 @@ checklist.
   arithmetic over prose.
 - **I8 Append-only audit**: every tool call (reads included) writes an `events` row; `events` is
   never updated or deleted.
-- **Never log, print, or snapshot the contents of tier-0 rows.** Row IDs are fine.
+- **Never log, print, or snapshot the contents of tier-0 rows.** Row IDs are fine. (Recorded
+  exception, DECISIONS 2026-08-10/W4: the owner-terminal `tx list`/`health list` CLI commands
+  in `src/cli.ts` may print tier-0 rows directly to stdout, gated to a real interactive TTY and
+  audited count-only — every log, audit payload, error message, snapshot, and MCP-reachable
+  surface remains bound by the unqualified rule.)
 
 ## Tech stack (pinned — spec §4; substitutions require a DECISIONS.md entry)
 

@@ -5,7 +5,11 @@
 // agents re-pass them (intermittent CI flake, 2026-06-15). Fully offline; fixtures fictional.
 
 import { describe, expect, test } from "bun:test";
+import type { AuditSink, DurableResultAudit } from "../src/mcp/audit";
+import { ToolError, envelope } from "../src/mcp/envelope";
 import { redactDeep, redactString } from "../src/mcp/redact";
+import { type ToolDef, executeTool, invokeTool } from "../src/mcp/tools/registry";
+import { config } from "../src/util/config";
 
 describe("redaction still scrubs real secrets", () => {
   test("Luhn-valid card, IBAN, and 9+ digit account numbers go away", () => {
@@ -44,5 +48,236 @@ describe("redaction never corrupts UUIDs", () => {
       sources: [{ type: "decision", id: cardLikeRun }],
     };
     expect(redactDeep(env)).toEqual(env);
+  });
+});
+
+describe("W4-10: bare 9+ digit rule is context-gated", () => {
+  test("a Chinese mobile number and a US mobile number survive with no account context nearby", () => {
+    // 11-digit CN mobile shape
+    expect(redactString("call me at 13800138000 tonight")).toContain("13800138000");
+    // 10-digit US mobile shape
+    expect(redactString("my number is 4155551234, call anytime")).toContain("4155551234");
+  });
+
+  test("an epoch-shaped bare digit run survives with no account context nearby", () => {
+    expect(redactString("last synced at 1719811200")).toContain("1719811200");
+  });
+
+  test("a courier tracking number survives with no account context nearby", () => {
+    expect(redactString("tracking 123456789012 shipped today")).toContain("123456789012");
+    expect(redactString("parcel ref 987654321098 left the depot")).toContain("987654321098");
+  });
+
+  test("'account 123456789' still redacts (English context word within range)", () => {
+    expect(redactString("account 123456789")).toContain("[REDACTED:account]");
+    expect(redactString("account 123456789")).not.toContain("123456789");
+  });
+
+  test("other English context words (acct, iban, routing, swift, a/c) also gate the rule", () => {
+    expect(redactString("acct 123456789")).toContain("[REDACTED:account]");
+    expect(redactString("a/c 123456789")).toContain("[REDACTED:account]");
+    expect(redactString("routing 123456789")).toContain("[REDACTED:account]");
+    expect(redactString("please quote swift and ref 123456789")).toContain("[REDACTED:account]");
+  });
+
+  test("CJK account-context words (账号/账户/卡号) gate the rule too", () => {
+    expect(redactString("账号 123456789")).toContain("[REDACTED:account]");
+    expect(redactString("账号 123456789")).not.toContain("123456789");
+    expect(redactString("我的账户是111222333，请核对")).toContain("[REDACTED:account]");
+    expect(redactString("银行卡号: 123456789012")).toContain("[REDACTED:account]");
+  });
+
+  test("a context word more than 40 chars away no longer gates the match", () => {
+    // "account" then 43 spaces of padding (> BARE_DIGIT_CONTEXT_RADIUS) before the digits
+    const farAway = `${"account".padEnd(50, " ")}123456789`;
+    expect(redactString(farAway)).toContain("123456789");
+    expect(redactString(farAway)).not.toContain("[REDACTED:account]");
+  });
+
+  test("IBAN and separated Luhn card redact unconditionally — no context word needed", () => {
+    expect(redactString("4111-1111-1111-1111")).toContain("[REDACTED:card]");
+    expect(redactString("4111-1111-1111-1111")).not.toContain("4111-1111-1111-1111");
+    expect(redactString("DE89370400440532013000")).toContain("[REDACTED:iban]");
+  });
+
+  test("an unrelated bare digit run near a redacted IBAN survives — the [REDACTED:iban] placeholder's own 'iban' substring must not gate it", () => {
+    // Regression: the bare-digit context check used to test against the progressively-redacted
+    // string, so "[REDACTED:iban]" (which contains the trigger word "iban") falsely gated any
+    // unrelated 9+ digit run within 40 chars of a redacted IBAN, even with zero context words in
+    // the original text.
+    const out = redactString(
+      "Sent DE89370400440532013000 for rent, fyi order 555666777 shipped separately",
+    );
+    expect(out).toContain("[REDACTED:iban]");
+    expect(out).toContain("555666777");
+    expect(out).not.toContain("[REDACTED:account]");
+  });
+
+  test("a standalone context-flagged number still redacts even when its digits recur inside an earlier, already-redacted Luhn card span", () => {
+    // Regression: recovering a bare-digit match's position in the original string via
+    // `original.indexOf(value, cursor)` picks the WRONG occurrence whenever the matched digit
+    // *value* also appears embedded inside an earlier IBAN/card match. Here "123456789" (9
+    // digits) is both the standalone, context-flagged number near "account" AND the leading 9
+    // digits of the 13-digit Luhn-valid card number earlier in the string — a value-based
+    // indexOf latches onto the embedded (already-redacted) occurrence and tests context around
+    // the wrong window, silently letting the real, context-flagged number survive.
+    const card = "1234567890003"; // Luhn-valid; first 9 digits are "123456789"
+    const padding = "x".repeat(45); // > BARE_DIGIT_CONTEXT_RADIUS: no context leaks across it
+    const out = redactString(`card on file ${card} ${padding} account 123456789`);
+    expect(out).toContain("[REDACTED:card]");
+    expect(out).toContain("[REDACTED:account]");
+    expect(out).not.toContain("123456789");
+  });
+
+  test("a standalone number with no genuine context nearby survives even when its digits recur inside an earlier, context-flagged Luhn card span", () => {
+    // Mirror-image of the regression above: context sits next to the card, not the standalone
+    // digits. A value-based indexOf recovery finds the embedded occurrence (right next to
+    // "account") for the standalone match too, and wrongly redacts a number with zero genuine
+    // context nearby — reintroducing the over-redaction bug W4-10 was written to fix.
+    const card = "1234567890003";
+    const padding = "x".repeat(45);
+    const out = redactString(`account ${card} ${padding} 123456789`);
+    expect(out).toContain("[REDACTED:card]");
+    expect(out).not.toContain("[REDACTED:account]");
+    expect(out).toContain("123456789");
+  });
+});
+
+describe("W4-10: owner allowlist (REDACT_ALLOWLIST) exempts declared numbers from every rule", () => {
+  test("an allowlisted Luhn-valid card number survives; the same string absent from the allowlist redacts", () => {
+    const original = config.redactAllowlist;
+    try {
+      config.redactAllowlist = new Set(["4111111111111111"]);
+      expect(redactString("card 4111 1111 1111 1111 on file")).toContain("4111 1111 1111 1111");
+      expect(redactString("card 4111 1111 1111 1111 on file")).not.toContain("[REDACTED");
+
+      config.redactAllowlist = new Set();
+      expect(redactString("card 4111 1111 1111 1111 on file")).toContain("[REDACTED:card]");
+      expect(redactString("card 4111 1111 1111 1111 on file")).not.toContain("4111 1111 1111 1111");
+    } finally {
+      config.redactAllowlist = original;
+    }
+  });
+
+  test("the allowlist also exempts a bare digit run that context would otherwise redact", () => {
+    const original = config.redactAllowlist;
+    try {
+      config.redactAllowlist = new Set(["123456789012"]);
+      expect(redactString("acct 123456789012 ok")).toContain("123456789012");
+      expect(redactString("acct 123456789012 ok")).not.toContain("[REDACTED");
+    } finally {
+      config.redactAllowlist = original;
+    }
+  });
+});
+
+describe("W4-10: outbound redaction count is disclosed in envelope gaps", () => {
+  test("a tool result containing one redaction carries the count gap", async () => {
+    const tool: ToolDef = {
+      name: "fictional_redaction_probe_single",
+      description: "fictional",
+      schema: {},
+      handler: async () => envelope({ note: "please debit account 123456789" }, []),
+    };
+    const result = await executeTool(tool, {}, { actor: "agent:redact-test" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // The context word itself ("account") is only a gate, never consumed — only the digit run
+    // is replaced.
+    expect(result.envelope.data).toEqual({ note: "please debit account [REDACTED:account]" });
+    expect(result.envelope.gaps).toEqual(["outbound redaction replaced 1 number-like string"]);
+  });
+
+  test("a tool result containing several redactions carries the plural count gap", async () => {
+    const tool: ToolDef = {
+      name: "fictional_redaction_probe_multi",
+      description: "fictional",
+      schema: {},
+      handler: async () =>
+        envelope({ note: "card 4111 1111 1111 1111 and account 123456789 on file" }, []),
+    };
+    const result = await executeTool(tool, {}, { actor: "agent:redact-test" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.envelope.gaps).toEqual(["outbound redaction replaced 2 number-like strings"]);
+  });
+
+  test("no gap is appended when nothing was redacted", async () => {
+    const tool: ToolDef = {
+      name: "fictional_redaction_probe_none",
+      description: "fictional",
+      schema: {},
+      handler: async () => envelope({ note: "nothing sensitive here, call 4155551234" }, []),
+    };
+    const result = await executeTool(tool, {}, { actor: "agent:redact-test" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.envelope.data).toEqual({ note: "nothing sensitive here, call 4155551234" });
+    expect(result.envelope.gaps).toBeUndefined();
+  });
+
+  test("a redaction count gap is appended alongside a handler's own gaps, not in place of them", async () => {
+    const tool: ToolDef = {
+      name: "fictional_redaction_probe_with_own_gap",
+      description: "fictional",
+      schema: {},
+      handler: async () =>
+        envelope({ note: "account 123456789" }, [], { gaps: ["handler-reported gap"] }),
+    };
+    const result = await executeTool(tool, {}, { actor: "agent:redact-test" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.envelope.gaps).toEqual([
+      "handler-reported gap",
+      "outbound redaction replaced 1 number-like string",
+    ]);
+  });
+
+  test("end-to-end through invokeTool (audit-wrapped path), the count gap still reaches the caller", async () => {
+    const tool: ToolDef = {
+      name: "fictional_redaction_probe_invoke",
+      description: "fictional",
+      schema: {},
+      handler: async () => envelope({ note: "iban DE89370400440532013000 on file" }, []),
+    };
+    // eventAuditSink (invokeTool's default) writes verb `tool:<name>:attempt` and rejects any
+    // tool name outside AUDITED_TOOL_NAMES (util/audit-payload.ts) -- fine for real MCP tools,
+    // not for a fictional one, so a minimal stand-in sink exercises the exact same invokeTool ->
+    // executeTool -> redactDeepCounted wiring without that unrelated constraint (same approach
+    // as m6.leak.test.ts's RecordingSink).
+    const fictionalAuditSink: AuditSink = {
+      async attempt() {
+        return "fictional-hash";
+      },
+      async result(): Promise<DurableResultAudit> {
+        return { eventId: "fictional-event-id" };
+      },
+      async disposition() {},
+    };
+    const result = await invokeTool(tool, {}, { actor: "agent:redact-test" }, fictionalAuditSink);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.envelope.data).toEqual({ note: "iban [REDACTED:iban] on file" });
+    expect(result.envelope.gaps).toEqual(["outbound redaction replaced 1 number-like string"]);
+  });
+
+  test("the error path still redacts the message but never invents a gaps array (errors have none)", async () => {
+    const tool: ToolDef = {
+      name: "fictional_redaction_probe_error",
+      description: "fictional",
+      schema: {},
+      handler: async () => {
+        // ToolError messages pass through as-is (registry.ts) — unlike a plain Error, which
+        // gets the fixed opaque "Internal tool error." wire message instead. This is the path
+        // that actually exercises redactDeepCounted(message) on the error branch.
+        throw new ToolError("BAD_INPUT", "account 123456789 is not a valid reference");
+      },
+    };
+    const result = await executeTool(tool, {}, { actor: "agent:redact-test" });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("BAD_INPUT");
+    expect(result.error.message).toBe("account [REDACTED:account] is not a valid reference");
+    expect(result.error).not.toHaveProperty("gaps");
   });
 });

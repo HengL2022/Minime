@@ -48,20 +48,28 @@ async function indexAsLockedApp(parentId: string, text: string, tier: 1 | 2): Pr
 async function logInteractionAsLockedApp(
   name: string,
   subjectType: "auto" | "person" | "org",
+  promise?: { what: string; due?: string },
 ): Promise<{
-  data: { interaction_id: string };
+  data: { interaction_id: string; commitment_id?: string };
   sources: Array<{ type: string; id: string }>;
 }> {
+  // Building the whole params object through one JSON.stringify (rather than splicing each
+  // field into the template by hand) is what lets an optional `promise` ride along for W3-13's
+  // locked-role regression test below without a second copy of this harness.
+  const params = {
+    person_name: name,
+    kind: "meeting",
+    summary: "Fictional restricted-role interaction fixture.",
+    subject_type: subjectType,
+    ...(promise ? { promise } : {}),
+  };
   const source = `
     import { closeDb } from "./src/db/client.ts";
     import { logInteractionTool } from "./src/mcp/tools/interactions.ts";
     import { executeTool } from "./src/mcp/tools/registry.ts";
-    const result = await executeTool(logInteractionTool, {
-      person_name: ${JSON.stringify(name)},
-      kind: "meeting",
-      summary: "Fictional restricted-role interaction fixture.",
-      subject_type: ${JSON.stringify(subjectType)}
-    }, { actor: "agent:tier-fixture" });
+    const result = await executeTool(logInteractionTool, ${JSON.stringify(params)}, {
+      actor: "agent:tier-fixture",
+    });
     if (!result.ok) throw new Error(result.error.message);
     process.stdout.write(JSON.stringify(result.envelope));
     await closeDb();
@@ -172,7 +180,7 @@ afterAll(async () => {
 });
 
 describe("derived entity tier and provenance", () => {
-  test("locked tier-2 extraction reuses and promotes identities without exposing them", async () => {
+  test("locked tier-2 extraction reuses identities without promoting their tier or exposing tier-2 content", async () => {
     const sharedText = "My physiotherapist Liora Penn at Amber Clinic helped my shoulder.";
     const tierOne = await upsertPage({
       path: "tier/entity-one.md",
@@ -207,26 +215,32 @@ describe("derived entity tier and provenance", () => {
     });
     await indexAsLockedApp(tierTwo.id, sharedText, 2);
 
+    // W4-1 identity/content tier split: the identity (people/orgs row + its pre-existing
+    // aliases, all minted at tier 1 by the FIRST, tier-1 page) stays at tier 1 even though it was
+    // just re-resolved by a tier-2 extraction -- resolving an EXISTING identity never raises its
+    // tier. The tier-2 mention used the exact same spelling as the existing aliases, so no NEW
+    // alias was minted either. The works_at EDGE below is content, not identity, so it still
+    // inherits the more-private evidence tier exactly as it did before the split.
     const people = await testSql`
       select id, tier, derived_from from people where canonical_name = 'Liora Penn'`;
     const orgs = await testSql`
       select id, tier, derived_from from orgs where canonical_name = 'Amber Clinic'`;
     expect(people.map((row) => ({ ...row }))).toEqual([
-      { id: initialPerson!.id, tier: 2, derived_from: tierOne.id },
+      { id: initialPerson!.id, tier: 1, derived_from: tierOne.id },
     ]);
     expect(orgs.map((row) => ({ ...row }))).toEqual([
-      { id: initialOrg!.id, tier: 2, derived_from: tierOne.id },
+      { id: initialOrg!.id, tier: 1, derived_from: tierOne.id },
     ]);
 
     const personAliases = await testSql`
       select alias, tier from person_aliases where person_id = ${initialPerson!.id} order by alias`;
     expect(personAliases.map((row) => ({ ...row }))).toEqual([
-      { alias: "Dr Liora Penn", tier: 2 },
-      { alias: "Liora Penn", tier: 2 },
+      { alias: "Dr Liora Penn", tier: 1 },
+      { alias: "Liora Penn", tier: 1 },
     ]);
     const orgAliases = await testSql`
       select alias, tier from org_aliases where org_id = ${initialOrg!.id} order by alias`;
-    expect(orgAliases.every((row) => row.tier === 2)).toBe(true);
+    expect(orgAliases.every((row) => row.tier === 1)).toBe(true);
 
     const [worksAt] = await testSql`
       select id, tier, source, created_by, derived_from, source_table, source_id
@@ -242,12 +256,16 @@ describe("derived entity tier and provenance", () => {
       source_id: tierTwo.id,
     });
 
+    // The identity card is readable at tier 1 even by the locked app role -- that is the whole
+    // point of the split. The works_at edge stays content-tier-2 and is still invisible to it.
     expect(
-      (await app`select canonical_name from people where id = ${initialPerson!.id}`).length,
-    ).toBe(0);
-    expect(
-      (await app`select alias from person_aliases where person_id = ${initialPerson!.id}`).length,
-    ).toBe(0);
+      (await app`select canonical_name from people where id = ${initialPerson!.id}`).map((row) => ({
+        ...row,
+      })),
+    ).toEqual([{ canonical_name: "Liora Penn" }]);
+    const lockedAliases = await app`
+      select alias from person_aliases where person_id = ${initialPerson!.id}`;
+    expect(lockedAliases.map((row) => row.alias).sort()).toEqual(["Dr Liora Penn", "Liora Penn"]);
     expect((await app`select id from edges where id = ${worksAt!.id}`).length).toBe(0);
 
     const privateText = "My dentist Sanna Lark at Cobalt Dental checked a molar.";
@@ -271,6 +289,9 @@ describe("derived entity tier and provenance", () => {
     });
     expect(privateAlias).toMatchObject({ tier: 2, derived_from: privatePage.id });
 
+    // W4-1: minime_log_interaction mints a brand-new subject's identity at tier 1 -- an
+    // owner-initiated contact is identity-tier data, not content -- while the interaction row
+    // itself (checked via the locked-app envelope shape below) stays tier-2-locked.
     const mcpPerson = await logInteractionAsLockedApp("MCP Rowan", "person");
     expect(Object.keys(mcpPerson.data)).toEqual(["interaction_id"]);
     expect(mcpPerson.sources).toEqual([{ type: "interaction", id: mcpPerson.data.interaction_id }]);
@@ -279,7 +300,7 @@ describe("derived entity tier and provenance", () => {
     const [mcpPersonRow] = await testSql`
       select tier, derived_from, last_contact_at from people where id = ${mcpPersonLink!.person_id}`;
     expect(mcpPersonRow).toMatchObject({
-      tier: 2,
+      tier: 1,
       derived_from: mcpPerson.data.interaction_id,
     });
     expect(mcpPersonRow!.last_contact_at).not.toBeNull();
@@ -297,7 +318,7 @@ describe("derived entity tier and provenance", () => {
       select org_id from interactions where id = ${mcpOrg.data.interaction_id}`;
     const [mcpOrgRow] = await testSql`
       select tier, derived_from from orgs where id = ${mcpOrgLink!.org_id}`;
-    expect(mcpOrgRow).toMatchObject({ tier: 2, derived_from: mcpOrg.data.interaction_id });
+    expect(mcpOrgRow).toMatchObject({ tier: 1, derived_from: mcpOrg.data.interaction_id });
 
     const hiddenOrgName = "Quiet Harbor";
     const [hiddenOrg] = await testSql`
@@ -349,7 +370,11 @@ describe("derived entity tier and provenance", () => {
     const [edgeAfterReplay] = await testSql`
       select tier from edges where src_id = ${initialPerson!.id} and rel = 'works_at'
         and dst_id = ${initialOrg!.id}`;
-    expect(afterReplay!.tier).toBe(2);
+    // A third mention, this time at tier 1, still doesn't touch the identity's tier (it was
+    // never raised in the first place, so there's nothing to leave unchanged but everything to
+    // NOT lower either -- resolving an existing identity never changes its tier either direction).
+    // The edge stays content-tier-2: it's still evidenced by the tier-2 mention from earlier.
+    expect(afterReplay!.tier).toBe(1);
     expect(edgeAfterReplay!.tier).toBe(2);
 
     const concurrentName = "Concurrent Rowan";
@@ -373,7 +398,7 @@ describe("derived entity tier and provenance", () => {
     );
   });
 
-  test("locked tier-2 extraction still blocks family works_at edges after promotion", async () => {
+  test("locked tier-2 extraction still blocks family works_at edges for a mentioned tier-1 daughter", async () => {
     const childName = "Mina Solberg";
     const [child] = await testSql`
       insert into people (canonical_name, relation, tier, source, created_by)
@@ -394,8 +419,10 @@ describe("derived entity tier and provenance", () => {
 
     await indexAsLockedApp(page.id, text, 2);
 
-    const [promoted] = await testSql`select tier from people where id = ${child!.id}`;
-    expect(promoted!.tier).toBe(2);
+    // W4-1: her identity stays tier 1 (never promoted by the mention) -- the family-relation
+    // work-edge guard below is independent of tier and must still hold either way.
+    const [afterMention] = await testSql`select tier from people where id = ${child!.id}`;
+    expect(afterMention!.tier).toBe(1);
     const [worksAt] = await testSql`
       select count(*)::int as n from edges
       where src_type = 'person' and src_id = ${child!.id} and rel = 'works_at'`;
@@ -578,13 +605,16 @@ describe("derived entity tier and provenance", () => {
       /permission denied/,
     );
 
+    // The tier-0 name is excluded from resolution, so a brand-new READABLE identity mints
+    // instead of reusing the quarantined one -- at tier 1 (W4-1's interaction-mint tier), not the
+    // quarantined row's tier 0.
     const personReceipt = await logInteractionAsLockedApp(tierZeroPersonName, "person");
     const [personLink] = await testSql`
       select person_id from interactions where id = ${personReceipt.data.interaction_id}`;
     expect(personLink!.person_id).not.toBe(tierZeroPerson!.id);
     const [readablePerson] = await testSql`
       select tier from people where id = ${personLink!.person_id}`;
-    expect(readablePerson!.tier).toBe(2);
+    expect(readablePerson!.tier).toBe(1);
     await app`select upsert_derived_alias(
       'person', ${personLink!.person_id}::uuid, 'Quarantined Rowan Private Alias',
       2::smallint, 'agent:tier-fixture', 'capture', ${personReceipt.data.interaction_id}::uuid
@@ -595,7 +625,7 @@ describe("derived entity tier and provenance", () => {
       select org_id from interactions where id = ${orgReceipt.data.interaction_id}`;
     expect(orgLink!.org_id).not.toBe(tierZeroOrg!.id);
     const [readableOrg] = await testSql`select tier from orgs where id = ${orgLink!.org_id}`;
-    expect(readableOrg!.tier).toBe(2);
+    expect(readableOrg!.tier).toBe(1);
     await app`select upsert_derived_alias(
       'org', ${orgLink!.org_id}::uuid, 'Quarantined Harbor Private Alias',
       2::smallint, 'agent:tier-fixture', 'capture', ${orgReceipt.data.interaction_id}::uuid
@@ -1044,5 +1074,85 @@ describe("derived entity tier and provenance", () => {
         source_id: null,
       },
     ]);
+
+    // The 022 replay above CREATE OR REPLACEs resolve_or_promote_entity/
+    // resolve_or_promote_extracted_person/resolve_or_promote_extracted_org/upsert_derived_alias
+    // and the tier-guard trigger back to their pre-037 (greatest()-promoting) bodies, and this
+    // file shares one never-reset database across all its tests -- left alone, every later test
+    // would silently run under reverted, pre-W4-1 tier-promotion semantics (caught in review:
+    // minime_log_interaction's own indexParent call re-extracts its just-minted identity from
+    // the interaction text, which re-resolves through the reverted function and silently
+    // re-promotes it). Restore 037 before handing back to the rest of the suite. Pre-drop the
+    // two guarded triggers by name first: 037's own text is applied exactly once by the normal
+    // migration chain, so unlike 022 (written to be safely re-playable for this exact technique)
+    // its "create trigger" statements are not themselves guarded with "if exists".
+    await testSql.unsafe("drop trigger if exists people_keep_tier_guarded on people");
+    await testSql.unsafe("drop trigger if exists orgs_keep_tier_guarded on orgs");
+    await testSql.unsafe(
+      await Bun.file(
+        new URL("../db/migrations/037_identity_content_tier_split.sql", import.meta.url),
+      ).text(),
+    );
+  });
+
+  test("W3-13: promise capture resolves to_whom via entity_canonical_name for a subject minted " +
+    "in this same locked call", async () => {
+    // The exact scenario DECISIONS.md / repo.ts / 036_commitment_update_grant.sql's own
+    // comments cite as entity_canonical_name()'s reason to exist: a locked role mints a
+    // brand-new person/org via ensurePerson/ensureOrg (tier 1 since W4-1 -- an
+    // interaction-minted identity is identity-tier data, not content -- 037_identity_content_
+    // tier_split.sql), then minime_log_interaction's promise capture must read its
+    // canonical_name back in the SAME call to fill commitments.to_whom. personCanonicalName/
+    // orgCanonicalName take no actor/session id, so they cannot rely on an ordinary select
+    // reaching the pooled connection carrying THIS call's own session GUCs (app_allowed_tier()
+    // is session-scoped, 023_session_unlock_approval.sql) -- entity_canonical_name sidesteps
+    // that entirely by being SECURITY DEFINER and reading tier in (1,2) directly, independent of
+    // both the caller's own tier_read RLS and which physical connection serves the read. Nothing
+    // else in the suite drove a promise through the actual minime_app role: commitments.test.ts's
+    // own promise assertions all run on the ordinary bun-test connection (owner role, no RLS --
+    // see src/db/client.ts's runtime-URL fallback), so this is the one place that exercises the
+    // function at all. (Reverting personCanonicalName/orgCanonicalName to a plain select makes
+    // both branches below fail with *_not_found_for_canonical_name.)
+    const personName = "MCP Promise Talia Renn";
+    const personReceipt = await logInteractionAsLockedApp(personName, "person", {
+      what: "MCP Promise send the calibration report",
+      due: "2026-09-01",
+    });
+    const personCommitmentId = personReceipt.data.commitment_id;
+    if (!personCommitmentId) throw new Error("expected commitment_id when a promise is given");
+    expect(Object.keys(personReceipt.data).sort()).toEqual(["commitment_id", "interaction_id"]);
+    expect(personReceipt.sources).toEqual(
+      expect.arrayContaining([
+        { type: "interaction", id: personReceipt.data.interaction_id },
+        { type: "commitment", id: personCommitmentId },
+      ]),
+    );
+    const [personLink] = await testSql`
+        select person_id from interactions where id = ${personReceipt.data.interaction_id}`;
+    const [mintedPerson] = await testSql`
+        select tier, canonical_name from people where id = ${personLink!.person_id}`;
+    expect(mintedPerson!.tier).toBe(1);
+    const [personCommitment] = await testSql`
+        select to_whom, tier, derived_from from commitments where id = ${personCommitmentId}`;
+    expect(personCommitment).toEqual({
+      to_whom: mintedPerson!.canonical_name,
+      tier: 2,
+      derived_from: personReceipt.data.interaction_id,
+    });
+
+    const orgName = "MCP Promise Fjord Systems";
+    const orgReceipt = await logInteractionAsLockedApp(orgName, "org", {
+      what: "MCP Promise send the signed PO",
+    });
+    const orgCommitmentId = orgReceipt.data.commitment_id;
+    if (!orgCommitmentId) throw new Error("expected commitment_id when a promise is given");
+    const [orgLink] = await testSql`
+        select org_id from interactions where id = ${orgReceipt.data.interaction_id}`;
+    const [mintedOrg] = await testSql`
+        select tier, canonical_name from orgs where id = ${orgLink!.org_id}`;
+    expect(mintedOrg!.tier).toBe(1);
+    const [orgCommitment] = await testSql`
+        select to_whom, tier from commitments where id = ${orgCommitmentId}`;
+    expect(orgCommitment).toEqual({ to_whom: mintedOrg!.canonical_name, tier: 2 });
   });
 });

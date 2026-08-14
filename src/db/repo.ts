@@ -1,14 +1,17 @@
 // The ONLY place application SQL runs (spec §14). Every agent/ordinary content read applies
 // the predicate `tier >= 1 AND tier <= allowedTier()`. Tier-0 tables
-// (transactions, health_samples) have no
-// content-read functions at all — they are reachable only via metric_agg() (I3).
+// (transactions, health_samples) have no MCP/agent-reachable content-read functions — every
+// src/mcp/tools/ path reaches them only through metric_agg() (I3). The one exception is the
+// owner-CLI-only section below (listTransactions/listHealthSamples, W4-5, ~line 3187): a
+// narrowly-scoped read path reachable only from src/cli.ts, never from src/mcp/tools/ — see
+// DECISIONS.md 2026-08-10 for the recorded exception this implements.
 // Everything is parameterized; string-interpolated SQL is a review-blocker.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type AuditPayload, assertAuditPayloadForVerb, auditPayload } from "../util/audit-payload";
 import { cjkFold, isCjkStopToken } from "../util/cjk";
-import { configuredTimeZone, localDateStr, now } from "../util/clock";
+import { configuredTimeZone, localDateStr, now, todayStr } from "../util/clock";
 import {
   COMPILED_NOTE_MARKER,
   COMPILED_NOTE_SOURCE,
@@ -16,14 +19,25 @@ import {
   type CompiledNoteIdentity,
   recognizeCompiledNote,
 } from "../util/compiled-note-archive";
-import { type ProviderName, assertTier2UnlockMaxMinutes, config } from "../util/config";
+import {
+  type ProviderName,
+  assertTier2UnlockApprovalWindowMinutes,
+  assertTier2UnlockMaxMinutes,
+  config,
+} from "../util/config";
 import { type MetricRollup, metricDateString } from "../util/metric-rollup";
+import { type RecurFreq, nextDue } from "../util/recurrence";
+import { type TxCategoryRule, applyCategoryRules } from "../util/tx-categories";
 import {
   type DbExecutor,
   type DbPool,
+  type DbReservation,
+  type DbTransaction,
   db,
   hasDbTransaction,
+  reserveDb,
   withDbTransaction,
+  withDurableRuntimeDbTransaction,
   withReservedDb,
   withRuntimeDbTransaction,
   withRuntimeReservedDb,
@@ -43,23 +57,34 @@ export type ParentType =
   | "org"
   | "commitment";
 
-// parent_type -> table + which column serves as a human title. Fixed map, not user input.
-const PARENTS: Record<ParentType, { table: string; titleCol: string }> = {
-  page: { table: "pages", titleCol: "title" },
-  journal: { table: "journal_entries", titleCol: "entry_md" },
-  interaction: { table: "interactions", titleCol: "summary" },
-  decision: { table: "decisions", titleCol: "question" },
-  decision_branch: { table: "decision_branches", titleCol: "label" },
-  task: { table: "tasks", titleCol: "title" },
-  goal: { table: "goals", titleCol: "statement" },
-  value: { table: "values_items", titleCol: "statement" },
-  principle: { table: "principles", titleCol: "rule" },
-  person: { table: "people", titleCol: "canonical_name" },
-  org: { table: "orgs", titleCol: "canonical_name" },
-  commitment: { table: "commitments", titleCol: "what" },
+// parent_type -> table, title column, and the fixed SQL expression for that type's semantic
+// "event date" (W3-4) — the date a human means by "when did this happen", which is not always
+// updated_at (e.g. a decision's updated_at bumps on any edit, but its event date is when it was
+// decided). dateCol is raw, developer-authored SQL text and NEVER derived from request input;
+// parentMeta below splices it in via db().unsafe(), the same nested-fragment technique
+// db()(identifier) and COMPILED_PARENT_TIER already use to compose fixed SQL text into a
+// parameterized query (postgres.js treats a nested Query/Identifier value as raw SQL text, not
+// a bound parameter — see fragment() in postgres's types.js).
+const PARENTS: Record<ParentType, { table: string; titleCol: string; dateCol: string }> = {
+  page: { table: "pages", titleCol: "title", dateCol: "updated_at" },
+  journal: { table: "journal_entries", titleCol: "entry_md", dateCol: "at" },
+  interaction: { table: "interactions", titleCol: "summary", dateCol: "occurred_at" },
+  decision: {
+    table: "decisions",
+    titleCol: "question",
+    dateCol: "coalesce(decided_at, created_at)",
+  },
+  decision_branch: { table: "decision_branches", titleCol: "label", dateCol: "updated_at" },
+  task: { table: "tasks", titleCol: "title", dateCol: "coalesce(completed_at, updated_at)" },
+  goal: { table: "goals", titleCol: "statement", dateCol: "updated_at" },
+  value: { table: "values_items", titleCol: "statement", dateCol: "updated_at" },
+  principle: { table: "principles", titleCol: "rule", dateCol: "updated_at" },
+  person: { table: "people", titleCol: "canonical_name", dateCol: "updated_at" },
+  org: { table: "orgs", titleCol: "canonical_name", dateCol: "updated_at" },
+  commitment: { table: "commitments", titleCol: "what", dateCol: "updated_at" },
 };
 
-export function parentTable(type: string): { table: string; titleCol: string } {
+export function parentTable(type: string): { table: string; titleCol: string; dateCol: string } {
   const p = PARENTS[type as ParentType];
   if (!p) throw new Error(`unknown parent type: ${type}`);
   return p;
@@ -249,6 +274,28 @@ export async function withActorDbSession<T>(
   });
 }
 
+/**
+ * Like withActorDbSession, but always opens a genuinely independent transaction (client.ts's
+ * withDurableRuntimeDbTransaction) regardless of any ambient actor transaction already open —
+ * deliberately callable FROM inside one (no nested_actor_scope guard). For work that must commit
+ * for real before some later action the caller's own ambient transaction can't order a commit
+ * around (e.g. minime_refile publishing a note projection only once its filing has truly
+ * committed, not just once the surrounding tool handler returns). Carries the same
+ * minime.actor/minime.session_id GUCs withActorDbSession sets, so app_allowed_tier() and every
+ * tier predicate behave identically on either transaction.
+ */
+export async function withActorDurableDbSession<T>(
+  actor: string,
+  work: () => Promise<T>,
+  sessionId?: string,
+): Promise<T> {
+  return withDurableRuntimeDbTransaction(async (tx) => {
+    await tx`select set_config('minime.actor', ${actor}, true)`;
+    await tx`select set_config('minime.session_id', ${sessionId ?? ""}, true)`;
+    return work();
+  });
+}
+
 function assertProseTier(tier: number): asserts tier is 1 | 2 {
   if (tier === 0) throw new Error("TIER0_PROSE_BLOCKED");
   if (tier !== 1 && tier !== 2) throw new Error("INVALID_CONTENT_TIER");
@@ -316,10 +363,9 @@ export async function requestTier2Unlock(minutes: number): Promise<{ id: string 
 export interface ApprovedTier2Unlock {
   id: string;
   minutes: number;
+  requestedBy: string;
   expires_at: Date;
 }
-
-export const TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES = 10;
 
 /** Approve one pending request inside an owner/control-plane transaction. */
 export async function approveTier2UnlockRequest(
@@ -327,6 +373,7 @@ export async function approveTier2UnlockRequest(
   approvedBy = "owner:cli",
 ): Promise<ApprovedTier2Unlock> {
   assertTier2UnlockMaxMinutes(config.tier2UnlockMaxMinutes);
+  assertTier2UnlockApprovalWindowMinutes(config.tier2UnlockApprovalWindowMinutes);
   const [row] = await db()`
     with approval_clock as (select clock_timestamp() as at)
     update session_unlocks u
@@ -340,13 +387,14 @@ export async function approveTier2UnlockRequest(
       and u.approved_by is null
       and u.expires_at is null
       and u.requested_at >= approval_clock.at
-          - make_interval(mins => ${TIER2_UNLOCK_APPROVAL_WINDOW_MINUTES})
+          - make_interval(mins => ${config.tier2UnlockApprovalWindowMinutes})
       and u.requested_minutes between 1 and ${config.tier2UnlockMaxMinutes}
-    returning u.id::text as id, u.requested_minutes::int as minutes, u.expires_at`;
+    returning u.id::text as id, u.requested_minutes::int as minutes, u.requested_by, u.expires_at`;
   if (!row) throw new Error("unlock_request_not_approvable");
   const approved = {
     id: String(row.id),
     minutes: Number(row.minutes),
+    requestedBy: String(row.requested_by),
     expires_at: new Date(row.expires_at),
   };
   await logEvent({
@@ -357,6 +405,145 @@ export async function approveTier2UnlockRequest(
     payload: auditPayload.tier2Unlock({ requestId: approved.id, minutes: approved.minutes }),
   });
   return approved;
+}
+
+export interface PendingTier2UnlockRequest {
+  id: string;
+  requestedBy: string;
+  requestedMinutes: number;
+  requestedAt: Date;
+}
+
+/**
+ * Requests still eligible for approval (same scope/window/ceiling predicates as
+ * approveTier2UnlockRequest), newest first. session_id is NEVER selected — DECISIONS.md
+ * 2026-08-06 "Session identifiers are never returned or audited" — callers approve by request
+ * id only; approveTier2UnlockRequest re-validates every predicate itself, so a request that
+ * goes stale between this list and that call is simply not approvable, not miss-approved.
+ */
+export async function pendingTier2UnlockRequests(): Promise<PendingTier2UnlockRequest[]> {
+  assertTier2UnlockMaxMinutes(config.tier2UnlockMaxMinutes);
+  assertTier2UnlockApprovalWindowMinutes(config.tier2UnlockApprovalWindowMinutes);
+  const rows = await db()`
+    select id::text as id, requested_by, requested_minutes::int as requested_minutes, requested_at
+    from session_unlocks
+    where scope = 'tier2'
+      and approved_at is null
+      and requested_at >= clock_timestamp()
+          - make_interval(mins => ${config.tier2UnlockApprovalWindowMinutes})
+      and requested_minutes between 1 and ${config.tier2UnlockMaxMinutes}
+    order by requested_at desc`;
+  return rows.map((row) => ({
+    id: String(row.id),
+    requestedBy: String(row.requested_by),
+    requestedMinutes: Number(row.requested_minutes),
+    requestedAt: new Date(row.requested_at),
+  }));
+}
+
+export interface RevokedTier2Unlock {
+  id: string;
+  requestedBy: string;
+  minutes: number;
+}
+
+/**
+ * Fail-closed revoke: set expires_at to right now on every currently-active approval (or just
+ * `id`, when given). 023's app_allowed_tier() re-checks `expires_at > statement_timestamp()` on
+ * every single read rather than caching anything per transaction/connection, so this closes an
+ * active unlock immediately, including a read already mid-transaction elsewhere (proven in
+ * test/unlock-lifecycle.test.ts the same way 023's own tests proved natural expiry: two
+ * statements in one held-open transaction, with this function called on a separate connection in
+ * the gap between them). A still-pending, never-approved request is left untouched — there is
+ * nothing to revoke; it simply falls out of the approval window on its own. Logs one
+ * 'unlock:tier2:revoked' event per row actually revoked, same payload shape as
+ * 'unlock:tier2:approved' (request_id, minutes) — session_id is NEVER selected or logged
+ * (DECISIONS.md 2026-08-06).
+ */
+export async function revokeTier2Unlock(
+  id?: string,
+  revokedBy = "owner:cli",
+): Promise<RevokedTier2Unlock[]> {
+  const revokeAll = id === undefined;
+  // Same typed-placeholder trick as listHealthSamples' TIER0_CLI_DUMMY_DATE just above: the
+  // boolean gate means this is never actually compared against when revokeAll is true, but the
+  // parameter still has to bind as SOME well-formed uuid.
+  const idBound = id ?? "00000000-0000-0000-0000-000000000000";
+  const rows = await db()`
+    update session_unlocks
+    set expires_at = clock_timestamp()
+    where scope = 'tier2'
+      and approved_at is not null
+      and expires_at > clock_timestamp()
+      and (${revokeAll} or id = ${idBound}::uuid)
+    returning id::text as id, requested_by, requested_minutes::int as minutes`;
+  const revoked: RevokedTier2Unlock[] = rows.map((row) => ({
+    id: String(row.id),
+    requestedBy: String(row.requested_by),
+    minutes: Number(row.minutes),
+  }));
+  for (const row of revoked) {
+    await logEvent({
+      actor: revokedBy,
+      verb: "unlock:tier2:revoked",
+      entityType: "session_unlock",
+      entityId: row.id,
+      payload: auditPayload.tier2Unlock({ requestId: row.id, minutes: row.minutes }),
+    });
+  }
+  return revoked;
+}
+
+interface ActiveTier2Unlock {
+  id: string;
+  requestedBy: string;
+  requestedMinutes: number;
+  expiresAt: Date;
+  remainingMinutes: number;
+}
+
+async function activeTier2Unlocks(): Promise<ActiveTier2Unlock[]> {
+  const rows = await db()`
+    select id::text as id, requested_by, requested_minutes::int as requested_minutes, expires_at
+    from session_unlocks
+    where scope = 'tier2' and approved_at is not null and expires_at > clock_timestamp()
+    order by expires_at asc`;
+  const readAt = Date.now();
+  return rows.map((row) => {
+    const expiresAt = new Date(row.expires_at);
+    return {
+      id: String(row.id),
+      requestedBy: String(row.requested_by),
+      requestedMinutes: Number(row.requested_minutes),
+      expiresAt,
+      // Ceil, floor at 0: a countdown showing "0min" while a few seconds of a real grant remain
+      // would be misleading, and this is a display convenience (computed from the app server's
+      // own clock against the DB's expires_at) — the actual gate is app_allowed_tier()'s own
+      // statement-time check, never this number.
+      remainingMinutes: Math.max(0, Math.ceil((expiresAt.getTime() - readAt) / 60_000)),
+    };
+  });
+}
+
+export type PendingOrActiveTier2Unlock =
+  | ({ status: "pending" } & PendingTier2UnlockRequest)
+  | ({ status: "active" } & ActiveTier2Unlock);
+
+/**
+ * unlock:status's data source: every pending request still inside its approval window (exactly
+ * pendingTier2UnlockRequests' own predicate, reused) plus every approved unlock that has not yet
+ * expired, pending requests newest-first then active approvals soonest-to-expire-first. A
+ * naturally expired OR revoked approval — revoke is simply setting expires_at to now, see
+ * revokeTier2Unlock above — falls out of both buckets, same as an out-of-window pending request.
+ * session_id is NEVER selected (DECISIONS.md 2026-08-06).
+ */
+export async function pendingAndActiveUnlocks(): Promise<PendingOrActiveTier2Unlock[]> {
+  const pending = await pendingTier2UnlockRequests();
+  const active = await activeTier2Unlocks();
+  return [
+    ...pending.map((request) => ({ status: "pending" as const, ...request })),
+    ...active.map((unlock) => ({ status: "active" as const, ...unlock })),
+  ];
 }
 
 export async function logEvent(e: {
@@ -460,12 +647,155 @@ export async function logEgressOutcome(input: {
   );
 }
 
-export async function eventsSince(since: Date): Promise<any[]> {
+/**
+ * `minime audit`'s raw per-line mode (src/cli.ts). `verbLike` is an already-translated SQL LIKE
+ * pattern (cli.ts turns the owner's `--verb` glob into one, '*' -> '%'); `actor` is an exact
+ * match. Both are optional and parameterized; an omitted filter is never evaluated rather than
+ * bound to some placeholder value, the same boolean-gated-OR shape listTransactions/
+ * listHealthSamples and accessCounts above already use for their own optional filters.
+ */
+export async function eventsSince(
+  since: Date,
+  opts?: { verbLike?: string; actor?: string },
+): Promise<any[]> {
+  const noVerbFilter = opts?.verbLike === undefined;
+  const noActorFilter = opts?.actor === undefined;
   return db()`select id, at, actor, verb, entity_type, entity_id, payload
-             from events where at >= ${since} order by at desc`;
+             from events
+             where at >= ${since}
+               and (${noVerbFilter} or verb like ${opts?.verbLike ?? ""})
+               and (${noActorFilter} or actor = ${opts?.actor ?? ""})
+             order by at desc`;
+}
+
+export interface AuditActorVerbCount {
+  actor: string;
+  verb: string;
+  count: number;
+}
+
+export interface AuditEgressRollupRow {
+  provider: string;
+  routeTier: 1 | 2 | null;
+  count: number;
+}
+
+export interface AuditUnlockHistoryRow {
+  at: Date;
+  verb: string;
+  actor: string;
+  requestId: string;
+  minutes: number;
+}
+
+export interface AuditSummary {
+  since: Date;
+  totalEvents: number;
+  distinctActors: number;
+  egressEventCount: number;
+  actorVerbCounts: AuditActorVerbCount[];
+  egressRollup: AuditEgressRollupRow[];
+  unlockHistory: AuditUnlockHistoryRow[];
+}
+
+/**
+ * `minime audit --summary`'s three read-only rollups over `events` (I8: SELECT only, nothing
+ * written). Every field returned here is either a bounded count, an actor/verb (audit metadata,
+ * not row content), or one of the fixed, closed-vocabulary payload keys audit-payload.ts's own
+ * builders allow — provider/route_tier from llmEgress, request_id/minutes from tier2Unlock —
+ * never a free-text payload value, so nothing tier-0 can reach an agent transitively through this
+ * path (I3).
+ *
+ * The egress rollup filters to the two *intent* verbs (egress:embed / egress:classify) rather
+ * than a literal `verb like 'egress:%'`, which would also sweep in their paired `:outcome`
+ * events — those carry only {intent_event_id, status}, no provider/route_tier, and would
+ * otherwise show up as a confusing provider=null group. totalEvents/distinctActors/
+ * egressEventCount are derived in memory from the first two result sets rather than three more
+ * round trips, keeping this at exactly the three aggregate queries the design calls for.
+ */
+export async function auditSummarySince(since: Date): Promise<AuditSummary> {
+  const actorVerbRows = await db()`
+    select actor, verb, count(*)::int as n
+    from events
+    where at >= ${since}
+    group by 1, 2
+    order by n desc, actor asc, verb asc`;
+  const actorVerbCounts: AuditActorVerbCount[] = actorVerbRows.map((row) => ({
+    actor: String(row.actor),
+    verb: String(row.verb),
+    count: Number(row.n),
+  }));
+
+  const egressRows = await db()`
+    select payload ->> 'provider' as provider, payload ->> 'route_tier' as route_tier,
+           count(*)::int as n
+    from events
+    where at >= ${since} and verb in ('egress:embed', 'egress:classify')
+    group by 1, 2
+    order by n desc, provider asc`;
+  const egressRollup: AuditEgressRollupRow[] = egressRows.map((row) => ({
+    provider: String(row.provider),
+    routeTier: row.route_tier === null ? null : (Number(row.route_tier) as 1 | 2),
+    count: Number(row.n),
+  }));
+
+  const unlockRows = await db()`
+    select at, verb, actor, payload ->> 'request_id' as request_id,
+           (payload ->> 'minutes')::int as minutes
+    from events
+    where at >= ${since}
+      and verb in ('unlock:tier2:requested', 'unlock:tier2:approved', 'unlock:tier2:revoked')
+    order by at desc
+    limit 20`;
+  const unlockHistory: AuditUnlockHistoryRow[] = unlockRows.map((row) => ({
+    at: new Date(row.at),
+    verb: String(row.verb),
+    actor: String(row.actor),
+    requestId: String(row.request_id),
+    minutes: Number(row.minutes),
+  }));
+
+  return {
+    since,
+    totalEvents: actorVerbCounts.reduce((sum, row) => sum + row.count, 0),
+    distinctActors: new Set(actorVerbCounts.map((row) => row.actor)).size,
+    egressEventCount: egressRollup.reduce((sum, row) => sum + row.count, 0),
+    actorVerbCounts,
+    egressRollup,
+    unlockHistory,
+  };
+}
+
+// Latest `at` for one verb, or across every verb when omitted. The maintenance scheduler (W3-5)
+// uses the verb form to ask "when did dream last finish" and the verb-less form to ask "has this
+// database seen any activity at all" — the freshness signal that keeps a brand-new install from
+// immediately catching up a dream that was never scheduled, while still catching up an older
+// database where dream never ran.
+export async function lastEventAt(verb?: string): Promise<Date | null> {
+  const rows = verb
+    ? await db()`select max(at) as at from events where verb = ${verb}`
+    : await db()`select max(at) as at from events`;
+  const at = rows[0]?.at;
+  return at ? new Date(at) : null;
+}
+
+// Newest-first, bounded. Used by opsHealth (last dream:summary) and serve.ts's persistent-failure
+// detector (last 3 dream:summary events) -- both read-only, content-free (payload shapes crossing
+// this are audit-payload.ts's fixed-vocabulary constructors, e.g. dreamSummary's failed_steps).
+export async function recentEventsByVerb(verb: string, limit: number): Promise<any[]> {
+  return db()`select at, payload from events where verb = ${verb} order by at desc limit ${limit}`;
 }
 
 // ---------------------------------------------------------------- chunks & search
+
+export async function parentHasChunks(parentType: ParentType, parentId: string): Promise<boolean> {
+  // count(*)::int, not exists(): postgres.js has returned a truthy non-boolean for a
+  // false exists, which would skip indexing a newly minted companion identity.
+  const [row] = await db()`
+    select count(*)::int as n from chunks
+    where parent_type = ${parentType} and parent_id = ${parentId}`;
+  return (row?.n ?? 0) > 0;
+}
 
 export async function replaceChunks(
   parentType: ParentType,
@@ -562,6 +892,23 @@ export interface Candidate {
   fts: number;
 }
 
+// OR the query words: plainto_tsquery ANDs every term, so a natural-language question matched
+// nothing whenever one contentful word was absent from a chunk — on a 100-question retrieval
+// eval, 70% of queries got zero fts candidates, silencing the 0.30 fts weight in hybrid scoring.
+// ts_rank_cd still ranks chunks matching more terms first (DECISIONS.md 2026-06-11). cjkFold
+// mirrors the index-side cjk_fold() so Chinese queries hit the bigram lexemes (009_cjk_fts.sql).
+// Shared by ftsCandidates and suppressedCandidateCount (W4-4) so the tier-2 locked count can
+// never silently drift onto a different query than the one ftsCandidates itself just ran —
+// 039_suppressed_hit_count.sql's suppressed_candidate_count() takes this exact string as `q` and
+// passes it straight to websearch_to_tsquery, the same as ftsCandidates does below.
+function ftsOrQuery(query: string): string {
+  return cjkFold(query)
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .filter((t) => !isCjkStopToken(t))
+    .join(" OR ");
+}
+
 export async function ftsCandidates(
   query: string,
   types: string[] | null,
@@ -569,17 +916,7 @@ export async function ftsCandidates(
   actor?: AccessActor,
 ): Promise<Candidate[]> {
   const allowed = await allowedTier(actor);
-  // OR the query words: plainto_tsquery ANDs every term, so a natural-language question
-  // matched nothing whenever one contentful word was absent from a chunk — on a 100-question
-  // retrieval eval, 70% of queries got zero fts candidates, silencing the 0.30 fts weight in
-  // hybrid scoring. ts_rank_cd still ranks chunks matching more terms first (DECISIONS.md
-  // 2026-06-11). cjkFold mirrors the index-side cjk_fold() so Chinese queries hit the
-  // bigram lexemes (009_cjk_fts.sql).
-  const orQuery = cjkFold(query)
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter(Boolean)
-    .filter((t) => !isCjkStopToken(t))
-    .join(" OR ");
+  const orQuery = ftsOrQuery(query);
   return db()`
     select c.id, c.parent_type, c.parent_id, c.ord, c.text,
            0::float as cosine,
@@ -613,13 +950,64 @@ export async function vectorCandidates(
     limit 50` as any;
 }
 
+// Hard ceiling on the definer function's own top-k scan (039_suppressed_hit_count.sql clamps to
+// the same number) — bounds the work a caller can force regardless of what `k` it passes.
+const SUPPRESSED_CANDIDATE_CAP = 50;
+
+// W4-4: "how many matches for this query exist above the caller's current tier" — a bounded
+// existence signal for minime_search's envelope (search/hybrid.ts's hybridSearchDetailed), the
+// same shape minime_timeline's per-kind locked count (timelineRows/timeline_locked_count,
+// 032_timeline_locked_count.sql) already established for date-range reads. Runs through
+// suppressed_candidate_count() (039_suppressed_hit_count.sql), a SECURITY DEFINER function that
+// mirrors ftsCandidates'/vectorCandidates' own candidate SQL — same chunks table, same `tier >=
+// 1` floor (tier 0 is never touched — I3), same fts/vector ordering, same `types` predicate
+// (review finding, 2026-08-09: the original signature had no `types` parameter at all, so a
+// type-scoped locked search disclosed a count that included matches of types the caller had
+// explicitly excluded) — but without their `tier <= allowed` ceiling, then reports only a bare
+// count of how many of those extra rows this session cannot read. It never returns an id, title,
+// or snippet (that would be an oracle for what is locked). `query` MUST be the raw, un-folded
+// query text — ftsOrQuery folding happens once, here, exactly like ftsCandidates does it, so the
+// two can never fold the same query two different ways. `types` must be the same normalized
+// (empty-array-to-null) value hybridSearch itself hands ftsCandidates/vectorCandidates, so the
+// count and the real hits agree on what "no type filter" means.
+export async function suppressedCandidateCount(
+  query: string,
+  embedding: number[] | null,
+  k: number,
+  types: string[] | null,
+  parentIds: string[] | null = null,
+  actor?: AccessActor,
+): Promise<number> {
+  // app_allowed_tier() inside the definer function already makes this structurally 0 once
+  // unlocked (no content tier exceeds 2), so this check is purely to skip the extra top-k scan
+  // on the common unlocked path — correctness never depends on it.
+  const allowed = await allowedTier(actor);
+  if (allowed >= 2) return 0;
+  const orQuery = ftsOrQuery(query);
+  const vec = embedding ? JSON.stringify(embedding) : null;
+  const cap = Math.max(0, Math.min(Math.trunc(k), SUPPRESSED_CANDIDATE_CAP));
+  const [row] = await db()`
+    select suppressed_candidate_count(${orQuery}, ${vec}::vector, ${cap}, ${types}::text[], ${parentIds}::uuid[]) as n`;
+  return Number(row?.n ?? 0);
+}
+
 export interface ParentMeta {
   id: string;
   title: string;
+  tier: number;
   updated_at: Date;
   created_by: string;
   derived_from: string | null;
   source: string;
+  // Correction state (028_correction_supersede.sql), uniform across all twelve PARENTS tables.
+  // superseded_by set -> this row has a live successor (down-weighted, not hidden, in hybrid.ts).
+  // superseded_by null -> either live (superseded_at also null) or retracted (excluded below).
+  superseded_by: string | null;
+  superseded_at: Date | null;
+  // Semantic "event date" for this parent's type (PARENTS[type].dateCol, W3-4) — e.g. a
+  // journal entry's `at`, not its `updated_at`. Only the search date-range filter
+  // (hybrid.ts) reads this; every other consumer of ParentMeta keeps using updated_at.
+  event_at: Date;
 }
 
 export async function parentMeta(
@@ -629,13 +1017,22 @@ export async function parentMeta(
 ): Promise<Map<string, ParentMeta>> {
   if (ids.length === 0) return new Map();
   const allowed = await allowedTier(actor);
-  const { table, titleCol } = parentTable(type);
-  // table/titleCol come from the fixed PARENTS map above, never from user input.
+  const { table, titleCol, dateCol } = parentTable(type);
+  // table/titleCol/dateCol come from the fixed PARENTS map above, never from user input.
+  // Retracted rows (superseded_at set, superseded_by null) are excluded here so hybridSearch's
+  // existing meta-miss drop (a candidate whose parent has no meta entry is filtered out) removes
+  // them from results even if a chunk somehow survived; retractRow already deletes their chunks
+  // as belt-and-suspenders. A superseded-with-successor row (both columns set) stays in the map
+  // so it remains rankable — hybridSearch down-weights it by SUPERSEDED_PENALTY rather than
+  // hiding it. getRow (below) deliberately does NOT apply this filter: the owner/agent can
+  // always inspect any row, live or not, by id.
   const rows = await db()`
-    select id, left(${db()(titleCol)}::text, 120) as title, updated_at, created_by, derived_from,
-           source
+    select id, left(${db()(titleCol)}::text, 120) as title, tier, updated_at, created_by,
+           derived_from, source, superseded_by, superseded_at,
+           (${db().unsafe(dateCol)})::timestamptz as event_at
     from ${db()(table)}
-    where id = any(${ids}) and tier >= 1 and tier <= ${allowed}`;
+    where id = any(${ids}) and tier >= 1 and tier <= ${allowed}
+      and not (superseded_at is not null and superseded_by is null)`;
   return new Map(rows.map((r: any) => [r.id as string, r as ParentMeta]));
 }
 
@@ -654,7 +1051,8 @@ export async function entitiesNamedIn(query: string, actor?: AccessActor): Promi
     where (${q} like '%' || lower(p.canonical_name) || '%'
        or (a.alias is not null and a.tier >= 1 and a.tier <= ${allowed}
            and ${q} like '%' || lower(a.alias) || '%'))
-      and p.tier >= 1 and p.tier <= ${allowed}`;
+      and p.tier >= 1 and p.tier <= ${allowed}
+      and p.superseded_at is null`;
   const orgs = await db()`
     select distinct o.id from orgs o
     left join org_aliases a on a.org_id = o.id
@@ -729,6 +1127,7 @@ export async function resolvePerson(name: string, actor?: AccessActor): Promise<
     where (lower(p.canonical_name) = lower(${name})
        or (a.tier >= 1 and a.tier <= ${allowed} and lower(a.alias) = lower(${name})))
       and p.tier >= 1 and p.tier <= ${allowed}
+      and p.superseded_at is null
     limit 1`;
   return rows[0] ?? null;
 }
@@ -747,6 +1146,29 @@ function entityDerivationTier(tier: number | undefined): 1 | 2 {
   if (tier === undefined) return 1;
   if (tier === 1 || tier === 2) return tier;
   throw new Error("entity tier must be 1 or 2");
+}
+
+export type EntityKind = "person" | "org";
+
+// W4-2 "returns tier 1 when independently evidenced" hook: a tier-1-sourced resolve
+// (ensurePerson/ensureOrg below, called with the default/explicit requested tier of 1) that
+// finds an EXISTING identity still sitting at tier 2 -- almost always a row the pre-037 monotonic
+// rule swallowed before 037_identity_content_tier_split.sql stopped that from happening to new
+// resolves -- gets flagged for owner review. This never changes the row's own tier (that stays
+// owner-CLI-only, entity:restore-tier/restoreEntityTier below); it only surfaces the mismatch,
+// deduped against any already-open item for the same entity. readable_source_tier bypasses RLS
+// (same helper sourceTierForParent below calls) so a locked tier-1 caller can still detect that
+// the identity it just resolved is sitting above its own request, without that read itself ever
+// returning the row's content to the caller.
+async function flagEntityPromotionIfStillTierTwo(
+  entityType: EntityKind,
+  entityId: string,
+): Promise<void> {
+  const table = entityType === "person" ? "people" : "orgs";
+  const [row] = await db()`select readable_source_tier(${table}, ${entityId}::uuid)::int as tier`;
+  if (Number(row?.tier) !== 2) return;
+  if (await reviewItemExists("entity_promotion", "entity_id", entityId)) return;
+  await insertReviewItem("entity_promotion", { entity_type: entityType, entity_id: entityId });
 }
 
 /** Exact structural guard for extraction; returns no hidden person fields. */
@@ -776,7 +1198,9 @@ export async function ensurePerson(
       ${derivation.derivedFrom ?? null}::uuid
     )`;
   if (!row) throw new Error("entity_resolver_returned_no_row");
-  return { id: row.id as string, created: row.created as boolean };
+  const result = { id: row.id as string, created: row.created as boolean };
+  if (tier === 1 && !result.created) await flagEntityPromotionIfStillTierTwo("person", result.id);
+  return result;
 }
 
 export async function ensureExtractedPerson(
@@ -795,15 +1219,20 @@ export async function ensureExtractedPerson(
   return { id: row.id as string, created: row.created as boolean };
 }
 
-// Owner-relation + free-text context (onboarding interview); never blanks existing values.
+// Owner-relation + free-text context (onboarding interview, and minime_upsert_person's
+// set_relation/set_context actions); coalesce means a null argument leaves that column
+// unchanged rather than blanking it, so each action can patch just its own field. Returns the
+// updated-row count so a caller resolving by a tier-filtered id upstream (minime_upsert_person)
+// can turn a 0-row result into NOT_FOUND instead of silently no-op'ing.
 export async function setPersonDetails(
   id: string,
   relation: string | null,
   context: string | null,
-): Promise<void> {
-  await db()`update people set relation = coalesce(${relation}, relation),
+): Promise<number> {
+  const rows = await db()`update people set relation = coalesce(${relation}, relation),
                               context = coalesce(${context}, context)
-            where id = ${id}`;
+            where id = ${id} returning id`;
+  return rows.length;
 }
 
 export async function setDecisionOutcome(
@@ -839,15 +1268,112 @@ export async function setPersonRelationIfNull(personId: string, relation: string
   await db()`select set_person_relation_if_null(${personId}::uuid, ${relation})`;
 }
 
-// Extraction may upgrade "Tomasz" to "Tomasz Wójcik" once the fuller form is seen.
-export async function setPersonCanonicalName(personId: string, name: string): Promise<void> {
-  await db()`update people set canonical_name = ${name} where id = ${personId}`;
+// Extraction may upgrade "Tomasz" to "Tomasz Wójcik" once the fuller form is seen; also used by
+// minime_upsert_person's rename action. Returns the updated-row count (see setPersonDetails).
+export async function setPersonCanonicalName(personId: string, name: string): Promise<number> {
+  const rows = await db()`update people set canonical_name = ${name}
+    where id = ${personId} returning id`;
+  return rows.length;
 }
 
 export async function peopleByFirstName(first: string): Promise<{ id: string }[]> {
   return db()`
     select id from people
-    where lower(split_part(canonical_name, ' ', 1)) = ${first.toLowerCase()}` as any;
+    where lower(split_part(canonical_name, ' ', 1)) = ${first.toLowerCase()}
+      and superseded_at is null` as any;
+}
+
+// ---------------------------------------------------------------- person_dates (W3-10)
+
+export type PersonDateKind = "birthday" | "anniversary" | "custom";
+
+// Insert-or-update by (person_id, kind, label) — label coalesced to '' so a repeat "set my
+// birthday" call updates the one row instead of minting a duplicate (034_person_dates.sql's own
+// comment on why a bare unique(person_id, kind, label) can't do this: Postgres never treats two
+// NULLs as equal). The ON CONFLICT target below must name the exact same coalesce(label, '')
+// expression as the migration's unique index for Postgres to infer it as the arbiter.
+// created_by/source/derived_from are stamped once at creation and left alone on an update, same
+// as upsertCalendarEvent's content-columns-only SET list.
+export async function upsertPersonDate(d: {
+  personId: string;
+  kind: PersonDateKind;
+  label?: string | null;
+  month: number;
+  day: number;
+  year?: number | null;
+  createdBy?: string;
+  source?: string;
+  derivedFrom?: string | null;
+}): Promise<{ id: string }> {
+  const [row] = await db()`
+    insert into person_dates (person_id, kind, label, month, day, year, created_by, source, derived_from)
+    values (${d.personId}, ${d.kind}, ${d.label ?? null}, ${d.month}, ${d.day}, ${d.year ?? null},
+            ${d.createdBy ?? "human"}, ${d.source ?? "manual"}, ${d.derivedFrom ?? null})
+    on conflict (person_id, kind, (coalesce(label, '')))
+    do update set month = excluded.month, day = excluded.day, year = excluded.year, updated_at = now()
+    returning id`;
+  if (!row) throw new Error("person_date_upsert_returned_no_row");
+  return { id: row.id as string };
+}
+
+// Next occurrence (within [today, today + days - 1], both inclusive -- `days` calendar dates
+// starting at today) of every visible person_date, one row per date. "Next occurrence" picks the
+// earliest of this-year's and next-year's calendar date >= today for that (month, day) --
+// handling the year wrap (e.g. a Dec 28 "today" with a Jan 5 birthday: this year's Jan 5 already
+// passed, so next year's is picked, which lands inside a 14-day window from Dec 28).
+//
+// Documented choice for Feb 29: a birthday stored as month=2/day=29 is clamped to the LAST real
+// day of February in a candidate year that isn't a leap year, i.e. it surfaces on Feb 28 that
+// year (never skipped, never rolled into March) -- `least(day, last day of that candidate
+// month/year)` below. Same clamp applies to any other day that doesn't exist in a given month
+// (e.g. day=31 in a 30-day month).
+//
+// Tier-gated on BOTH the date row's own tier and its person's tier: a date is only visible when
+// both are within the caller's allowed tier. A person whose own identity tier is 2 (e.g. minted
+// purely from journal/page extraction — 037_identity_content_tier_split.sql; minime_log_interaction
+// no longer mints or promotes a subject to tier 2) makes their dates drop out of this list at
+// tier 1 too, even a date row that is itself tier 1 -- consistent with how every other
+// person-attached fact behaves once its person is hidden, and accepted rather than special-cased
+// (W3-10 spec).
+export async function upcomingPersonDates(
+  today: string,
+  days: number,
+  actor?: AccessActor,
+): Promise<any[]> {
+  const allowed = await allowedTier(actor);
+  const thisYear = Number(today.slice(0, 4));
+  const nextYear = thisYear + 1;
+  return db()`
+    with candidate as (
+      select
+        pd.id, pd.person_id, pd.kind, pd.label,
+        make_date(${thisYear}, pd.month,
+          least(pd.day, extract(day from
+            (make_date(${thisYear}, pd.month, 1) + interval '1 month' - interval '1 day')
+          )::int)
+        ) as this_year_date,
+        make_date(${nextYear}, pd.month,
+          least(pd.day, extract(day from
+            (make_date(${nextYear}, pd.month, 1) + interval '1 month' - interval '1 day')
+          )::int)
+        ) as next_year_date
+      from person_dates pd
+      where pd.tier >= 1 and pd.tier <= ${allowed}
+    ),
+    occurrence as (
+      select
+        id, person_id, kind, label,
+        case when this_year_date >= ${today}::date then this_year_date else next_year_date end
+          as next_occurrence
+      from candidate
+    )
+    select o.id, o.person_id, p.canonical_name, o.kind, o.label, o.next_occurrence as date
+    from occurrence o
+    join people p on p.id = o.person_id
+    where p.tier >= 1 and p.tier <= ${allowed}
+      and p.superseded_at is null
+      and o.next_occurrence between ${today}::date and ${today}::date + (${days}::int - 1)
+    order by o.next_occurrence, p.canonical_name` as any;
 }
 
 // ---------------------------------------------------------------- orgs
@@ -879,7 +1405,9 @@ export async function ensureOrg(
       ${derivation.derivedFrom ?? null}::uuid
     )`;
   if (!row) throw new Error("entity_resolver_returned_no_row");
-  return { id: row.id as string, created: row.created as boolean };
+  const result = { id: row.id as string, created: row.created as boolean };
+  if (tier === 1 && !result.created) await flagEntityPromotionIfStillTierTwo("org", result.id);
+  return result;
 }
 
 export async function ensureExtractedOrg(
@@ -912,8 +1440,13 @@ export async function addOrgAlias(
   )`;
 }
 
-export async function setOrgCanonicalName(orgId: string, name: string): Promise<void> {
-  await db()`update orgs set canonical_name = ${name} where id = ${orgId}`;
+// Used by minime_upsert_person's rename action. Returns the updated-row count (see
+// setPersonDetails) — orgs carry a real RLS tier_update policy (008_orgs.sql), so this can
+// genuinely match 0 rows when the caller's tier has dropped below the row's since it resolved.
+export async function setOrgCanonicalName(orgId: string, name: string): Promise<number> {
+  const rows = await db()`update orgs set canonical_name = ${name}
+    where id = ${orgId} returning id`;
+  return rows.length;
 }
 
 export async function allOrgsWithAliases(): Promise<{ id: string; names: string[] }[]> {
@@ -957,10 +1490,15 @@ export async function retypeOrgToPerson(
     // 1. Resolve within the source identity's privacy namespace. Tier 0 is quarantined:
     // a readable spelling cannot cause this owner repair to merge with a hidden identity,
     // while a tier-0 alias remains a valid privacy-preserving match for tier-0 source data.
+    // superseded_at is null excludes an already-merged-away husk (mergePersonIntoPerson below)
+    // from being reused as a surviving identity — same guard as resolvePerson/entitiesNamedIn/
+    // peopleByFirstName/phantomPersonCandidates, so a retype can never write new tier/relation/
+    // alias/edge data onto a row every resolver path has agreed to hide.
     const [existingPerson] = await tx`
       select p.id from people p
       where ((${orgTier} = 0 and p.tier = 0)
           or (${orgTier} in (1,2) and p.tier in (1,2)))
+        and p.superseded_at is null
         and (
           lower(p.canonical_name) = lower(${name})
           or exists (
@@ -985,20 +1523,26 @@ export async function retypeOrgToPerson(
       personId = row!.id as string;
       created = true;
     }
-    const [promoted] = await tx`
+    // W4-1 identity/content tier split: the reused person's own identity tier is no longer
+    // raised to match the org being folded into it (greatest(tier, orgTier)) -- resolving into
+    // an EXISTING identity never promotes it, matching resolve_or_promote_entity's own rule
+    // (037_identity_content_tier_split.sql). Only the tier-0 quarantine absorb stays unconditional
+    // (and is, in practice, unreachable here: the namespace-matching query above already requires
+    // existingPerson.tier and orgTier to share tier-0-ness or both be in {1,2}, so the "one side
+    // is 0 and the other isn't" arm below never fires for a REUSED person — it is kept anyway as
+    // the same defensive, verbatim absorbing floor every other CASE in this migration keeps).
+    const [updated] = await tx`
       update people
       set relation = coalesce(relation, ${opts.relation ?? null}),
-          tier = case when tier = 0 or ${orgTier} = 0 then 0
-                      else greatest(tier, ${orgTier}) end,
+          tier = case when tier = 0 or ${orgTier} = 0 then 0 else tier end,
           derived_from = case when tier <> 0 and ${orgTier} = 0
                               then ${org.derived_from ?? orgId}
                               else coalesce(derived_from, ${org.derived_from ?? orgId}) end,
           supersedes_id = coalesce(supersedes_id, ${orgId})
       where id = ${personId}
       returning tier, derived_from`;
-    const personTier = Number(promoted!.tier) as 0 | 1 | 2;
-    const personDerivedFrom =
-      (promoted!.derived_from as string | null) ?? org.derived_from ?? orgId;
+    const personTier = Number(updated!.tier) as 0 | 1 | 2;
+    const personDerivedFrom = (updated!.derived_from as string | null) ?? org.derived_from ?? orgId;
     await tx`
       update person_aliases
       set tier = case when tier = 0 or ${personTier} = 0 then 0
@@ -1066,6 +1610,9 @@ export async function retypeOrgToPerson(
           )
         )
         and (e.src_id = ${personId} or e.dst_id = ${personId})`;
+    // Live post-cleanup snapshot, taken after the self-loop delete and de-dupe above — see the
+    // matching edges_repointed comment in mergePersonIntoPerson below for why this is a live
+    // count rather than a raw repoint-UPDATE tally.
     const cntRows = await tx`
       select count(*)::int n from edges where src_id = ${personId} or dst_id = ${personId}`;
     const edgesRepointed = ((cntRows[0] as any)?.n ?? 0) as number;
@@ -1075,6 +1622,194 @@ export async function retypeOrgToPerson(
              where id = ${orgId}`;
 
     return { personId, orgId, created, edgesRepointed: edgesRepointed as number };
+  });
+}
+
+// Sanctioned, reversible repair for a duplicate identity: two person rows that are really the
+// same human (ten years of "Sarha"/"Sarah" fragmentation from repeated capture typos). There is
+// no auto-merge path — canonical_name has no uniqueness constraint (DECISIONS.md 2026-08-08) —
+// so this is the one authorized place that folds one person row into another. Modeled line-by-line
+// on retypeOrgToPerson above: same FOR UPDATE locking discipline, same tier-0 quarantine
+// namespace rule, same edge-repoint/de-dupe logic. Differences: both rows already exist (no
+// find-or-create), and the source row is never retired — it is superseded via the generic W2-1
+// superseded_by/superseded_at columns (028_correction_supersede.sql), shared with minime_correct.
+const MERGE_PERSON_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Postgres compares `uuid`-typed values case-insensitively; every id comparison below this point
+// is a plain JS string operation instead (`===`, and the phantom_person auto-resolve's text match
+// against `payload ->> 'person_id'`), so a caller-supplied uppercase spelling of the same id must
+// be normalized to lowercase HERE, before anything else runs — and a string that isn't a UUID at
+// all must be rejected rather than silently reaching a `where id = ...` clause. Skipping this let
+// an uppercase --from equal to a lowercase --into slip past the self-merge guard below while the
+// SQL underneath still resolved both to the very same row: FOR UPDATE locked that one row twice,
+// its own aliases were moved onto itself and then deleted by the same-row DELETE, and
+// supersedeRow stamped it superseded by itself — vanishing the only copy of the person from
+// every superseded_at-filtered resolver with nothing left absorbing its data (improve/W2-7F,
+// fixing a landed W2-7 review finding). Fixing this in JS also means the auto-resolve match below
+// needs no SQL-side cast: `fromId` is lowercase by the time it reaches that query, matching the
+// lowercase `person_id` values the system itself always writes into review_queue payloads.
+function normalizedMergePersonId(id: string): string {
+  if (!MERGE_PERSON_ID_RE.test(id)) throw new Error(`invalid person id: ${id}`);
+  return id.toLowerCase();
+}
+
+export async function mergePersonIntoPerson(
+  fromIdRaw: string,
+  intoIdRaw: string,
+): Promise<{
+  fromId: string;
+  intoId: string;
+  aliasesMoved: number;
+  interactionsRepointed: number;
+  edgesRepointed: number;
+}> {
+  const fromId = normalizedMergePersonId(fromIdRaw);
+  const intoId = normalizedMergePersonId(intoIdRaw);
+  if (fromId === intoId) throw new Error("cannot merge a person into itself");
+  return withDbTransaction(async (tx) => {
+    // Lock both rows FOR UPDATE in a fixed (lexicographic id) order, independent of which is
+    // from/into, so two concurrent merges naming the same pair in opposite directions can never
+    // deadlock against each other.
+    const [lowId, highId] = fromId < intoId ? [fromId, intoId] : [intoId, fromId];
+    const [lowRow] = await tx`
+      select id, canonical_name, tier, relation, context, last_contact_at, derived_from,
+             superseded_at
+      from people where id = ${lowId} for update`;
+    const [highRow] = await tx`
+      select id, canonical_name, tier, relation, context, last_contact_at, derived_from,
+             superseded_at
+      from people where id = ${highId} for update`;
+    const source = fromId === lowId ? lowRow : highRow;
+    const target = intoId === lowId ? lowRow : highRow;
+    if (!source) throw new Error(`person not found: ${fromId}`);
+    if (!target) throw new Error(`person not found: ${intoId}`);
+    if (source.superseded_at !== null) throw new Error("source person is already merged");
+    if (target.superseded_at !== null) {
+      throw new Error("cannot merge into an already-merged person");
+    }
+
+    const sourceCanonicalName = source.canonical_name as string;
+    const sourceRelation = (source.relation ?? null) as string | null;
+    const sourceContext = (source.context ?? null) as string | null;
+    const sourceLastContactAt = (source.last_contact_at ?? null) as Date | null;
+    const sourceDerivedFrom = (source.derived_from as string | null) ?? fromId;
+    const sourceTier = Number(source.tier) as 0 | 1 | 2;
+    const targetTier = Number(target.tier) as 0 | 1 | 2;
+    // Tier-0 quarantine namespace rule (repo.ts:960-974 in retypeOrgToPerson): a readable
+    // spelling can never absorb a hidden identity, so tier-0 merges only with tier-0; 1/2 with 1/2.
+    if ((sourceTier === 0) !== (targetTier === 0)) {
+      throw new Error("cannot merge across the tier-0 quarantine boundary");
+    }
+
+    // 1. Move aliases: source's aliases -> target (tier-0 absorbing on insert and on collision),
+    // then add the source's own canonical spelling as a target alias, then drop the source's rows
+    // (the source row itself is kept — only its now-migrated aliases are removed).
+    await tx`
+      insert into person_aliases (person_id, alias, tier, source, created_by, derived_from)
+      select ${intoId}, a.alias,
+             case when ${targetTier}::smallint = 0 or a.tier = 0 then 0
+                  else greatest(${targetTier}::smallint, a.tier) end,
+             'merge', 'agent:merge', coalesce(a.derived_from, ${sourceDerivedFrom})
+      from person_aliases a where a.person_id = ${fromId}
+      on conflict (person_id, alias, privacy_namespace) do update
+      set tier = case when person_aliases.tier = 0 or excluded.tier = 0 then 0
+                      else greatest(person_aliases.tier, excluded.tier) end,
+          derived_from = case
+            when person_aliases.tier <> 0 and excluded.tier = 0 then excluded.derived_from
+            else coalesce(person_aliases.derived_from, excluded.derived_from)
+          end`;
+    await tx`
+      insert into person_aliases (person_id, alias, tier, source, created_by, derived_from)
+      values (${intoId}, ${sourceCanonicalName},
+              case when ${targetTier}::smallint = 0 or ${sourceTier}::smallint = 0 then 0
+                   else greatest(${targetTier}::smallint, ${sourceTier}::smallint) end,
+              'merge', 'agent:merge', ${sourceDerivedFrom})
+      on conflict (person_id, alias, privacy_namespace) do update
+      set tier = case when person_aliases.tier = 0 or excluded.tier = 0 then 0
+                      else greatest(person_aliases.tier, excluded.tier) end,
+          derived_from = case
+            when person_aliases.tier <> 0 and excluded.tier = 0 then excluded.derived_from
+            else coalesce(person_aliases.derived_from, excluded.derived_from)
+          end`;
+    const deletedAliases = await tx`
+      delete from person_aliases where person_id = ${fromId} returning alias`;
+    const aliasesMoved = deletedAliases.length;
+
+    // 2. Repoint interactions logged against the source (no de-dupe needed — interactions have
+    // no per-person uniqueness constraint, unlike aliases/edges).
+    const repointedInteractions = await tx`
+      update interactions set person_id = ${intoId} where person_id = ${fromId} returning id`;
+    const interactionsRepointed = repointedInteractions.length;
+
+    // 3. Repoint edges on both sides, drop self-referential edges the repoint creates, and
+    // de-dupe collisions — copied from retypeOrgToPerson's edge-repoint logic (step 3 above).
+    await tx`
+      update edges set src_id = ${intoId} where src_type = 'person' and src_id = ${fromId}`;
+    await tx`
+      update edges set dst_id = ${intoId} where dst_type = 'person' and dst_id = ${fromId}`;
+    // drop self-referential edges created by the repoint (e.g. "X knows X")
+    await tx`delete from edges where src_id = ${intoId} and dst_id = ${intoId}
+             and src_type = 'person' and dst_type = 'person'`;
+    // De-dupe edges that now collide. Privacy strength wins (tier 0, then 2, then 1);
+    // age is only the tie-breaker, so repair can never discard quarantine evidence.
+    await tx`
+      delete from edges e using edges k
+      where e.src_type = k.src_type and e.src_id = k.src_id and e.rel = k.rel
+        and e.dst_type = k.dst_type and e.dst_id = k.dst_id
+        and (
+          (case e.tier when 0 then 3 else e.tier end) <
+            (case k.tier when 0 then 3 else k.tier end)
+          or (
+            (case e.tier when 0 then 3 else e.tier end) =
+              (case k.tier when 0 then 3 else k.tier end)
+            and (e.created_at, e.id) > (k.created_at, k.id)
+          )
+        )
+        and (e.src_id = ${intoId} or e.dst_id = ${intoId})`;
+    // edges_repointed is a live post-cleanup snapshot — edges still touching the target AFTER
+    // both the self-loop delete and the collision de-dupe above — not a raw count of rows the
+    // repoint UPDATEs touched. Matches retypeOrgToPerson's edgesRepointed (repo.ts:1166-1168) so
+    // the shared `edges_repointed` audit key (scripts/repair.ts REPAIR_SUMMARY_COUNT_KEYS,
+    // src/util/audit-payload.ts RepairCompleteCounts) means the same thing regardless of which
+    // repair produced the event: an edge repointed and then immediately dropped as a self-loop
+    // or a losing collision must not be reported as still referencing the target.
+    const [edgeCntRow] = await tx`
+      select count(*)::int n from edges where src_id = ${intoId} or dst_id = ${intoId}`;
+    const edgesRepointed = ((edgeCntRow as any)?.n ?? 0) as number;
+
+    // 4. Target absorbs the source's relation/context/last-contact; supersedes_id records only
+    // the FIRST ancestor (coalesce) — a target merged into more than once keeps its original
+    // pointer, matching retypeOrgToPerson's own coalesce behavior. W4-1 identity/content tier
+    // split: the target's own identity tier is no longer raised to the source's tier
+    // (greatest(tier, sourceTier)) — folding in a more-privately-evidenced source must not push a
+    // publicly-known identity's own card out of tier-1 reach, mirroring
+    // resolve_or_promote_entity's "resolving an existing identity never promotes it" rule
+    // (037_identity_content_tier_split.sql). The tier-0 quarantine absorb stays unconditional —
+    // and, same as retypeOrgToPerson above, is unreachable in practice here since the guard above
+    // this block already refuses a merge that crosses the tier-0 boundary, so source and target
+    // always already share tier-0-ness or both sit in {1,2} by the time this UPDATE runs.
+    await tx`
+      update people
+      set relation = coalesce(relation, ${sourceRelation}),
+          context = coalesce(context, ${sourceContext}),
+          last_contact_at = greatest(last_contact_at, ${sourceLastContactAt}),
+          tier = case when tier = 0 or ${sourceTier}::smallint = 0 then 0 else tier end,
+          supersedes_id = coalesce(supersedes_id, ${fromId})
+      where id = ${intoId}`;
+
+    // 5. Supersede the source (I5: kept, never deleted) — shared helper with minime_correct
+    // (W2-4); stamps superseded_by/superseded_at under the same idempotency guard.
+    await supersedeRow("person", fromId, intoId);
+
+    // 6. Auto-resolve any open phantom_person flag on the row that no longer independently
+    // exists — it would otherwise sit open forever pointing at a now-superseded husk.
+    await tx`
+      update review_queue
+      set status = 'resolved', resolved_at = ${now()}
+      where status = 'open' and kind = 'phantom_person'
+        and payload ->> 'person_id' = ${fromId}`;
+
+    return { fromId, intoId, aliasesMoved, interactionsRepointed, edgesRepointed };
   });
 }
 
@@ -1176,6 +1911,9 @@ interface Std {
   createdBy?: string;
   source?: string;
   derivedFrom?: string | null;
+  // Forward pointer stamped on a correction's successor row (minime_correct, W2-4) — the same
+  // supersedes_id column retypeOrgToPerson already uses for its own successor person rows.
+  supersedesId?: string | null;
   tier?: number;
 }
 
@@ -1212,6 +1950,10 @@ export interface UpsertPageInput {
   createdBy?: string;
   source?: string;
   derivedFrom?: string | null;
+  // Forward pointer for a correction's successor page (minime_correct, W2-4); only meaningful on
+  // the insert branch below — a correction successor always mints a fresh path, never upserts an
+  // existing one, so the update branch never sees it.
+  supersedesId?: string | null;
 }
 
 export interface CompiledSourceEvidence {
@@ -1337,9 +2079,11 @@ export async function insertJournal(
   // INSERT ... RETURNING applies the SELECT RLS policy and would therefore return no row.
   const id = crypto.randomUUID();
   await db()`
-    insert into journal_entries (id, at, entry_md, mood, energy, created_by, source, derived_from, tier)
+    insert into journal_entries
+      (id, at, entry_md, mood, energy, created_by, source, derived_from, supersedes_id, tier)
     values (${id}, ${e.at ?? now()}, ${e.entryMd}, ${e.mood ?? null}, ${e.energy ?? null},
-            ${e.createdBy ?? "human"}, ${e.source ?? "manual"}, ${e.derivedFrom ?? null}, ${e.tier ?? 2})`;
+            ${e.createdBy ?? "human"}, ${e.source ?? "manual"}, ${e.derivedFrom ?? null},
+            ${e.supersedesId ?? null}, ${e.tier ?? 2})`;
   return { id };
 }
 
@@ -1368,13 +2112,15 @@ export async function insertDecision(
     await tx`
       insert into decisions (id, question, options, criteria, choice, reasoning, expected_outcome,
                              falsifier, stakes, reversibility, confidence,
-                             decided_at, review_at, created_by, source, derived_from, tier)
+                             decided_at, review_at, created_by, source, derived_from,
+                             supersedes_id, tier)
       values (${decisionId}, ${d.question}, ${db().json(d.options as any)}, ${d.criteria ? db().json(d.criteria as any) : null},
               ${d.choice ?? null}, ${d.reasoning ?? null}, ${d.expectedOutcome ?? null},
               ${d.falsifier ?? null}, ${d.stakes ?? null}, ${d.reversibility ?? null},
               ${d.confidence ?? null},
               ${d.decidedAt ?? (d.choice ? now() : null)}, ${d.reviewAt ?? null},
-              ${d.createdBy ?? "human"}, ${d.source ?? "manual"}, ${d.derivedFrom ?? null}, ${tier})`;
+              ${d.createdBy ?? "human"}, ${d.source ?? "manual"}, ${d.derivedFrom ?? null},
+              ${d.supersedesId ?? null}, ${tier})`;
 
     await insertDecisionTranscriptRows(tx, decisionId, d.transcript ?? [], { ...d, tier });
     branchIds.push(...(await insertDecisionBranchRows(tx, decisionId, { ...d, tier })));
@@ -1541,35 +2287,141 @@ export class TaskNotFoundError extends Error {
   }
 }
 
+// The row shape materializeRecurrence needs from the task that just went done: the fields its
+// successor copies verbatim (title/body/goal_id/tier/recur_*) plus the due it computes nextDue
+// from and the superseded_at guard. due/recur_anchor come back from postgres.js as Date for a
+// plain `date` column (never a process-local getter — see clock.ts's own note on this), hence
+// metricDateString below rather than a bare .toISOString() call at each use site.
+export interface RecurringTaskRow {
+  id: string;
+  title: string;
+  body: string | null;
+  due: Date | string | null;
+  goal_id: string | null;
+  tier: number;
+  recur_freq: string | null;
+  recur_interval: number;
+  recur_anchor: Date | string | null;
+  superseded_at?: Date | string | null;
+}
+
+// Mint the next instance of a completed recurring task, unless one already exists (idempotent —
+// both upsertTask's own done-transition check and the dream sweeper's crash-safety backfill call
+// this for the same row shape). Assumes an ambient transaction from the caller: the existence
+// check and the insert must commit together, or a crash between them could double-materialize.
+// recur_anchor is copied VERBATIM, never recomputed from the successor's own (possibly
+// end-of-month-clamped) due — see recurrence.ts's nextMonthCycle comment for why re-deriving it
+// from a clamped date would permanently downgrade a monthly-on-the-31st habit to the 28th.
+export async function materializeRecurrence(task: RecurringTaskRow): Promise<string | null> {
+  if (!task.recur_freq) return null;
+  const [existing] = await db()`
+    select 1 from tasks where derived_from = ${task.id} and source = 'recurrence' limit 1`;
+  if (existing) return null;
+  const fromDue = task.due !== null ? metricDateString(task.due) : todayStr();
+  const anchor = task.recur_anchor !== null ? metricDateString(task.recur_anchor) : null;
+  const due = nextDue(task.recur_freq as RecurFreq, task.recur_interval, anchor, fromDue);
+  const id = crypto.randomUUID();
+  await db()`
+    insert into tasks
+      (id, title, body, status, due, goal_id, tier, recur_freq, recur_interval, recur_anchor,
+       created_by, source, derived_from)
+    values
+      (${id}, ${task.title}, ${task.body}, 'inbox', ${due}::date, ${task.goal_id}, ${task.tier},
+       ${task.recur_freq}, ${task.recur_interval}, ${anchor}::date,
+       'system:recurrence', 'recurrence', ${task.id})`;
+  return id;
+}
+
+// Crash-safety net for the dream sweeper (step 5b): done recurring tasks with no recurrence
+// successor yet. Normally empty — upsertTask's own done-transition materializes inside the same
+// transaction as the completing update — this only finds work after a status='done' write that
+// bypassed upsertTask entirely. superseded_at is null excludes a corrected-away row from ever
+// spawning a fresh successor (tasks are out of scope for minime_correct today, so this cannot
+// currently happen, but the guard costs nothing and matches every other PARENTS-table read).
+export async function recurringTasksNeedingSuccessor(): Promise<RecurringTaskRow[]> {
+  return db()`
+    select t.id, t.title, t.body, t.due, t.goal_id, t.tier, t.recur_freq, t.recur_interval,
+           t.recur_anchor
+    from tasks t
+    where t.recur_freq is not null
+      and t.status = 'done'
+      and t.superseded_at is null
+      and not exists (
+        select 1 from tasks s where s.derived_from = t.id and s.source = 'recurrence'
+      )
+    order by t.completed_at nulls last, t.id` as any;
+}
+
 export async function upsertTask(
   t: {
     id?: string | null;
-    title: string;
+    title?: string | null;
     body?: string | null;
     status?: string | null;
     due?: string | null;
     goalId?: string | null;
+    // recur_freq is three-state like due/goalId below (undefined=keep, null=clear); recur_
+    // interval is plain coalesce (no clear semantic — meaningless without recur_freq, and the
+    // column is not-null so there is nothing to clear it TO). recurAnchor has no update path at
+    // all: minime_upsert_task never exposes it, so it is set once (create-time default from due,
+    // or an explicit override for internal/test callers) and never touched again.
+    recurFreq?: string | null;
+    recurInterval?: number | null;
+    recurAnchor?: string | null;
   } & Std,
-): Promise<{ id: string }> {
+): Promise<{ id: string; title: string; body: string | null }> {
   if (t.id) {
-    const [row] = await db()`
-      update tasks set title = ${t.title},
-                       body = coalesce(${t.body ?? null}, body),
-                       status = coalesce(${t.status ?? null}, status),
-                       due = coalesce(${t.due ?? null}, due),
-                       goal_id = coalesce(${t.goalId ?? null}, goal_id),
-                       completed_at = case when ${t.status ?? null} = 'done' then ${now()} else completed_at end
-      where id = ${t.id} returning id`;
-    if (!row) throw new TaskNotFoundError();
-    return row as any;
+    // Captured into a local: narrowing `t.id` from `if (t.id)` does not survive into the
+    // withDbTransaction closure below (TS drops property narrowing across a function boundary).
+    const taskId = t.id;
+    // due/goal_id/recur_freq are three-state at this boundary: undefined (key omitted) means
+    // KEEP, explicit null means CLEAR. coalesce() can't tell those apart (coalesce(null, col) is
+    // always "keep"), so the provided-flags carry the distinction into the SQL explicitly.
+    const dueProvided = t.due !== undefined;
+    const goalIdProvided = t.goalId !== undefined;
+    const recurFreqProvided = t.recurFreq !== undefined;
+    return withDbTransaction(async (tx) => {
+      // First SELECT (locking) the prior status: completing two concurrent "mark done" calls on
+      // the same row must materialize exactly one successor. The second call's SELECT blocks on
+      // this row lock until the first commits, then reads status='done' post-commit — so at most
+      // one caller ever observes a false->done transition for a given completion.
+      const [prior] = await tx`select status from tasks where id = ${taskId} for update`;
+      if (!prior) throw new TaskNotFoundError();
+      const wasDone = prior.status === "done";
+      const [row] = await tx`
+        update tasks set title = coalesce(${t.title ?? null}, title),
+                         body = coalesce(${t.body ?? null}, body),
+                         status = coalesce(${t.status ?? null}, status),
+                         due = case when ${dueProvided} then ${t.due ?? null}::date else due end,
+                         goal_id = case when ${goalIdProvided} then ${t.goalId ?? null}::uuid else goal_id end,
+                         recur_freq = case when ${recurFreqProvided} then ${t.recurFreq ?? null}::text else recur_freq end,
+                         recur_interval = coalesce(${t.recurInterval ?? null}::int, recur_interval),
+                         completed_at = case when ${t.status ?? null} = 'done' then ${now()}
+                                             when ${t.status ?? null}::text is not null then null
+                                             else completed_at end
+        where id = ${taskId}
+        returning id, title, body, status, due, goal_id, tier, recur_freq, recur_interval,
+                  recur_anchor, superseded_at`;
+      if (!row) throw new TaskNotFoundError();
+      if (!wasDone && row.status === "done" && row.superseded_at === null) {
+        await materializeRecurrence(row as RecurringTaskRow);
+      }
+      return row as any;
+    });
   }
   const id = crypto.randomUUID();
-  await db()`
-    insert into tasks (id, title, body, status, due, goal_id, created_by, source, derived_from, tier, completed_at)
-    values (${id}, ${t.title}, ${t.body ?? null}, ${t.status ?? "inbox"}, ${t.due ?? null}, ${t.goalId ?? null},
+  // Non-goal: no inbox-capture syntax for recurrence, so the only "on create" source for a
+  // phase anchor is the due date supplied in this same call.
+  const recurAnchor = t.recurAnchor ?? (t.recurFreq && t.due ? t.due : null);
+  const [row] = await db()`
+    insert into tasks (id, title, body, status, due, goal_id, created_by, source, derived_from, tier,
+                        completed_at, recur_freq, recur_interval, recur_anchor)
+    values (${id}, ${t.title ?? null}, ${t.body ?? null}, ${t.status ?? "inbox"}, ${t.due ?? null}, ${t.goalId ?? null},
             ${t.createdBy ?? "human"}, ${t.source ?? "manual"}, ${t.derivedFrom ?? null}, ${t.tier ?? 1},
-            ${t.status === "done" ? now() : null})`;
-  return { id };
+            ${t.status === "done" ? now() : null},
+            ${t.recurFreq ?? null}, ${t.recurInterval ?? 1}, ${recurAnchor}::date)
+    returning id, title, body`;
+  return row as any;
 }
 
 // An interaction attaches to EXACTLY ONE subject: a person OR an org (XOR enforced
@@ -1594,9 +2446,12 @@ export async function insertInteraction(
   // for the interaction's graph edge and the caller's receipt.
   const id = i.id ?? crypto.randomUUID();
   await db()`
-    insert into interactions (id, person_id, org_id, kind, summary, occurred_at, created_by, source, derived_from, tier)
+    insert into interactions
+      (id, person_id, org_id, kind, summary, occurred_at, created_by, source, derived_from,
+       supersedes_id, tier)
     values (${id}, ${i.personId ?? null}, ${i.orgId ?? null}, ${i.kind}, ${i.summary}, ${at},
-            ${i.createdBy ?? "human"}, ${i.source ?? "manual"}, ${i.derivedFrom ?? null}, ${i.tier ?? 2})`;
+            ${i.createdBy ?? "human"}, ${i.source ?? "manual"}, ${i.derivedFrom ?? null},
+            ${i.supersedesId ?? null}, ${i.tier ?? 2})`;
   if (i.personId) {
     await touchLastContact(i.personId, at);
     await db()`insert into edges
@@ -1626,6 +2481,10 @@ export async function insertPrinciple(
   return row as any;
 }
 
+// W3-13: insertCommitment's first production caller (minime_log_interaction's promise param)
+// needs full I5 provenance, so tier/derived_from are now persisted rather than silently dropped
+// -- the demo seed's own calls (fixtures/seed.ts) pass neither and keep defaulting to tier 1 /
+// no derivation, unchanged from before.
 export async function insertCommitment(
   c: {
     what: string;
@@ -1634,12 +2493,77 @@ export async function insertCommitment(
     status?: string;
   } & Std,
 ): Promise<{ id: string }> {
+  // Generate the identifier client-side, matching insertJournal/insertInteraction: a locked
+  // tier-2 INSERT is allowed (tier_write's WITH CHECK is unconditional), but PostgreSQL also
+  // applies the table's SELECT policy to a RETURNING row, and raises "new row violates row-level
+  // security policy" -- not a silent empty result -- when that check fails. minime_log_interaction's
+  // promise capture (036_commitment_update_grant.sql / interactions.ts) is the first caller that
+  // can hit this: it inserts a commitment at tier 2, the interaction's own tier, and a locked
+  // session's app_allowed_tier() is 1.
+  const id = crypto.randomUUID();
+  await db()`
+    insert into commitments (id, what, to_whom, due, status, created_by, source, derived_from, tier)
+    values (${id}, ${c.what}, ${c.toWhom}, ${c.due ?? null}, ${c.status ?? "open"},
+            ${c.createdBy ?? "human"}, ${c.source ?? "manual"}, ${c.derivedFrom ?? null},
+            ${c.tier ?? 1})`;
+  return { id };
+}
+
+export class CommitmentNotFoundError extends Error {
+  constructor() {
+    super("commitment not found");
+  }
+}
+
+export interface CommitmentRow {
+  id: string;
+  what: string;
+  to_whom: string;
+  due: string | Date | null;
+  status: string;
+  tier: number;
+}
+
+// id-only update: status/due are the only patchable fields -- what/to_whom are set once at
+// creation and immutable via this path, mirroring updateGoal's own horizon-is-immutable design
+// just below it. due is three-state like upsertTask's own due handling: omit the key to keep
+// the existing due date, pass an explicit null to clear it (a promise renegotiated open-ended).
+export async function updateCommitment(
+  id: string,
+  c: { status?: string | null; due?: string | null },
+): Promise<CommitmentRow> {
+  const dueProvided = c.due !== undefined;
   const [row] = await db()`
-    insert into commitments (what, to_whom, due, status, created_by, source)
-    values (${c.what}, ${c.toWhom}, ${c.due ?? null}, ${c.status ?? "open"},
-            ${c.createdBy ?? "human"}, ${c.source ?? "manual"})
-    returning id`;
+    update commitments set
+      status = coalesce(${c.status ?? null}, status),
+      due = case when ${dueProvided} then ${c.due ?? null}::date else due end
+    where id = ${id}
+    returning id, what, to_whom, due, status, tier`;
+  if (!row) throw new CommitmentNotFoundError();
   return row as any;
+}
+
+// Internal write-path lookups only: the canonical name of a person/org this SAME call just
+// ensured (ensurePerson/ensureOrg in minime_log_interaction's promise capture) -- this is
+// bookkeeping for a write this call already has authority over, not an agent-facing read. Routed
+// through the security-definer entity_canonical_name() (036_commitment_update_grant.sql), NOT a
+// plain `select canonical_name from people/orgs where id = ...`: an ordinary select is subject to
+// the CALLER's own tier_read RLS policy and would return zero rows for a locked caller reading
+// back a brand-new tier-2 subject it just minted in this very call (proven by
+// test/entity-tier-provenance.test.ts's restricted-role subprocess harness) -- resolvePerson/
+// resolveOrg have the identical problem for the same reason, one level up in application code.
+export async function personCanonicalName(id: string): Promise<string> {
+  const [row] = await db()`select entity_canonical_name('person', ${id}::uuid) as name`;
+  const name = row?.name as string | null | undefined;
+  if (name === null || name === undefined) throw new Error("person_not_found_for_canonical_name");
+  return name;
+}
+
+export async function orgCanonicalName(id: string): Promise<string> {
+  const [row] = await db()`select entity_canonical_name('org', ${id}::uuid) as name`;
+  const name = row?.name as string | null | undefined;
+  if (name === null || name === undefined) throw new Error("org_not_found_for_canonical_name");
+  return name;
 }
 
 export async function insertGoal(
@@ -1655,6 +2579,52 @@ export async function insertGoal(
     values (${g.horizon}, ${g.statement}, ${g.why ?? null}, ${g.parentId ?? null},
             ${g.createdBy ?? "human"}, ${g.source ?? "manual"})
     returning id`;
+  return row as any;
+}
+
+export class GoalNotFoundError extends Error {
+  constructor() {
+    super("goal not found");
+  }
+}
+
+export interface GoalRow {
+  id: string;
+  horizon: string;
+  statement: string;
+  why: string | null;
+  status: string;
+  parent_id: string | null;
+  tier: number;
+}
+
+// id-only update: every field is optional and, omitted, keeps its current value (plain
+// coalesce) -- the same "id-only means keep everything else" ergonomic upsertTask established,
+// so marking a goal achieved never requires resending its statement (do NOT replicate
+// upsertTask's own title-handling wart of indexing raw params instead of the stored row --
+// goals.ts reads the RETURNING values below back into indexParent, never params). horizon is
+// deliberately absent here: it is set once at creation and immutable via this path. parent_id is
+// the one three-state field (undefined keeps, explicit null clears), matching upsertTask's own
+// due/goal_id handling.
+export async function updateGoal(
+  id: string,
+  g: {
+    statement?: string | null;
+    why?: string | null;
+    status?: string | null;
+    parentId?: string | null;
+  },
+): Promise<GoalRow> {
+  const parentIdProvided = g.parentId !== undefined;
+  const [row] = await db()`
+    update goals set
+      statement = coalesce(${g.statement ?? null}, statement),
+      why = coalesce(${g.why ?? null}, why),
+      status = coalesce(${g.status ?? null}, status),
+      parent_id = case when ${parentIdProvided} then ${g.parentId ?? null}::uuid else parent_id end
+    where id = ${id}
+    returning id, horizon, statement, why, status, parent_id, tier`;
+  if (!row) throw new GoalNotFoundError();
   return row as any;
 }
 
@@ -1769,9 +2739,12 @@ export async function upsertPage(
   if (!existing) {
     const id = crypto.randomUUID();
     await db()`
-      insert into pages (id, path, title, body_md, content_hash, tier, created_by, source, derived_from)
+      insert into pages
+        (id, path, title, body_md, content_hash, tier, created_by, source, derived_from,
+         supersedes_id)
       values (${id}, ${p.path}, ${p.title}, ${p.bodyMd}, ${p.contentHash}, ${incomingTier},
-              ${p.createdBy ?? "human"}, ${p.source ?? "brain-sync"}, ${p.derivedFrom ?? null})`;
+              ${p.createdBy ?? "human"}, ${p.source ?? "brain-sync"}, ${p.derivedFrom ?? null},
+              ${p.supersedesId ?? null})`;
     return { id, changed: true, created: true };
   }
   const existingTier = Number(existing.tier);
@@ -2272,6 +3245,99 @@ export async function withCompiledNoteTargetLease<T>(
   );
 }
 
+// Single-maintenance-owner coordination (W3-5): every resident `serve` calls
+// tryAcquireMaintenanceLock() before scheduling dream/backup; only the winner runs them. Unlike
+// withCompiledNotesLease's pg_advisory_lock (blocks until free, held only for one `work()` call),
+// this is pg_try_advisory_lock (returns immediately) on a dedicated reserved connection the
+// caller keeps for as long as it owns maintenance. The lock is released explicitly via
+// releaseMaintenanceLock(), or automatically by Postgres if the holding connection/process dies —
+// so a crashed owner cannot deadlock a survivor's takeover retry.
+const MAINTENANCE_LOCK_KEY = [1296649541, 2] as const;
+// Inbox watcher ownership (runtime child). Distinct from compiled-notes (1) and maintenance (2)
+// so a supervisor that already holds dream/backup does not also pin the child's watcher slot,
+// and a second MCP child can take over watching if the first child dies.
+const WATCHER_LOCK_KEY = [1296649541, 3] as const;
+
+type AdvisoryLockKey = readonly [number, number];
+
+export interface MaintenanceLockHandle {
+  readonly reservation: DbReservation;
+}
+
+export type WatcherLockHandle = MaintenanceLockHandle;
+
+async function tryAcquireAdvisoryLock(key: AdvisoryLockKey): Promise<DbReservation | null> {
+  const reservation = await reserveDb();
+  // The query runs on a reservation the caller doesn't own yet (unlike withReservedDb's
+  // single-call try/finally, this reservation is meant to outlive the function on success), so a
+  // throw here needs its own release-before-rethrow -- otherwise a mid-query failure (Postgres
+  // restart, backend termination) leaks the reservation forever and eventually starves the pool.
+  try {
+    const [row] = (await reservation.executor`
+      select pg_try_advisory_lock(${key[0]}, ${key[1]}) as locked
+    `) as { locked: boolean }[];
+    if (row?.locked) return reservation;
+  } catch (error) {
+    await reservation.release();
+    throw error;
+  }
+  await reservation.release();
+  return null;
+}
+
+async function releaseAdvisoryLock(
+  reservation: DbReservation,
+  key: AdvisoryLockKey,
+): Promise<void> {
+  try {
+    await reservation.executor`select pg_advisory_unlock(${key[0]}, ${key[1]})`;
+  } finally {
+    await reservation.release();
+  }
+}
+
+async function advisoryLockHeld(key: AdvisoryLockKey): Promise<boolean> {
+  const rows = await db()`
+    select 1 from pg_locks
+    where locktype = 'advisory' and granted
+      and classid = ${key[0]} and objid = ${key[1]}
+    limit 1`;
+  return rows.length > 0;
+}
+
+/** Non-blocking: resolves a handle when the caller becomes the maintenance owner, else null. */
+export async function tryAcquireMaintenanceLock(): Promise<MaintenanceLockHandle | null> {
+  const reservation = await tryAcquireAdvisoryLock(MAINTENANCE_LOCK_KEY);
+  return reservation ? { reservation } : null;
+}
+
+/** Release a handle from tryAcquireMaintenanceLock() and return its connection to the pool. */
+export async function releaseMaintenanceLock(handle: MaintenanceLockHandle): Promise<void> {
+  await releaseAdvisoryLock(handle.reservation, MAINTENANCE_LOCK_KEY);
+}
+
+// `minime doctor` (W3-7): true when SOME process (any backend, not necessarily the caller) holds
+// the maintenance lock right now -- pg_locks is a system view, readable regardless of who granted
+// it, so this answers "is anything currently scheduled to run dream/backup" without taking or
+// releasing the lock itself.
+export async function maintenanceLockHeld(): Promise<boolean> {
+  return advisoryLockHeld(MAINTENANCE_LOCK_KEY);
+}
+
+/** Non-blocking: resolves a handle when this runtime child should own the inbox watcher. */
+export async function tryAcquireWatcherLock(): Promise<WatcherLockHandle | null> {
+  const reservation = await tryAcquireAdvisoryLock(WATCHER_LOCK_KEY);
+  return reservation ? { reservation } : null;
+}
+
+export async function releaseWatcherLock(handle: WatcherLockHandle): Promise<void> {
+  await releaseAdvisoryLock(handle.reservation, WATCHER_LOCK_KEY);
+}
+
+export async function watcherLockHeld(): Promise<boolean> {
+  return advisoryLockHeld(WATCHER_LOCK_KEY);
+}
+
 export async function listActivePages(actor?: AccessActor): Promise<any[]> {
   const allowed = await allowedTier(actor);
   return db()`select id, path, title, content_hash, tier from pages
@@ -2280,8 +3346,14 @@ export async function listActivePages(actor?: AccessActor): Promise<any[]> {
 
 // ---------------------------------------------------------------- mirrors (importers write-only)
 
+// One row per expanded occurrence (migration 031): identity is (uid, occurrence_start), not
+// uid alone, so a recurring event's weekly/monthly/yearly instances coexist as separate rows.
+// occurrenceStart is always the same instant as startsAt for the importer today -- the two
+// columns are kept distinct in the schema so a future single-instance edit (move just this
+// Tuesday's meeting) could change starts_at without changing the row's recurrence identity.
 export async function upsertCalendarEvent(e: {
   uid: string;
+  occurrenceStart: Date;
   startsAt: Date;
   endsAt?: Date | null;
   title: string;
@@ -2289,14 +3361,34 @@ export async function upsertCalendarEvent(e: {
   attendees?: unknown;
 }): Promise<boolean> {
   const rows = await db()`
-    insert into calendar_events (uid, starts_at, ends_at, title, location, attendees, created_by, source, tier)
-    values (${e.uid}, ${e.startsAt}, ${e.endsAt ?? null}, ${e.title}, ${e.location ?? null},
+    insert into calendar_events (uid, occurrence_start, starts_at, ends_at, title, location, attendees, created_by, source, tier)
+    values (${e.uid}, ${e.occurrenceStart}, ${e.startsAt}, ${e.endsAt ?? null}, ${e.title}, ${e.location ?? null},
             ${e.attendees ? db().json(e.attendees as any) : null}, 'importer:calendar', 'importer:calendar', 1)
-    on conflict (uid) do update
+    on conflict (uid, occurrence_start) do update
       set starts_at = excluded.starts_at, ends_at = excluded.ends_at, title = excluded.title,
           location = excluded.location, attendees = excluded.attendees
     returning (xmax = 0) as inserted`;
   return Boolean(rows[0]?.inserted);
+}
+
+// Deletes this uid's mirror rows that the importer no longer produces, scoped to
+// occurrence_start >= fromInstant (the current import's window start) so past occurrences --
+// which the importer never re-generates on a later import -- are structurally untouched no
+// matter what keepInstants contains. Safe to call for every imported uid (recurring or not):
+// keepInstants=[] correctly clears every future row for a uid whose recurrence disappeared
+// entirely from the latest export.
+export async function deleteCalendarOccurrencesNotIn(
+  uid: string,
+  fromInstant: Date,
+  keepInstants: Date[],
+): Promise<number> {
+  const rows = await db()`
+    delete from calendar_events
+    where uid = ${uid}
+      and occurrence_start >= ${fromInstant}
+      and not (occurrence_start = any(${db().array(keepInstants)}))
+    returning id`;
+  return rows.length;
 }
 
 export async function insertTransaction(t: {
@@ -2307,18 +3399,121 @@ export async function insertTransaction(t: {
   category?: string | null;
   accountLabel: string;
   externalRef: string;
+  // W4-6 (minime_log_expense): an explicit id lets a caller know a row's id BEFORE this INSERT
+  // ever runs. That is required, not cosmetic -- minime_app has INSERT-only privilege on
+  // `transactions` (021_runtime_app_role.sql; 040_transactions_note.sql adds no grant), and
+  // Postgres requires SELECT privilege for RETURNING output on INSERT, not just INSERT itself.
+  // So this function can never add `returning id` and stay callable from an actor-scoped MCP
+  // tool handler -- the id must already be known by the caller. Omit it to keep the importer's
+  // exact prior behavior (gen_random_uuid() default).
+  id?: string;
+  // I5 provenance overrides -- default to the importer's own long-standing literals so every
+  // existing caller (src/importers/transactions.ts) is byte-for-byte unaffected.
+  createdBy?: string;
+  source?: string;
+  note?: string | null;
 }): Promise<boolean> {
+  const createdBy = t.createdBy ?? "importer:transactions";
+  const source = t.source ?? "importer:transactions";
+  const insertOnce = (executor: DbExecutor) =>
+    t.id !== undefined
+      ? executor`
+          insert into transactions (id, occurred_at, amount_cents, currency, merchant, category,
+                                    account_label, external_ref, created_by, source, note, tier)
+          values (${t.id}, ${t.occurredAt}, ${String(t.amountCents)}::bigint, ${t.currency},
+                  ${t.merchant ?? null}, ${t.category ?? null}, ${t.accountLabel}, ${t.externalRef},
+                  ${createdBy}, ${source}, ${t.note ?? null}, 0)`
+      : executor`
+          insert into transactions (occurred_at, amount_cents, currency, merchant, category,
+                                    account_label, external_ref, created_by, source, note, tier)
+          values (${t.occurredAt}, ${String(t.amountCents)}::bigint, ${t.currency},
+                  ${t.merchant ?? null}, ${t.category ?? null}, ${t.accountLabel}, ${t.externalRef},
+                  ${createdBy}, ${source}, ${t.note ?? null}, 0)`;
   try {
-    await db()`
-      insert into transactions (occurred_at, amount_cents, currency, merchant, category,
-                                account_label, external_ref, created_by, source, tier)
-      values (${t.occurredAt}, ${String(t.amountCents)}::bigint, ${t.currency}, ${t.merchant ?? null}, ${t.category ?? null},
-              ${t.accountLabel}, ${t.externalRef}, 'importer:transactions', 'importer:transactions', 0)`;
+    // W4-6: minime_log_expense calls this from inside withActorDbSession's transaction, where a
+    // bare insert is unsafe to catch-and-continue from. postgres.js's sql.begin() subscribes to
+    // EVERY query issued against the transaction independently of any local try/catch
+    // (node_modules/postgres/src/index.js's per-scope `uncaughtError` tracking) -- so even though
+    // this function's own catch below handles a 23505 locally, the ENCLOSING transaction would
+    // still be silently aborted and rolled back at commit time, and callers upstream of THIS
+    // function would still see the query's rejection surface at the transaction boundary.
+    // Isolating the insert in its own savepoint contains that rollback to just this statement.
+    // hasDbTransaction() is false on the importer's own top-level calls (no actor-scoped
+    // transaction there), so that path stays a plain autocommit statement, byte-for-byte as
+    // before.
+    if (hasDbTransaction()) {
+      await (db() as DbTransaction).savepoint((sql) => insertOnce(sql));
+    } else {
+      await insertOnce(db());
+    }
     return true;
   } catch (error) {
     if ((error as { code?: string }).code === "23505") return false;
     throw error;
   }
+}
+
+// W4-6: does an 'agent-log' (minime_log_expense) row already exist for this exact date+amount?
+// Used by the CSV importer to flag a same-day, same-amount bank transaction for owner review
+// instead of silently double-counting a cash expense the owner already logged by hand. id-only
+// (I3-safe, "row IDs are fine" per CLAUDE.md) -- never selects merchant/category/note. Callers
+// outside an already-elevated admin scope MUST wrap this in withAdminDbScope: it is a genuine
+// SELECT on `transactions`, and minime_app has no SELECT grant on that table (see insertTransaction
+// above) -- never call this from an MCP tool handler's ordinary actor-scoped session.
+export async function findAgentLoggedTxMatch(
+  occurredAt: string,
+  amountCents: bigint | number,
+): Promise<{ id: string } | null> {
+  const [row] = await db()`
+    select id::text as id from transactions
+    where account_label = 'agent-log' and occurred_at = ${occurredAt}::date
+      and amount_cents = ${String(amountCents)}::bigint
+    limit 1`;
+  return row ? { id: String(row.id) } : null;
+}
+
+export interface TransactionRecategorizeResult {
+  scanned: number;
+  recategorized: number;
+}
+
+/**
+ * W4-7 recategorize-transactions repair (scripts/repairs/recategorize-transactions.ts). Re-applies
+ * config/tx-categories.json's current rules (src/util/tx-categories.ts -- pure rule matching, no
+ * SQL there) to existing rows: category-null rows only by default ("fill gaps"), or every row
+ * when includeAll is set (an owner-requested repass after editing the rules file). Only rows whose
+ * resolved category actually changes are written; `merchant` is read into process memory only
+ * long enough for applyCategoryRules to decide a match and is never placed in the returned result
+ * (I3: never log, print, or snapshot tier-0 row contents -- counts only, like findAgentLoggedTxMatch
+ * above stays id-only).
+ *
+ * Wraps its own transaction (withDbTransaction, same composing pattern as restoreEntityTier
+ * below), so it works whether called bare or nested inside scripts/repair.ts's own
+ * withAdminDbTransaction. Either way this must actually run on the owner/control-plane connection
+ * to succeed: minime_app has insert-only on `transactions` (see insertTransaction's doc above), so
+ * a caller that skipped the admin wrap fails closed at the database rather than silently
+ * SELECTing/UPDATEing as the restricted app role.
+ */
+export async function recategorizeTransactions(
+  rules: readonly TxCategoryRule[],
+  includeAll: boolean,
+): Promise<TransactionRecategorizeResult> {
+  return withDbTransaction(async (tx) => {
+    const rows = await tx`
+      select id::text as id, merchant, category from transactions
+      where category is null or ${includeAll}`;
+    let recategorized = 0;
+    for (const row of rows) {
+      const merchant = row.merchant === null ? null : String(row.merchant);
+      const current = row.category === null ? null : String(row.category);
+      const next = applyCategoryRules(merchant, current, rules);
+      if (next !== null && next !== current) {
+        await tx`update transactions set category = ${next} where id = ${row.id}`;
+        recategorized++;
+      }
+    }
+    return { scanned: rows.length, recategorized };
+  });
 }
 
 export async function insertHealthSample(h: {
@@ -2361,6 +3556,164 @@ export async function tableCount(
 ): Promise<number> {
   const [r] = await db()`select count(*)::int as n from ${db()(table)}`;
   return r!.n;
+}
+
+// ---------------------------------------------------------------- owner-CLI tier-0 reads (W4-5)
+// Every function below is reachable ONLY from src/cli.ts (`tx list` / `health list`), never from
+// src/mcp/tools/ — I2's "one door" plus I3's tier-0 floor mean raw transaction/health rows must
+// never reach agent/MCP context on any path. Callers run these inside withAdminDbTransaction so
+// db() resolves to the owner DSN (config.databaseUrl) — the exact connection insertTransaction/
+// insertHealthSample above already write through — and the owner role bypasses RLS, so unlike
+// every MCP-facing read in this file there is no tier predicate to append (both tables are tier 0
+// unconditionally; there is no ceiling to filter against). src/cli.ts alone is responsible for
+// ever printing a row either function returns, and only to a real interactive terminal —
+// DECISIONS.md 2026-08-10, a recorded, narrowly-scoped exception to CLAUDE.md's "never log,
+// print, or snapshot tier-0 contents".
+
+export interface Tier0TransactionRow {
+  id: string;
+  occurredAt: string;
+  amountCents: string;
+  currency: string;
+  merchant: string | null;
+  category: string | null;
+}
+
+export interface Tier0HealthSampleRow {
+  id: string;
+  kind: string;
+  at: string;
+  value: string;
+  unit: string;
+}
+
+const TIER0_CLI_YEAR_MONTH_RE = /^\d{4}-\d{2}$/;
+const TIER0_CLI_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const TIER0_CLI_HEALTH_KIND_RE = /^[a-z][a-z0-9_]{0,63}$/;
+const TIER0_CLI_MAX_LIMIT = 500;
+const TIER0_CLI_DEFAULT_LIMIT = 100;
+// Any real, valid date works here — it is only ever bound on the dead side of a boolean-gated
+// OR (see listHealthSamples), never actually compared against.
+const TIER0_CLI_DUMMY_DATE = "1970-01-01";
+
+function tier0CliMonthRange(month: string): { start: string; end: string } {
+  if (!TIER0_CLI_YEAR_MONTH_RE.test(month)) throw new Error("month_invalid");
+  const year = Number(month.slice(0, 4));
+  const monthNum = Number(month.slice(5, 7));
+  if (monthNum < 1 || monthNum > 12) throw new Error("month_invalid");
+  const start = `${month}-01`;
+  const end =
+    monthNum === 12 ? `${year + 1}-01-01` : `${year}-${String(monthNum + 1).padStart(2, "0")}-01`;
+  return { start, end };
+}
+
+function tier0CliLimit(limit: number | undefined): number {
+  if (limit === undefined) return TIER0_CLI_DEFAULT_LIMIT;
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("limit_invalid");
+  return Math.min(limit, TIER0_CLI_MAX_LIMIT);
+}
+
+// A real calendar-valid "YYYY-MM-DD", not just the right shape — rejects e.g. "2026-02-30" by
+// round-tripping through Date.UTC and checking the components survived, so a typo'd --from/--to
+// fails cleanly here rather than reaching a `::date` cast and echoing the owner's own (harmless,
+// but ugly) typo back through an uncaught Postgres error.
+function tier0CliValidDate(value: string): boolean {
+  if (!TIER0_CLI_DATE_RE.test(value)) return false;
+  const [y, m, d] = value.split("-").map(Number) as [number, number, number];
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+
+// Escapes LIKE/ILIKE metacharacters so e.g. a literal "100%_off" search string matches that exact
+// substring instead of "%"/"_" being read as wildcards. Postgres's default LIKE escape character
+// is backslash, so no explicit ESCAPE clause is needed alongside this.
+function tier0CliEscapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+/**
+ * Owner-terminal-only tier-0 read (`tx list`, src/cli.ts) — see section header above. `month` is
+ * "YYYY-MM"; `match` filters merchant/category by case-insensitive substring (rows with a null
+ * merchant AND category still pass a limit-only call — the boolean-gated predicate below never
+ * evaluates the ilike side of the OR at all when no match was requested, so nullable columns
+ * cannot silently drop a row from the unfiltered listing); `limit` defaults to 100 and is clamped
+ * to 500.
+ */
+export async function listTransactions(opts: {
+  month: string;
+  match?: string;
+  limit?: number;
+}): Promise<Tier0TransactionRow[]> {
+  const { start, end } = tier0CliMonthRange(opts.month);
+  const limit = tier0CliLimit(opts.limit);
+  const noMatchFilter = opts.match === undefined;
+  const pattern = noMatchFilter ? "" : `%${tier0CliEscapeLikePattern(opts.match!)}%`;
+  const rows = await db()`
+    select id::text as id, occurred_at::text as occurred_at, amount_cents::text as amount_cents,
+           currency, merchant, category
+    from transactions
+    where occurred_at >= ${start}::date and occurred_at < ${end}::date
+      and (${noMatchFilter} or merchant ilike ${pattern} or category ilike ${pattern})
+    order by occurred_at asc, id asc
+    limit ${limit}`;
+  // postgres.js never auto-camelCases column names (matches pendingTier2UnlockRequests' own
+  // explicit .map() above) — occurred_at/amount_cents must be renamed by hand, not cast blind.
+  return rows.map((row) => ({
+    id: String(row.id),
+    occurredAt: String(row.occurred_at),
+    amountCents: String(row.amount_cents),
+    currency: String(row.currency),
+    merchant: row.merchant === null ? null : String(row.merchant),
+    category: row.category === null ? null : String(row.category),
+  }));
+}
+
+/**
+ * Owner-terminal-only tier-0 read (`health list`, src/cli.ts) — see section header above. `kind`
+ * is an exact match against health_samples.kind; `from`/`to` are inclusive local-calendar-date
+ * bounds in the configured owner time zone (the same "(at at time zone $tz)::date" convention
+ * 027_life_metrics_seed.sql's metric_defs.agg_sql already uses); `limit` defaults to 100 and is
+ * clamped to 500.
+ */
+export async function listHealthSamples(opts: {
+  kind: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+}): Promise<Tier0HealthSampleRow[]> {
+  if (!TIER0_CLI_HEALTH_KIND_RE.test(opts.kind)) throw new Error("kind_invalid");
+  const limit = tier0CliLimit(opts.limit);
+  const noFromFilter = opts.from === undefined;
+  if (!noFromFilter && !tier0CliValidDate(opts.from!)) throw new Error("from_invalid");
+  const noToFilter = opts.to === undefined;
+  if (!noToFilter && !tier0CliValidDate(opts.to!)) throw new Error("to_invalid");
+  // The boolean gate below means this value is never actually compared against when unset, but
+  // it still has to bind as SOME real date: the placeholder sits directly under an explicit
+  // ::date cast, so Postgres's parameter-type inference marks it `date` regardless of what value
+  // is bound, and postgres.js's date serializer throws (RangeError: Invalid Date) on an empty
+  // string rather than passing it through as literal text.
+  const fromBound = opts.from ?? TIER0_CLI_DUMMY_DATE;
+  const toBound = opts.to ?? TIER0_CLI_DUMMY_DATE;
+  const tz = configuredTimeZone();
+  const rows = await db()`
+    select id::text as id, kind, (at at time zone ${tz})::text as at, value::text as value, unit
+    from health_samples
+    where kind = ${opts.kind}
+      and (${noFromFilter} or (at at time zone ${tz})::date >= ${fromBound}::date)
+      and (${noToFilter} or (at at time zone ${tz})::date <= ${toBound}::date)
+    order by at asc, id asc
+    limit ${limit}`;
+  // postgres.js never auto-camelCases column names — this cast is trivially correct today only
+  // because none of these columns needed a rename, and is written explicitly (not a blind cast)
+  // so a future added column here fails loudly instead of silently mismatching, as
+  // listTransactions above just needed to be fixed to do.
+  return rows.map((row) => ({
+    id: String(row.id),
+    kind: String(row.kind),
+    at: String(row.at),
+    value: String(row.value),
+    unit: String(row.unit),
+  }));
 }
 
 // ---------------------------------------------------------------- inbox & review queue
@@ -2488,6 +3841,32 @@ export async function claimInboxItem(id: string): Promise<InboxClaim | null> {
       and tier >= 1 and tier <= app_allowed_tier()
       and (
         (status = 'pending' and classifier_output is null)
+        or
+        (status = 'processing'
+          and claimed_at <= clock_timestamp() - interval '5 minutes')
+      )
+    returning *`;
+  return row ? { item: inboxItem(row), token } : null;
+}
+
+/**
+ * Claim a pending item for OWNER-DRIVEN manual refiling (minime_refile), regardless of whether
+ * it was already classified. claimInboxItem's 'pending' branch deliberately requires
+ * classifier_output IS NULL, mirroring retryableInboxItems(): an already-classified pending row
+ * (every inbox_unfiled/duplicate review-queue item, per setInboxPendingClaimed) is left for the
+ * owner rather than auto-retried, so claimInboxItem can never claim it. This sibling drops only
+ * that restriction; the stale-processing branch is identical, so a live concurrent claim (fresh
+ * claimed_at, any worker) still fences this exactly as claimInboxItem does.
+ */
+export async function claimPendingInboxItemForRefile(id: string): Promise<InboxClaim | null> {
+  const token = crypto.randomUUID();
+  const [row] = await db()`
+    update inbox_items
+    set status = 'processing', claim_token = ${token}, claimed_at = clock_timestamp()
+    where id = ${id}
+      and tier >= 1 and tier <= app_allowed_tier()
+      and (
+        status = 'pending'
         or
         (status = 'processing'
           and claimed_at <= clock_timestamp() - interval '5 minutes')
@@ -2671,7 +4050,315 @@ export async function resolveReviewItem(
   await db()`update review_queue set status = ${status}, resolved_at = ${now()} where id = ${id}`;
 }
 
+/**
+ * Auto-resolve any open inbox_unfiled/duplicate review-queue items that point at an inbox item
+ * which has just been filed (minime_refile). Scoped to exactly these two kinds — the only ones
+ * whose payload carries inbox_item_id (review-queue.ts) — so this can never resolve an unrelated
+ * flag (contradiction/stale/decision_review/phantom_person/extract_suspect) by accident.
+ */
+export async function resolveOpenReviewItemsForInbox(inboxItemId: string): Promise<string[]> {
+  const rows = await db()`
+    update review_queue
+    set status = 'resolved', resolved_at = ${now()}
+    where status = 'open'
+      and kind in ('inbox_unfiled', 'duplicate')
+      and payload ->> 'inbox_item_id' = ${inboxItemId}
+    returning id`;
+  return rows.map((row) => String(row.id));
+}
+
+// ---------------------------------------------------------------- entity tier restore (W4-2)
+
+export interface PendingEntityPromotion {
+  id: string;
+  entityType: EntityKind;
+  entityId: string;
+  name: string;
+  createdAt: Date;
+}
+
+/**
+ * Owner-terminal-only listing (`entity:restore-tier --list`, src/cli.ts) — resolves each open
+ * entity_promotion item's CURRENT name directly, unlike the MCP tool (review-queue.ts), which
+ * masks it behind the caller's own tier. Never call this from an MCP tool handler. An item whose
+ * entity has since been removed/retyped out from under it is skipped, not crashed on, so one
+ * stale row can never break the whole listing.
+ *
+ * MUST be called inside withAdminDbTransaction/withAdminDbScope (as the CLI does). Every item
+ * here points at a tier-2 person/org, and both tables' `tier_read` RLS policy (007_rls.sql,
+ * 008_orgs.sql) resolves app_allowed_tier() to 1 with no live unlock — on the restricted
+ * minime_app role (an installed deployment's default runtime pool) that makes each per-item
+ * select return zero rows, and `if (!row) continue` below drops it silently rather than erroring.
+ * Regression coverage: test/entity-tier-restore.test.ts's mintTestAppRole-based CLI-subprocess
+ * test.
+ */
+export async function pendingEntityPromotions(): Promise<PendingEntityPromotion[]> {
+  const out: PendingEntityPromotion[] = [];
+  for (const item of await openReviewItems("entity_promotion")) {
+    const entityType = item.payload?.entity_type;
+    const entityId = item.payload?.entity_id;
+    if (entityType !== "person" && entityType !== "org") continue;
+    if (typeof entityId !== "string") continue;
+    const table = entityType === "person" ? "people" : "orgs";
+    const [row] = await db()`
+      select canonical_name from ${db()(table)} where id = ${entityId}::uuid`;
+    if (!row) continue;
+    out.push({
+      id: String(item.id),
+      entityType,
+      entityId,
+      name: String(row.canonical_name),
+      createdAt: new Date(item.created_at),
+    });
+  }
+  return out;
+}
+
+export interface EntityTierRestoreResult {
+  entityType: EntityKind;
+  entityId: string;
+  resolvedReviewItemId: string | null;
+}
+
+/**
+ * Owner-CLI-only 2->1 demotion (`entity:restore-tier`, src/cli.ts — never exposed through any
+ * MCP tool: demotion approval lives in the owner terminal, DECISIONS.md 2026-08-09). Sets the
+ * transaction-local `minime.allow_tier_demotion` GUC the guarded trigger
+ * (037_identity_content_tier_split.sql's keep_entity_tier_guarded) requires, then demotes ONLY
+ * the person/org row's own tier — any alias or edge minted BY a tier-2 extraction stays tier 2.
+ * That is a deliberate limitation, not a bug: a demoted identity card becomes tier-1-readable
+ * again, but content genuinely derived from tier-2 prose about it does not silently follow.
+ * Resolves the matching open entity_promotion item, if any, and audits with the entity id only —
+ * never its name.
+ *
+ * Wraps its own transaction (withDbTransaction), so it composes correctly whether called bare
+ * (opens a fresh one on whatever pool is ambient) or nested inside an outer
+ * withAdminDbTransaction (the CLI's own wrap, reused transparently). Either way this must
+ * actually run on the owner/control-plane connection to succeed: the SQL trigger itself refuses
+ * a minime_app-role demotion attempt even with the GUC set, so a caller that skipped the CLI's
+ * admin wrap fails closed at the database — entity_tier_demotion_forbidden — rather than
+ * silently succeeding as the app role.
+ */
+export async function restoreEntityTier(
+  entityType: EntityKind,
+  entityId: string,
+  restoredBy = "owner:cli",
+): Promise<EntityTierRestoreResult> {
+  if (entityType !== "person" && entityType !== "org") throw new Error("entity_kind_invalid");
+  const table = entityType === "person" ? "people" : "orgs";
+  return withDbTransaction(async (tx) => {
+    const [existing] = await tx`select tier from ${tx(table)} where id = ${entityId}::uuid`;
+    if (!existing) throw new Error("entity_not_found");
+    if (Number(existing.tier) !== 2) throw new Error("entity_not_tier_two");
+
+    await tx`select set_config('minime.allow_tier_demotion', '1', true)`;
+    const demoted = await tx`
+      update ${tx(table)} set tier = 1
+      where id = ${entityId}::uuid and tier = 2
+      returning id`;
+    // Defensive: the precheck above already refuses anything but a live tier-2 row, so this can
+    // only fire on a genuine concurrent change between the two statements.
+    if (demoted.length === 0) throw new Error("entity_not_tier_two");
+
+    const [openItem] = await tx`
+      select id from review_queue
+      where kind = 'entity_promotion' and status = 'open'
+        and payload ->> 'entity_id' = ${entityId}
+      order by created_at limit 1`;
+    let resolvedReviewItemId: string | null = null;
+    if (openItem) {
+      await resolveReviewItem(String(openItem.id), "resolved");
+      resolvedReviewItemId = String(openItem.id);
+    }
+
+    await logEvent({
+      actor: restoredBy,
+      verb: "entity:tier:restored",
+      payload: auditPayload.entityTierRestored({ entityType, entityId }),
+    });
+    return { entityType, entityId, resolvedReviewItemId };
+  });
+}
+
 // ---------------------------------------------------------------- state snapshot
+
+// inbox_items.filed_table (the raw SQL table name fileRow/refile.ts just filed into) -> the
+// ParentType parentMeta expects. Fixed map, not user input; mirrors refile.ts's own SOURCE_TYPE
+// (a different layer, same five destinations — pipeline/watcher.ts's FiledTable is the closed
+// set fileRow ever produces). Kept local to this file rather than imported/exported: repo.ts
+// must not depend on src/pipeline or src/mcp/tools (layering).
+const FILED_TABLE_PARENT_TYPE: Record<string, ParentType> = {
+  tasks: "task",
+  journal_entries: "journal",
+  pages: "page",
+  interactions: "interaction",
+  decisions: "decision",
+};
+
+// Mirrors review-queue.ts's HIDDEN sentinel. Duplicated rather than imported: repo.ts must not
+// depend on src/mcp/tools (layering), and stateSnapshot is the one place that needs it here.
+const FILING_HIDDEN_TITLE = "[above current tier]";
+// Mirrors review-queue.ts's RETRACTED sentinel, for the identical reason it exists there:
+// parentMeta excludes retracted rows (superseded_at set, superseded_by null) for EVERY caller
+// regardless of tier (see the comment on parentMeta above), so a parentMeta miss alone can't tell
+// "above current tier" apart from "withdrawn via minime_correct retract". Collapsing both into
+// FILING_HIDDEN_TITLE would tell the owner a same-day filing still needs a tier-2 unlock when it
+// has already been corrected and needs nothing — defeating the point of the evening classifier
+// audit (W2-8's stated purpose). resolveFiledToday re-checks every parentMeta miss through getRow
+// (tier bound only, no retraction filter) to tell the two apart, exactly as review-queue.ts's
+// visibleTitle does for the sibling case.
+const FILING_RETRACTED_TITLE = "[retracted]";
+
+export interface FiledTodayEntry {
+  id: string; // inbox_items.id (the capture)
+  type: ParentType | null; // resolved via FILED_TABLE_PARENT_TYPE; null only for an unrecognized filed_table
+  filed_table: string;
+  filed_id: string;
+  kind: string | null; // classifier_output->>'type' — the classifier's own guess, unmasked (tier 1: inbox_items is always tier 1)
+  confidence: number | null;
+  // Resolved through parentMeta at the caller's tier. FILING_HIDDEN_TITLE when the destination
+  // row is genuinely above the caller's tier; FILING_RETRACTED_TITLE when the row is visible but
+  // was withdrawn via minime_correct (retract) — see resolveFiledToday for how the two misses are
+  // told apart.
+  title: string;
+  // The destination row's actual tier — populated whenever the row is visible to the caller,
+  // including a retracted-but-visible row (retraction is not a tier fact); null only when the row
+  // is genuinely above the caller's current tier.
+  tier: number | null;
+}
+
+interface FiledTodayRow {
+  id: string;
+  filed_table: string | null;
+  filed_id: string | null;
+  kind: string | null;
+  confidence: number | null;
+}
+
+/**
+ * Resolve each today-filed capture's destination title/tier through the SAME tier-filtered
+ * parentMeta every other title lookup uses — never from classifier_output (which is unmasked
+ * inbox metadata and may describe tier-2-grade content the caller cannot see). A filing whose
+ * destination is above the caller's tier keeps kind/confidence/filed_table (all inbox_items
+ * metadata, always tier 1) but its title reads FILING_HIDDEN_TITLE and tier is null.
+ *
+ * parentMeta also excludes retracted rows (superseded_at set, superseded_by null) for every
+ * caller, tier notwithstanding, so a parentMeta miss by itself is ambiguous between "above tier"
+ * and "retracted". Every miss is re-checked through getRow — same tier bound, no retraction
+ * filter, exactly as review-queue.ts's visibleTitle does — so a getRow hit proves tier was never
+ * the issue and reports FILING_RETRACTED_TITLE with the row's real tier instead of a false
+ * FILING_HIDDEN_TITLE that would send the owner toward an unneeded tier-2 unlock.
+ */
+async function resolveFiledToday(
+  rows: FiledTodayRow[],
+  actor: AccessActor,
+): Promise<FiledTodayEntry[]> {
+  if (rows.length === 0) return [];
+  const idsByType = new Map<ParentType, Set<string>>();
+  for (const r of rows) {
+    const type = r.filed_table ? FILED_TABLE_PARENT_TYPE[r.filed_table] : undefined;
+    if (!type || !r.filed_id) continue;
+    if (!idsByType.has(type)) idsByType.set(type, new Set());
+    idsByType.get(type)!.add(r.filed_id);
+  }
+  const meta = new Map<string, ParentMeta>();
+  for (const [type, ids] of idsByType) {
+    for (const [id, m] of await parentMeta(type, [...ids], actor)) {
+      meta.set(`${type}:${id}`, m);
+    }
+  }
+  // Second pass: only for parentMeta misses, ask getRow (tier bound only) whether the row is
+  // actually visible. A hit here is a retracted-but-visible row; a miss on both is genuinely
+  // above tier (or the id is stale/missing) — unchanged from before this distinction existed.
+  const retractedTier = new Map<string, number>(); // "type:id" -> real tier
+  for (const [type, ids] of idsByType) {
+    for (const id of ids) {
+      if (meta.has(`${type}:${id}`)) continue;
+      const row = await getRow(type, id, actor);
+      if (row) retractedTier.set(`${type}:${id}`, Number(row.tier));
+    }
+  }
+  return rows.map((r) => {
+    const type = r.filed_table ? (FILED_TABLE_PARENT_TYPE[r.filed_table] ?? null) : null;
+    const key = type && r.filed_id ? `${type}:${r.filed_id}` : null;
+    const hit = key ? meta.get(key) : undefined;
+    const retracted = hit || !key ? undefined : retractedTier.get(key);
+    return {
+      id: r.id,
+      type,
+      filed_table: r.filed_table ?? "",
+      filed_id: r.filed_id ?? "",
+      kind: r.kind,
+      confidence: r.confidence,
+      title: hit
+        ? hit.title
+        : retracted !== undefined
+          ? FILING_RETRACTED_TITLE
+          : FILING_HIDDEN_TITLE,
+      tier: hit ? Number(hit.tier) : (retracted ?? null),
+    };
+  });
+}
+
+export interface OpsHealth {
+  dream_last_at: Date | null;
+  failed_steps: string[];
+  ops_failure_open: number;
+}
+
+// Content-free operational facts for minime_state's ops_health block and `minime doctor`
+// (W3-7): the last dream:summary run and its failed step names (fixed identifiers only --
+// see audit-payload.ts's dreamSummary/DREAM_STEPS), plus how many ops_failure review items are
+// currently open. Deliberately not tier-gated: none of this is personal content, so it is
+// identical for every actor/tier -- unlike the rest of stateSnapshot, which allowedTier()-filters
+// calendar/tasks/etc.
+export async function opsHealth(): Promise<OpsHealth> {
+  const [[latest], openFailures] = await Promise.all([
+    recentEventsByVerb("dream:summary", 1),
+    openReviewItems("ops_failure"),
+  ]);
+  const steps = latest?.payload?.failed_steps;
+  return {
+    dream_last_at: latest ? new Date(latest.at) : null,
+    failed_steps: Array.isArray(steps) ? steps.filter((s: unknown) => typeof s === "string") : [],
+    ops_failure_open: openFailures.length,
+  };
+}
+
+export interface GoalOverviewRow {
+  id: string;
+  horizon: string;
+  statement: string;
+  open_task_count: number;
+  last_task_activity_at: Date | null;
+}
+
+// Active goals for minime_state's goals_active section (W3-12): horizon/statement plus an
+// open-task count (inbox/active/waiting only) and the most recent activity across ANY linked
+// task, open or closed -- the same "touched" signal goalsNeedingReview uses to judge staleness,
+// so what the owner sees here and what dream flags for review agree. Tasks above the caller's
+// tier contribute to neither figure (a hidden task's mere existence is not this endpoint's to
+// leak). superseded_at excludes a corrected-away goal (028_correction_supersede.sql);
+// dropped/achieved goals are deliberately absent -- this is a "what's still live" view, not a
+// full listing (minime_search covers ad hoc lookup of any goal by id/content).
+export async function goalsOverview(actor?: AccessActor): Promise<GoalOverviewRow[]> {
+  const allowed = await allowedTier(actor);
+  return db()`
+    select g.id, g.horizon, g.statement,
+           count(t.id) filter (
+             where t.status in ('inbox','active','waiting')
+               and t.tier >= 1 and t.tier <= ${allowed}
+           )::int as open_task_count,
+           max(t.updated_at) filter (where t.tier >= 1 and t.tier <= ${allowed})
+             as last_task_activity_at
+    from goals g
+    left join tasks t on t.goal_id = g.id
+    where g.status = 'active' and g.superseded_at is null
+      and g.tier >= 1 and g.tier <= ${allowed}
+    group by g.id, g.horizon, g.statement
+    order by (case g.horizon when 'life' then 0 when 'year' then 1 when 'quarter' then 2 else 3 end),
+             g.statement` as any;
+}
 
 export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Promise<any> {
   const t = now();
@@ -2688,61 +4375,115 @@ export async function stateSnapshot(actor?: AccessActor, timeZone?: string): Pro
   // govern due work and moved_today, but must never select a different cache day.
   const ownerToday = localDateStr(t, ownerTimeZone);
   const allowed = await allowedTier(actor);
-  const [calendar, tasks, commitments, decisionsDue, openReview, anomalies, movedToday] =
-    await Promise.all([
-      db()`select id, uid, starts_at, ends_at, title, location from calendar_events
+  const [
+    calendar,
+    tasks,
+    commitments,
+    decisionsDue,
+    openReview,
+    anomalies,
+    movedToday,
+    filedTodayRaw,
+    opsHealthResult,
+    upcomingDates,
+    goalsActive,
+  ] = await Promise.all([
+    db()`select id, uid, starts_at, ends_at, title, location from calendar_events
         where starts_at >= ${t}::timestamptz - interval '1 hour'
           and starts_at < ${t}::timestamptz + interval '2 days'
           and tier >= 1 and tier <= ${allowed}
         order by starts_at`,
-      db()`select id, title, status, due from tasks
+    db()`select id, title, status, due from tasks
         where status in ('inbox','active','waiting') and due is not null and due <= ${today}::date
           and tier >= 1 and tier <= ${allowed}
         order by due`,
-      db()`select id, what, to_whom, due from commitments
-        where status = 'open' and tier >= 1 and tier <= ${allowed}
+    db()`select id, what, to_whom, due from commitments
+        where status = 'open' and superseded_at is null and tier >= 1 and tier <= ${allowed}
         order by due nulls last`,
-      db()`select id, question, review_at, choice from decisions
+    db()`select id, question, review_at, choice from decisions
         where reviewed_at is null
           and tier >= 1 and tier <= ${allowed}
           and ( (review_at is not null and review_at <= ${today}::date + 3)
                 or choice is null )
         order by review_at nulls last`,
-      db()`select count(*)::int as n from review_queue where status = 'open'`,
-      metricAnomalies(ownerToday, ownerTimeZone),
-      // What MOVED today: tasks closed (done/dropped) on the caller's LOCAL calendar day
-      // (the owner zone by default). minime_state otherwise reports only OPEN work, so completions
-      // were structurally invisible to the evening review's "what moved today".
-      // Compare updated_at and today in the same effective caller zone (owner zone by default).
-      db()`select id, title, status, updated_at from tasks
+    db()`select count(*)::int as n from review_queue where status = 'open'`,
+    metricAnomalies(ownerToday, ownerTimeZone),
+    // What MOVED today: tasks closed (done/dropped) on the caller's LOCAL calendar day
+    // (the owner zone by default). minime_state otherwise reports only OPEN work, so completions
+    // were structurally invisible to the evening review's "what moved today".
+    // Compare updated_at and today in the same effective caller zone (owner zone by default).
+    db()`select id, title, status, updated_at from tasks
         where status in ('done','dropped')
           and (updated_at at time zone ${effectiveTimeZone})::date = ${today}::date
           and tier >= 1 and tier <= ${allowed}
         order by updated_at`,
-    ]);
+    // What was FILED today: captures the classifier/refile routed into a typed row on the
+    // caller's LOCAL calendar day (same predicate shape as moved_today above). inbox_items
+    // itself is always tier 1 (assigned before the row has a real destination), so this read
+    // never needs to hide a row — only the destination title/tier resolved below can be masked.
+    db()`select id, filed_table, filed_id, classifier_output->>'type' as kind,
+           (classifier_output->>'confidence')::float as confidence
+        from inbox_items
+        where status = 'filed'
+          and (updated_at at time zone ${effectiveTimeZone})::date = ${today}::date
+          and tier >= 1 and tier <= ${allowed}
+        order by updated_at`,
+    opsHealth(),
+    // Birthdays/anniversaries/custom dates due in the next 14 days (today counted as day one, so
+    // the window is [today, today+13]) — minime_state is otherwise entirely due/today-anchored
+    // and cannot warn about a Friday birthday before Friday, same gap minime_agenda closes for
+    // tasks.
+    upcomingPersonDates(today, 14, actor),
+    goalsOverview(actor),
+  ]);
+  const filedToday = await resolveFiledToday(filedTodayRaw as unknown as FiledTodayRow[], actor);
   return {
     calendar,
     tasks_due: tasks,
     moved_today: movedToday,
+    filed_today: filedToday,
     commitments_open: commitments,
     decision_reviews_due: decisionsDue,
     review_queue_open: openReview[0]?.n ?? 0,
     metric_anomalies: anomalies,
+    ops_health: opsHealthResult,
+    upcoming_dates: upcomingDates,
+    goals_active: goalsActive,
   };
+}
+
+export type OpenTaskStatus = "inbox" | "active" | "waiting";
+const OPEN_TASK_STATUSES: OpenTaskStatus[] = ["inbox", "active", "waiting"];
+
+export interface TasksInRangeOptions {
+  // Also return open tasks with no due date at all (captured but never scheduled) —
+  // otherwise they never resurface anywhere, since minime_state is due-anchored too.
+  includeUndated?: boolean;
+  // Narrow to a subset of open statuses. Defaults to all three (unchanged behavior).
+  statuses?: OpenTaskStatus[];
 }
 
 // Forward-looking agenda: tasks due within an inclusive [from, to] date range.
 // minime_state is today-anchored (due <= today) and CANNOT answer "what's due
 // tomorrow / this week"; this fills that gap. Includes inbox/active/waiting
 // (open work), excludes done/dropped. Ordered by due date then title.
-export async function tasksInRange(from: string, to: string, actor?: AccessActor): Promise<any[]> {
+export async function tasksInRange(
+  from: string,
+  to: string,
+  actor?: AccessActor,
+  options?: TasksInRangeOptions,
+): Promise<any[]> {
   const allowed = await allowedTier(actor);
+  const includeUndated = options?.includeUndated ?? false;
+  const statuses = options?.statuses ?? OPEN_TASK_STATUSES;
+  // The dated branch reproduces the original predicate exactly; includeUndated only ever
+  // ADDS rows (due is null), never relaxes the dated range or the tier predicate below.
   return db()`select id, title, status, due from tasks
-      where status in ('inbox','active','waiting')
-        and due is not null
-        and due >= ${from}::date and due <= ${to}::date
+      where status = any(${statuses})
+        and ((due is not null and due >= ${from}::date and due <= ${to}::date)
+             or (${includeUndated} and due is null))
         and tier >= 1 and tier <= ${allowed}
-      order by due, title`;
+      order by due nulls last, title`;
 }
 
 // Dedup support for the inbox pipeline: find open (non-done/dropped) tasks whose
@@ -2811,6 +4552,14 @@ export async function listMetricDefs(): Promise<
   return db()`select name, unit, agg_sql, rollup from metric_defs order by name` as any;
 }
 
+// Agent-facing metric catalog (I2): name/unit/description/rollup only — agg_sql never crosses
+// the MCP boundary. listMetricDefs() above stays owner/dream-only; do not reuse it here.
+export async function listMetricDefsPublic(): Promise<
+  { name: string; unit: string | null; description: string | null; rollup: MetricRollup }[]
+> {
+  return db()`select name, unit, description, rollup from metric_defs order by name` as any;
+}
+
 // The single door to whitelisted aggregate SQL (incl. tier-0 sources): the timezone-explicit
 // security-definer function in 026. Metric name and timezone are checked before execution.
 export async function runMetricAgg(
@@ -2828,6 +4577,46 @@ export async function runMetricAgg(
     value: Number(r.value),
     label: r.label ?? null,
   }));
+}
+
+// metric:add (W4-8, src/cli.ts): the owner-CLI-only path that mints a new metric_defs row from a
+// vetted template (src/util/metric-templates.ts). name/agg_sql/rollup are already trusted by the
+// time they reach here (the CLI ran the template generator's own validation first), but this
+// function re-validates the name shape and re-checks for a collision itself rather than trusting
+// the caller — the same defense-in-depth stance insertTransaction/insertHealthSample take on
+// their own inputs.
+const METRIC_DEF_NAME_RE = /^[a-z][a-z0-9_]{1,63}$/;
+
+export async function metricDefExists(name: string): Promise<boolean> {
+  const rows = await db()`select 1 from metric_defs where name = ${name} limit 1`;
+  return rows.length > 0;
+}
+
+/**
+ * Insert one owner-curated metric_defs row, then prove the freshly inserted agg_sql actually
+ * executes by dry-running it through metric_agg() for a single day (today, in the configured
+ * owner zone) before returning. Must run inside an existing transaction (the CLI wraps this call
+ * in withAdminDbTransaction): a dry-run failure throws here and propagates out through that
+ * transaction, which rolls back the whole insert — a broken template can never persist in
+ * metric_defs, only ever a def already proven to run. The dry run's result value is discarded;
+ * an empty series (no rows for today) is a legitimate pass — it only has to execute without
+ * error.
+ */
+export async function insertMetricDef(def: {
+  name: string;
+  unit: string;
+  description: string;
+  aggSql: string;
+  rollup: MetricRollup;
+}): Promise<void> {
+  if (!hasDbTransaction()) throw new Error("metric_def_transaction_required");
+  if (!METRIC_DEF_NAME_RE.test(def.name)) throw new Error("metric_name_invalid");
+  if (await metricDefExists(def.name)) throw new Error("metric_name_exists");
+  await db()`
+    insert into metric_defs (name, unit, description, agg_sql, rollup)
+    values (${def.name}, ${def.unit}, ${def.description}, ${def.aggSql}, ${def.rollup})`;
+  const today = todayStr();
+  await runMetricAgg(def.name, today, today, configuredTimeZone());
 }
 
 export async function upsertMetricValue(
@@ -2907,6 +4696,55 @@ export async function getRow(
   return rows[0] ?? null;
 }
 
+// ---------------------------------------------------------------- content correction (minime_correct, W2-4)
+//
+// Migration 028 (correction_supersede) added superseded_by/superseded_at to every PARENTS table
+// and granted minime_app UPDATE on exactly those two columns for the six tables that had no
+// broader UPDATE grant (021_runtime_app_role.sql already covers the other six via full table
+// UPDATE). Every one of those tables' tier_update RLS policies carries the `tier >= 1 and
+// tier <= app_allowed_tier()` bound (028's ALTER POLICY loop), so an UPDATE through either
+// helper below can only ever touch a row the calling session could also SELECT — a locked
+// (tier-1) session's attempt to correct a tier-2 row matches 0 rows, indistinguishable from a
+// missing id, which the caller (correct.ts) turns into the same NOT_FOUND either way. The
+// `superseded_at is null` guard makes both helpers idempotent-safe: a row that is already
+// amended or retracted cannot be re-stamped, protecting its one backward pointer from being
+// overwritten by an unrelated second write (including a concurrent racing correction).
+export class CorrectionTargetNotFoundError extends Error {
+  constructor() {
+    super("correction target not found");
+  }
+}
+
+/** Stamp the OLD row as superseded by NEW once the successor row already exists (I5 backward
+ * pointer; the successor's own forward `supersedes_id` is stamped at insert time). Throws
+ * CorrectionTargetNotFoundError when the row is missing, already superseded, or above the
+ * caller's tier. */
+export async function supersedeRow(type: ParentType, oldId: string, newId: string): Promise<void> {
+  const { table } = parentTable(type);
+  const rows = await db()`
+    update ${db()(table)}
+    set superseded_by = ${newId}, superseded_at = ${now()}
+    where id = ${oldId} and superseded_at is null
+    returning id`;
+  if (rows.length === 0) throw new CorrectionTargetNotFoundError();
+}
+
+/** Retract (soft-withdraw) a row: stamp superseded_at with no successor, and drop its chunks so
+ * it stops matching search. The row itself is never edited or deleted (I5) and stays readable by
+ * id. Throws CorrectionTargetNotFoundError on the same three cases as supersedeRow. */
+export async function retractRow(type: ParentType, id: string): Promise<void> {
+  const { table } = parentTable(type);
+  await withDbTransaction(async (tx) => {
+    const rows = await tx`
+      update ${tx(table)}
+      set superseded_at = ${now()}
+      where id = ${id} and superseded_at is null
+      returning id`;
+    if (rows.length === 0) throw new CorrectionTargetNotFoundError();
+    await tx`delete from chunks where parent_type = ${type} and parent_id = ${id}`;
+  });
+}
+
 export async function edgesAround(
   type: string,
   id: string,
@@ -2952,7 +4790,7 @@ export async function openItemsFor(
   const allowed = await allowedTier(actor);
   const commitments = await db()`
     select id, what, to_whom, due, status from commitments
-    where status = 'open' and lower(to_whom) = lower(${personName})
+    where status = 'open' and superseded_at is null and lower(to_whom) = lower(${personName})
       and tier >= 1 and tier <= ${allowed}`;
   const tasks = await db()`
     select id, title, status, due from tasks
@@ -2971,6 +4809,159 @@ export async function journalCountSince(since: Date): Promise<number> {
 export async function pagesByPaths(paths: string[]): Promise<{ id: string; path: string }[]> {
   if (paths.length === 0) return [];
   return db()`select id, path from pages where path = any(${paths})` as any;
+}
+
+// ---------------------------------------------------------------- timeline (minime_timeline, W3-3)
+
+export type TimelineKind = "calendar" | "journal" | "interaction" | "task" | "decision";
+
+const TIMELINE_KINDS: readonly TimelineKind[] = [
+  "calendar",
+  "journal",
+  "interaction",
+  "task",
+  "decision",
+];
+
+export interface TimelineRow {
+  kind: TimelineKind;
+  id: string;
+  at: Date;
+  title: string;
+}
+
+export interface TimelineLockedCounts {
+  journal: number;
+  interaction: number;
+}
+
+export interface TimelineResult {
+  rows: TimelineRow[];
+  locked: TimelineLockedCounts;
+}
+
+// Tier-gated date-range read across every life source (spec W3-3). Each branch of the UNION
+// carries its OWN `tier >= 1 and tier <= allowed` predicate (never a shared post-filter, so a
+// bug in one branch can never leak another's rows) and its own `superseded_at is null` guard --
+// EXCEPT calendar_events, which is a write-only importer mirror (005_mirrors.sql) outside the
+// PARENTS/correction system and never received that column (028_correction_supersede.sql's
+// twelve-table loop does not include it). journal_entries/interactions default to tier 2, so
+// their branches structurally return nothing for a locked session — the UNION's own predicate
+// IS the enforcement, not a filter applied after the fact. tasks/decisions anchor on a CLOSURE
+// timestamp, not a creation time: a done task on completed_at, a dropped one on updated_at
+// (dropping has no dedicated timestamp column); a decision on decided_at, falling back to
+// created_at for one that was logged but never resolved. Every branch's `at` column is
+// timestamptz, so the five-way UNION ALL is a single consistent type and the trailing
+// `order by at, id` / `limit/offset` is exact SQL pagination — no branch is ever pulled in full
+// just to be sorted in application code. Tier-0 sources (transactions, health_samples) are
+// structurally absent: neither table is named anywhere in this function (I3).
+export async function timelineRows(
+  from: string,
+  to: string,
+  kinds: TimelineKind[] | undefined,
+  limit: number,
+  offset: number,
+  actor?: AccessActor,
+  timeZone?: string,
+): Promise<TimelineResult> {
+  const allowed = await allowedTier(actor);
+  const tz = configuredTimeZone(timeZone);
+  const wanted = kinds && kinds.length > 0 ? kinds : TIMELINE_KINDS;
+  const want = (k: TimelineKind) => wanted.includes(k);
+
+  // `want(...)` interpolates a plain JS boolean directly into the WHERE clause — the same
+  // short-circuit pattern tasksInRange uses for includeUndated above — so an excluded kind
+  // contributes zero rows without the SQL text itself ever changing shape per call.
+  const rows = (await db()`
+    select 'calendar'::text as kind, id, occurrence_start as at, left(title, 120) as title
+    from calendar_events
+    where ${want("calendar")}
+      and (occurrence_start at time zone ${tz})::date between ${from}::date and ${to}::date
+      and tier >= 1 and tier <= ${allowed}
+
+    union all
+
+    select 'journal'::text as kind, id, at, left(entry_md, 120) as title
+    from journal_entries
+    where ${want("journal")}
+      and (at at time zone ${tz})::date between ${from}::date and ${to}::date
+      and tier >= 1 and tier <= ${allowed}
+      and superseded_at is null
+
+    union all
+
+    select 'interaction'::text as kind, id, occurred_at as at, left(summary, 120) as title
+    from interactions
+    where ${want("interaction")}
+      and (occurred_at at time zone ${tz})::date between ${from}::date and ${to}::date
+      and tier >= 1 and tier <= ${allowed}
+      and superseded_at is null
+
+    union all
+
+    select 'task'::text as kind, id,
+           case when status = 'done' then completed_at else updated_at end as at,
+           left(title, 120) as title
+    from tasks
+    where ${want("task")}
+      and status in ('done', 'dropped')
+      and ((case when status = 'done' then completed_at else updated_at end)
+             at time zone ${tz})::date between ${from}::date and ${to}::date
+      and tier >= 1 and tier <= ${allowed}
+      and superseded_at is null
+
+    union all
+
+    select 'decision'::text as kind, id, coalesce(decided_at, created_at) as at,
+           left(question, 120) as title
+    from decisions
+    where ${want("decision")}
+      and (coalesce(decided_at, created_at) at time zone ${tz})::date
+            between ${from}::date and ${to}::date
+      and tier >= 1 and tier <= ${allowed}
+      and superseded_at is null
+
+    order by at asc, id asc
+    limit ${limit} offset ${offset}`) as unknown as TimelineRow[];
+
+  // Locked counts are a deliberate, narrow exception to "never disclose what a locked session
+  // cannot read": a bare count (never a title or id) of the tier-2 rows this call's date window
+  // matched but this session cannot see, so the caller knows there is more here rather than
+  // silently reading an empty range as "nothing happened". Only journal/interactions default to
+  // tier 2 — calendar/task/decision are tier 1 on every product write path today — so counting
+  // is limited to those two sources, matching the spec exactly; tier-0 sources are never queried
+  // here at all (I3). Skipped whenever the session is already unlocked (those rows are already in
+  // `rows` above, so a separate "locked" count would double-count them) or the caller never asked
+  // for that kind via `types` (a caller scoped to types:['calendar'] gets no journal/interaction
+  // accounting, locked or not).
+  //
+  // The count MUST run through timeline_locked_count() (032_timeline_locked_count.sql), a
+  // SECURITY DEFINER function — never a plain db() SELECT — because db() in the real resident
+  // deployment is always the restricted minime_app role (src/serve.ts pins both DATABASE_URL and
+  // MINIME_APP_DATABASE_URL to it), and journal_entries/interactions carry the standard
+  // tier_read RLS policy `USING (tier >= 1 and tier <= app_allowed_tier())`. Postgres intersects
+  // that policy with a plain query's own WHERE clause, so `select count(*) where tier = 2` under
+  // a genuinely locked session (app_allowed_tier() = 1) would be narrowed to
+  // `tier <= 1 AND tier = 2` — never satisfiable — and silently return 0 no matter how many
+  // tier-2 rows exist in range (review finding, 2026-08-08: verified against a live restricted
+  // role, not just inferred). timeline_locked_count() runs as the migration owner, so it is not
+  // subject to the caller's own RLS, and — like metric_agg() — returns only a bare integer,
+  // never row content. See test/timeline-restricted-role.test.ts for the regression coverage
+  // through the real restricted role that this bug had no test for.
+  const needsLockedCounts = allowed < 2;
+  let journalLocked = 0;
+  let interactionLocked = 0;
+  if (needsLockedCounts && want("journal")) {
+    const [row] = await db()`select timeline_locked_count('journal', ${from}, ${to}, ${tz}) as n`;
+    journalLocked = Number(row?.n ?? 0);
+  }
+  if (needsLockedCounts && want("interaction")) {
+    const [row] =
+      await db()`select timeline_locked_count('interaction', ${from}, ${to}, ${tz}) as n`;
+    interactionLocked = Number(row?.n ?? 0);
+  }
+
+  return { rows, locked: { journal: journalLocked, interaction: interactionLocked } };
 }
 
 // ---------------------------------------------------------------- dream support
@@ -3009,6 +5000,15 @@ export async function allPeopleWithAliases(): Promise<{ id: string; names: strin
   return rows.map((r: any) => ({ id: r.id, names: r.names }));
 }
 
+// Untouched-AND-referenced conjunction: a row only surfaces as stale if it is BOTH old
+// (the untouchedDays predicate below) AND was referenced again recently (either signal):
+//   - a released minime_get_context drill-in naming it as the primary result, mirroring the
+//     accessCounts join shape (repo.ts accessCounts) over the append-only events log — ids
+//     only, never content (I8); or
+//   - a fresh edge touching it in either direction (it mentioned something, or something
+//     mentions it) within referencedSinceDays (edges.created_at, 003_graph_audit.sql).
+// Existing row-level `tier >= 1` floor is unchanged — staleItems output flows through the
+// tier-masking review-queue tool, so this is a boolean existence gate, not a content read.
 export async function staleItems(
   referencedSinceDays: number,
   untouchedDays: number,
@@ -3018,10 +5018,50 @@ export async function staleItems(
     select 'page' as type, id, title as label, updated_at from pages
     where status = 'active' and tier >= 1
       and updated_at < ${t}::timestamptz - make_interval(days => ${untouchedDays})
+      and (
+        exists (
+          select 1
+          from events r
+          join events d
+            on d.verb = 'tool:minime_get_context:disposition'
+           and d.payload->>'result_event_id' = r.id::text
+           and d.payload->>'status' = 'released'
+          where r.verb = 'tool:minime_get_context'
+            and r.payload->>'delivery' = 'transport'
+            and r.at >= ${t}::timestamptz - make_interval(days => ${referencedSinceDays})
+            and r.payload->'returned_ids'->>0 = pages.id::text
+        )
+        or exists (
+          select 1 from edges e
+          where ((e.dst_type = 'page' and e.dst_id = pages.id)
+              or (e.src_type = 'page' and e.src_id = pages.id))
+            and e.created_at >= ${t}::timestamptz - make_interval(days => ${referencedSinceDays})
+        )
+      )
     union all
     select 'person' as type, id, canonical_name as label, updated_at from people
     where tier >= 1
-      and coalesce(last_contact_at, updated_at) < ${t}::timestamptz - make_interval(days => ${untouchedDays})`;
+      and coalesce(last_contact_at, updated_at) < ${t}::timestamptz - make_interval(days => ${untouchedDays})
+      and (
+        exists (
+          select 1
+          from events r
+          join events d
+            on d.verb = 'tool:minime_get_context:disposition'
+           and d.payload->>'result_event_id' = r.id::text
+           and d.payload->>'status' = 'released'
+          where r.verb = 'tool:minime_get_context'
+            and r.payload->>'delivery' = 'transport'
+            and r.at >= ${t}::timestamptz - make_interval(days => ${referencedSinceDays})
+            and r.payload->'returned_ids'->>0 = people.id::text
+        )
+        or exists (
+          select 1 from edges e
+          where ((e.dst_type = 'person' and e.dst_id = people.id)
+              or (e.src_type = 'person' and e.src_id = people.id))
+            and e.created_at >= ${t}::timestamptz - make_interval(days => ${referencedSinceDays})
+        )
+      )`;
 }
 
 // Phantom-person watchdog candidates (dream step 3b). Surfaces person rows that actually
@@ -3050,7 +5090,7 @@ export async function phantomPersonCandidates(): Promise<
         union select pa.alias from person_aliases pa
           where pa.person_id = pe.id and pa.tier in (1,2)
       ) x
-      where pe.tier in (1,2)
+      where pe.tier in (1,2) and pe.superseded_at is null
       group by pe.id, pe.canonical_name, pe.relation
     ),
     org_names as (
@@ -3179,6 +5219,49 @@ export async function decisionsNeedingReview(asOfDate: string): Promise<any[]> {
   return db()`select id, question, review_at from decisions
              where tier >= 1 and review_at is not null
                and review_at <= ${asOfDate}::date and reviewed_at is null`;
+}
+
+// Stale-goal re-check window (dream step 6b, W3-12): an active goal is due for a "still true?"
+// review once BOTH it and every task linked to it have gone untouched for this long -- an
+// untouched-only bound would flag a goal the owner is actively working through via its tasks
+// even though the goal ROW itself hasn't been edited recently. Mirrors staleItems' own
+// untouched-AND-referenced shape (repo.ts above), just with the second signal inverted (no
+// recent activity, rather than "has" recent activity).
+const GOAL_REVIEW_STALE_DAYS = 90;
+
+export async function goalsNeedingReview(): Promise<{ id: string; statement: string }[]> {
+  const t = now();
+  return db()`
+    select g.id, g.statement
+    from goals g
+    where g.status = 'active' and g.superseded_at is null and g.tier >= 1
+      and g.updated_at < ${t}::timestamptz - make_interval(days => ${GOAL_REVIEW_STALE_DAYS})
+      and not exists (
+        select 1 from tasks tk
+        where tk.goal_id = g.id
+          and tk.updated_at >= ${t}::timestamptz - make_interval(days => ${GOAL_REVIEW_STALE_DAYS})
+      )
+    order by g.updated_at`;
+}
+
+// Search backfill (dream step 2d, W3-12): insertGoal never indexes itself -- every caller
+// (minime_upsert_goal, onboard.ts) owns calling indexParent, the same contract upsertTask's
+// callers already follow. This catches whatever a caller missed anyway (chiefly onboarding-era
+// rows written before this task, and demo/fixture seed data), so a goal eventually becomes
+// searchable even when its own write path forgot. Bounded and idempotent via the
+// not-exists-chunks check -- a goal drops out of this list as soon as indexParent runs for it.
+export async function goalsWithoutChunks(
+  limit = 200,
+): Promise<{ id: string; statement: string; why: string | null; tier: number }[]> {
+  return db()`
+    select g.id, g.statement, g.why, g.tier
+    from goals g
+    where g.superseded_at is null and g.tier >= 1
+      and not exists (
+        select 1 from chunks c where c.parent_type = 'goal' and c.parent_id = g.id
+      )
+    order by g.created_at
+    limit ${limit}` as any;
 }
 
 const COMPILED_NOTE_SOURCES_DELIMITER = "\n## Sources\n";
@@ -3331,6 +5414,25 @@ export async function reviewItemExists(
 ): Promise<boolean> {
   const rows = await db()`select 1 from review_queue where kind = ${kind} and status = 'open'
     and payload ->> ${payloadKey} = ${payloadValue} limit 1`;
+  return rows.length > 0;
+}
+
+// Stale-item re-flag suppression window (review-triage.md: "dismissed means dismissed").
+// Conservative and trivially tunable — see W1-7 spec risk note.
+const STALE_SUPPRESSION_DAYS = 90;
+
+/** True if a stale item for this payload id is currently open (never duplicate an open flag)
+ * OR was created within the suppression window regardless of status (a dismissal stays quiet
+ * for a bounded time rather than forever — it can legitimately resurface later). Dream step 4
+ * uses this in place of reviewItemExists, which only checked status = 'open' and so re-flagged
+ * a dismissed item the very next night. */
+export async function staleRecentlyFlagged(id: string): Promise<boolean> {
+  const rows = await db()`
+    select 1 from review_queue
+    where kind = 'stale' and payload ->> 'id' = ${id}
+      and (status = 'open'
+        or created_at >= ${now()}::timestamptz - make_interval(days => ${STALE_SUPPRESSION_DAYS}))
+    limit 1`;
   return rows.length > 0;
 }
 

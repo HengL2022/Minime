@@ -32,8 +32,13 @@ const NUDGES: Record<Intent, Omit<IntentNudge, "intent">> = {
 
 // Lowercased substring cues. Deliberately small and explainable rather than a learned
 // model — a maintainer can read off why any query classified the way it did.
-const TEMPORAL_CUES = [
-  "as of",
+//
+// Temporal cues split into two families (W3-4) because they imply OPPOSITE ranking nudges even
+// though classifyIntent lumps both under "temporal": RECENCY_CUES ("latest", "this month") ask
+// for what's newest, so intentNudge boosts recency; PAST_PERIOD_CUES ("last March", "as of
+// June") pin a specific bygone window, so boosting recency would push the wrong way — "what was
+// I doing last March" should not preferentially surface this week's notes. See intentNudge.
+const RECENCY_CUES = [
   "latest",
   "most recent",
   "recently",
@@ -41,14 +46,11 @@ const TEMPORAL_CUES = [
   "current",
   "currently",
   "today",
-  "yesterday",
   "this week",
-  "last week",
   "this month",
-  "last month",
   "this year",
-  "last year",
 ];
+const PAST_PERIOD_CUES = ["as of", "yesterday", "last week", "last month", "last year"];
 const MONTHS =
   /\b(jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|jun(e)?|jul(y)?|aug(ust)?|sep(tember)?|oct(ober)?|nov(ember)?|dec(ember)?)\b/;
 const EVENT_CUES = [
@@ -83,18 +85,34 @@ function looksLikeName(raw: string): boolean {
   return tokens.every((t) => /^[A-Z]/.test(t));
 }
 
+function isRecencyCue(q: string): boolean {
+  return hasAny(q, RECENCY_CUES);
+}
+
+function isPastPeriodCue(q: string): boolean {
+  return hasAny(q, PAST_PERIOD_CUES) || MONTHS.test(q);
+}
+
 // Precedence: temporal beats event beats entity. Temporal/event cues describe how the
 // user wants results ranked (by time, by lexical match); entity is the weakest, most
 // ambiguous signal, so it loses ties.
 export function classifyIntent(query: string): Intent {
   const q = query.toLowerCase();
-  if (hasAny(q, TEMPORAL_CUES) || MONTHS.test(q)) return "temporal";
+  if (isRecencyCue(q) || isPastPeriodCue(q)) return "temporal";
   if (hasAny(q, EVENT_CUES)) return "event";
   if (hasAny(q, ENTITY_CUES) || looksLikeName(query)) return "entity";
   return "general";
 }
 
 export function intentNudge(query: string): IntentNudge {
+  const q = query.toLowerCase();
   const intent = classifyIntent(query);
-  return { intent, ...NUDGES[intent] };
+  // Recency cues win any overlap with a past-period cue (e.g. "most recent... last year"):
+  // the explicit "recent" reading is the stronger signal. A past-period-only temporal query
+  // ("last March", "in June") gets NO recency lift — it names a specific bygone window, so
+  // widening the recency multiplier would fight the query rather than serve it. Every other
+  // intent's recencyScale is untouched (still exactly NUDGES[intent].recencyScale).
+  const recencyScale =
+    intent === "temporal" && !isRecencyCue(q) ? 1.0 : NUDGES[intent].recencyScale;
+  return { intent, ...NUDGES[intent], recencyScale };
 }

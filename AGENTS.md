@@ -105,7 +105,7 @@ different vector spaces). After changing `EMBED_PROVIDER`/`*_EMBED_MODEL`, run
 `bun run src/cli.ts reembed` (wipes and re-embeds every chunk; wrong-dimension responses are
 rejected loudly, never stored).
 
-Privacy contract: cloud providers receive content up to `CLOUD_MAX_TIER` (default 2; tier-0
+Privacy contract: cloud providers receive content up to `CLOUD_MAX_TIER` (default 1; tier-0
 financial/health content **never** leaves the box on any path). Every cloud call first commits an
 audited intent row (`egress:embed` / `egress:classify`), then appends a fixed success/failure
 outcome; both contain counts and routing metadata, never contents, and the intent survives a later
@@ -172,17 +172,29 @@ retains the prior database as connection-blocked `minime_replaced`. A `compensat
 result requires owner inspection before retry.
 Changing MINIME_DATA_DIR does not move existing data.
 
-13 tools: `minime_search`, `minime_get_context`, `minime_state`, `minime_query_metric`,
-`minime_capture`, `minime_journal`, `minime_log_decision`, `minime_review_decision`,
-`minime_upsert_task`, `minime_agenda`, `minime_log_interaction`, `minime_review_queue`,
-`minime_unlock`. Numbers come only from `minime_query_metric`; tier-2 reads (journal,
-interactions, email metadata, private decisions) need an owner-approved unlock. After the
-agent asks and the owner agrees, `minime_unlock` creates a pending request and returns its ID
-and local approval command. The owner runs
-`bun run src/cli.ts unlock:approve <request-id>` in their own terminal within 10 minutes. Approval is
-time-boxed, loudly audited, bound to the current unguessable MCP connection session, and a
-reconnect is locked again. Tier-0 transactions and health data are never readable — aggregates
-only.
+22 tools: `minime_search`, `minime_get_context`, `minime_state`, `minime_list_metrics`,
+`minime_query_metric`, `minime_capture`, `minime_journal`, `minime_log_decision`,
+`minime_review_decision`, `minime_upsert_task`, `minime_agenda`, `minime_log_interaction`,
+`minime_review_queue`, `minime_refile`, `minime_correct`, `minime_unlock`,
+`minime_upsert_person`, `minime_set_person_date`, `minime_timeline`, `minime_upsert_goal`,
+`minime_upsert_commitment`, `minime_log_expense`. `minime_list_metrics` lists every queryable
+metric (name, unit, description, rollup) with no SQL exposed — call it before
+`minime_query_metric` when unsure of a metric name; `UNKNOWN_METRIC` errors point here too.
+Numbers come only from `minime_query_metric`. `minime_timeline` is the exhaustive date-range
+read; `minime_search`'s optional `from`/`to` only filters already-ranked candidates.
+`minime_refile` files a pending capture as a typed row and always needs an approved tier-2
+unlock. `minime_correct` amends, retracts, or retiers a journal/interaction/decision/note.
+`minime_upsert_person` / `minime_set_person_date` / `minime_upsert_goal` /
+`minime_upsert_commitment` write those objects; identity merges stay owner-run
+(`scripts/repair.ts merge-person`). `minime_log_expense` is insert-only into tier 0 and never
+echoes the row back. Tier-2 reads (journal, interactions, email metadata, private decisions)
+need an owner-approved unlock. After the agent asks and the owner agrees, `minime_unlock`
+creates a pending request and returns its ID and local approval command. The owner runs
+`bun run src/cli.ts unlock:approve <request-id>` in their own terminal within 10 minutes
+(`unlock:status` / `unlock:revoke` list or end approvals). Approval is time-boxed, loudly
+audited, bound to the current unguessable MCP connection session, and a reconnect is locked
+again. Tier-0 transactions and health data are never readable through MCP — aggregates only;
+the owner terminal may print them with `tx list` / `health list`.
 
 Before using Minime MCP tools, agent harnesses should read
 `agents/skills/RESOLVER.md`, then read the specific skill file it routes to. The resolver is

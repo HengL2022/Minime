@@ -1,7 +1,10 @@
 # Known issue: classifier collapses multi-entity captures into a single row
 
-**Filed:** 2026-06-16 · **Area:** `src/pipeline/classify.ts`, `src/pipeline/watcher.ts`
+**Filed:** 2026-06-16 · **Area:** `src/pipeline/classify.ts`, `src/pipeline/watcher.ts`, `src/pipeline/segment.ts`
 **Severity:** medium (silent data-shape loss — no error, no review-queue flag)
+**Status:** mitigated 2026-08-14 — deterministic companion split for confident
+legal-suffix / enumerated-company captures. LLM segmentation and first-class
+org/person capture types remain future work.
 
 ## Symptom
 
@@ -21,12 +24,12 @@ Capture text:
 > Northstar Reagents AS (Bergen), Bluefin Labs AS (Oslo), and Aster Bio AS (Trondheim).
 > Nadia Rossi, the sales lead at Corvid Biotech, was asked to help.
 
-Result: filed as **one `interaction`** (`kind=email`, `person_name="Nadia Rossi"`,
-confidence 0.78). The three vendor companies were **not** created as entities — they
-existed only as text in `interactions.summary`, which is **tier-2** and therefore
-hidden from `minime_search` unless the caller holds an unlock. Net effect: "what are
-my calibration-gel suppliers?" returned nothing findable until the vendors were re-captured
-one-per-call.
+Result (before the 2026-08-14 split): filed as **one `interaction`** (`kind=email`,
+`person_name="Nadia Rossi"`, confidence 0.78). The three vendor companies were **not**
+created as entities — they existed only as text in `interactions.summary`, which is
+**tier-2** and therefore hidden from `minime_search` unless the caller holds an unlock.
+Net effect: "what are my calibration-gel suppliers?" returned nothing findable until
+the vendors were re-captured one-per-call.
 
 ## Root cause
 
@@ -41,7 +44,7 @@ export interface Classification {
 ```
 
 `classify()` returns exactly one `{type, confidence, fields}`. The watcher
-(`src/pipeline/watcher.ts`) files exactly one row from it. There is no notion of
+(`src/pipeline/watcher.ts`) files exactly one primary row from it. There is no notion of
 "this capture contains N fileable items," so the model is forced to pick the single
 best-fit type and everything else is narrative residue.
 
@@ -52,50 +55,43 @@ Captures describing a company are best-filed as `note` (pages). In the repro abo
 three explicit single-vendor captures *with* `hint: "org / company record"` were each
 filed as `note` (fixture pages A / B / C) — correct and searchable, but
 they are pages, not org entities, so `minime_get_context(type='org', …)` can't resolve
-them and no `works_at`-style edges can attach. (Compare the pre-existing bad edge where
-Nadia Rossi `works_at` an org literally named "Priya" — orgs today only appear via
-extraction side-paths, not the capture door, so their quality is uncontrolled.)
+them and no `works_at`-style edges can attach.
 
-## Suggested fix (design options, smallest first)
+## Mitigation (2026-08-14)
 
-### 2026-08-06 foundation update
+A gated, deterministic pre-pass (`src/pipeline/segment.ts` `planCaptureEntities`) runs
+on the capture bytes. It does **not** add an LLM call:
 
-Inbox replay and filing are now safe foundations for this future work: each capture has immutable
-byte identity, a fenced claim, and one final database transaction. The two existing conservative
-action+decision and decision+completed-task splits commit all-or-nothing, so crashes and concurrent
-replay cannot duplicate their companions. This does **not** solve general entity segmentation:
-there is still no stable segment plan, derivation-key ledger, uncertain-segment review contract, or
-first-class org/person capture type. This issue therefore remains open and is intentionally kept in
-the ordinary product backlog rather than guessed into the identity migration.
+- **Cue:** two or more legal-suffix orgs (`AS`, `Inc`, `Ltd`, `Biotech`, …) **or** an
+  enumeration (`three suppliers`, `2 companies`). Ordinary "met Alice and Bob" stays
+  on the single-classify path.
+- **Confident (2–8 named entities):** file the existing single-label primary row, then
+  mint leftover orgs/people at **tier 1** with `derived_from = inbox_item.id`, name-only
+  search chunks (never the capture body — that would leak a tier-2 interaction onto a
+  tier-1 org), and an `inbox:split-entities` audit event (ids and counts, no names).
+  The interaction subject is not minted twice. Same inbox finalization transaction as
+  the other conservative splits.
+- **Uncertain** (cue fired but names unparseable, or more than eight names): lower
+  classifier confidence to ≤0.4 and keep the existing `inbox_unfiled` review path.
+  No new review-queue kind; `capture.reason` explains the parse failure.
 
-1. **Split step (recommended).** Add an optional pre-pass that asks the model to
-   segment a capture into 1..N self-contained items *before* classifying each. Keep the
-   single-label classifier unchanged; loop it over the segments. The watcher files N
-   rows, all carrying the same `derived_from` inbox-item id for provenance. Gate behind
-   a confidence/count sanity check so a normal one-thing capture still costs one call.
+Tests: `test/segment.test.ts`, `test/multi-entity-capture.test.ts`.
 
-2. **Multi-label classify.** Change `classify()` to return `Classification[]` and have
-   the watcher file each. Bigger blast radius (every caller + `filed_table`/`filed_id`
-   single-row assumptions in the inbox schema).
+## Still open
 
-3. **Add `org` (and revisit `person`) as first-class capture types** with dedup against
-   existing `orgs`/`people` by name+alias, so company/person captures become resolvable
-   entities with controlled edges instead of free-text pages. Pairs naturally with (1).
+1. **LLM segment pre-pass.** Ask the model to split a capture into 1..N self-contained
+   items *before* classifying each. Needed for multi-entity captures that do not use
+   legal suffixes or an explicit supplier/vendor count.
+2. **First-class `org` / `person` capture types** with dedup against existing
+   `orgs`/`people` by name+alias, so a dedicated company capture becomes a resolvable
+   entity instead of a page.
+3. **`minime_search` withheld-hit signal** when a tier-2 row matched but was hidden
+   for lack of unlock — related to how this issue stayed invisible, not required for
+   the companion split.
 
-## Acceptance / guardrails
+## Workaround (still useful)
 
-- A capture naming K distinct entities yields K filed rows (or K-1 + 1 linking
-  interaction), each independently searchable and resolvable.
-- Each derived row keeps `derived_from = <inbox_item.id>` for audit.
-- No regression on single-item captures (still one call, one row).
-- When the splitter is unsure, **queue for evening review** rather than guess — same
-  "never guess" contract as the current `catch` path in `classify()`.
-- `minime_search` should arguably also signal when a tier-2 row matched but was withheld
-  for lack of unlock, so hidden hits aren't indistinguishable from "no data." (Separate
-  but related to how this issue stayed invisible.)
-
-## Workaround (today)
-
-Capture **one entity per call** with an unambiguous first line. Multi-entity events can
-still be logged as a single `interaction`/`note` for the narrative, but each entity that
-needs to be independently retrievable must get its own capture.
+Capture **one entity per call** with an unambiguous first line when the deterministic
+cue will not fire. Multi-entity events can still be logged as a single
+`interaction`/`note` for the narrative; names the splitter cannot parse still need
+their own capture.
