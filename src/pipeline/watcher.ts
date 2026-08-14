@@ -46,10 +46,12 @@ import { auditPayload } from "../util/audit-payload";
 import { todayStr } from "../util/clock";
 import { config } from "../util/config";
 import {
+  CLASSIFIER_TYPES,
   type Classification,
   classify,
   completionSignal,
   completionTitle,
+  identityCaptureName,
   orgCue,
   splitActionDecision,
 } from "./classify";
@@ -61,7 +63,14 @@ import { planCaptureEntities } from "./segment";
 const ACTOR = "agent:classifier";
 const CONFIDENCE_FLOOR = 0.7;
 const RETRY_BACKOFF_MS = 5_000;
-export type FiledTable = "tasks" | "journal_entries" | "interactions" | "pages" | "decisions";
+export type FiledTable =
+  | "tasks"
+  | "journal_entries"
+  | "interactions"
+  | "pages"
+  | "decisions"
+  | "orgs"
+  | "people";
 
 export interface NoteProjection {
   absolutePath: string;
@@ -239,9 +248,7 @@ export function storedClassification(value: unknown): Classification | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<Classification>;
   if (
-    !["task", "journal", "interaction", "note", "decision_note", "unknown"].includes(
-      String(candidate.type),
-    ) ||
+    !(CLASSIFIER_TYPES as readonly string[]).includes(String(candidate.type)) ||
     typeof candidate.confidence !== "number" ||
     !candidate.fields ||
     typeof candidate.fields !== "object"
@@ -295,7 +302,9 @@ async function fileCompanionEntities(
   const subject =
     c.type === "interaction" && typeof c.fields.person_name === "string"
       ? c.fields.person_name
-      : null;
+      : c.type === "org" || c.type === "person"
+        ? identityCaptureName(text, c.fields)
+        : null;
   const orgIds: string[] = [];
   const personIds: string[] = [];
   const indexOpts = { ...INDEX_OPTIONS, extractEdges: false };
@@ -325,6 +334,29 @@ async function fileCompanionEntities(
     entityId: inboxId,
     payload: auditPayload.inboxSplitEntities({ orgIds, personIds }),
   });
+}
+
+// Dedicated org/person captures become resolvable identities, not pages. Name-only
+// chunks — never the capture body — so a later narrative cannot leak onto a tier-1 card.
+// ensureOrg/ensurePerson already dedup by canonical name + alias.
+async function fileIdentityRow(
+  kind: "org" | "person",
+  c: Classification,
+  text: string,
+  inboxId: string,
+  actor: string,
+): Promise<FiledResult | null> {
+  const name = identityCaptureName(text, c.fields);
+  if (!name) return null;
+  const indexOpts = { ...INDEX_OPTIONS, extractEdges: false };
+  if (kind === "org") {
+    const org = await ensureOrg(name, actor, "capture", { tier: 1, derivedFrom: inboxId });
+    await indexParentIfEmpty("org", org.id, name, name, 1, indexOpts);
+    return { primary: ["orgs", org.id] };
+  }
+  const person = await ensurePerson(name, actor, "capture", { tier: 1, derivedFrom: inboxId });
+  await indexParentIfEmpty("person", person.id, name, name, 1, indexOpts);
+  return { primary: ["people", person.id] };
 }
 
 function applyUncertainEntityPlan(c: Classification, text: string): Classification {
@@ -564,6 +596,10 @@ async function filePrimaryRow(
       }
       return { primary: ["decisions", id] };
     }
+    case "org":
+      return fileIdentityRow("org", c, text, inboxId, actor);
+    case "person":
+      return fileIdentityRow("person", c, text, inboxId, actor);
     case "note": {
       // notes become brain pages so they live in the markdown archive (I4). Agent-session
       // captures (SessionEnd hook) carry verbatim prompt/outcome text from arbitrary

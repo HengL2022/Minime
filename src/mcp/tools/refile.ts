@@ -12,9 +12,10 @@
 // rejected outright whenever the floor is 2 — neither `tasks` nor `decisions` has an
 // owner-facing tier-2 pathway through this tool, so there is no lower-tier-but-still-safe
 // override to fall back to; filing at their permanent tier-1 default would launder tier-2-grade
-// text into content any actor can read forever without ever unlocking anything. journal and
-// interaction need no such check: fileRow always files them at tier 2 regardless of any
-// override, so they can never be the laundering channel. The floor is computed from the row's
+// text into content any actor can read forever without ever unlocking anything. org/person are
+// allowed at that floor: they index the name only, so the capture body stays in the archive.
+// journal and interaction need no such check: fileRow always files them at tier 2 regardless of
+// any override, so they can never be the laundering channel. The floor is computed from the row's
 // state AT CLAIM TIME (claim.item, from claimPendingInboxItemForRefile's UPDATE ... RETURNING),
 // never from the plain read at the top of this handler — every query here runs READ COMMITTED
 // (see the claim's own independent transaction below), so a concurrent classifier pass that
@@ -32,7 +33,7 @@ import {
   setInboxFiledClaimed,
   withActorDurableDbSession,
 } from "../../db/repo";
-import type { Classification } from "../../pipeline/classify";
+import { type Classification, identityCaptureName } from "../../pipeline/classify";
 import {
   type FiledTable,
   type NoteProjection,
@@ -46,7 +47,15 @@ import { auditPayload } from "../../util/audit-payload";
 import { ToolError, envelope } from "../envelope";
 import type { ToolDef } from "./registry";
 
-const REFILE_TYPE = ["task", "journal", "note", "interaction", "decision"] as const;
+const REFILE_TYPE = [
+  "task",
+  "journal",
+  "note",
+  "interaction",
+  "decision",
+  "org",
+  "person",
+] as const;
 type RefileType = (typeof REFILE_TYPE)[number];
 
 // Owner-facing refile type -> the Classification type fileRow's switch expects. "decision" maps
@@ -57,6 +66,8 @@ const CLASSIFICATION_TYPE: Record<RefileType, Classification["type"]> = {
   note: "note",
   interaction: "interaction",
   decision: "decision_note",
+  org: "org",
+  person: "person",
 };
 
 // SourceRef.type per filed table: the singular parent-type name other tools already use
@@ -67,6 +78,8 @@ const SOURCE_TYPE: Record<FiledTable, string> = {
   interactions: "interaction",
   pages: "page",
   decisions: "decision",
+  orgs: "org",
+  people: "person",
 };
 
 // The classifier guess stored on the inbox item is metadata the caller can already see without
@@ -74,8 +87,10 @@ const SOURCE_TYPE: Record<FiledTable, string> = {
 // the two types that always file at tier 2 (insertJournal/insertInteraction default tier=2), so a
 // stored guess of either is positive evidence this capture's free text is tier-2-grade — the
 // floor every refile destination is checked against (see file header): a "note" tier override may
-// never go below it, and type=task/decision are rejected outright when it's 2. Any other guess
-// (or none yet) carries no such evidence, so the floor stays at the ordinary tier-1 default.
+// never go below it, and type=task/decision are rejected outright when it's 2. org/person are
+// allowed at that floor: they index the name only, so the capture body stays in the archive.
+// Any other guess (or none yet) carries no such evidence, so the floor stays at the ordinary
+// tier-1 default.
 function evidenceFloor(stored: Classification | null): 1 | 2 {
   return stored?.type === "journal" || stored?.type === "interaction" ? 2 : 1;
 }
@@ -91,18 +106,19 @@ export const refileTool: ToolDef = {
   name: "minime_refile",
   description:
     "File a pending inbox capture (status=pending) into a typed row: task | journal | note | " +
-    "interaction | decision. Requires an approved tier-2 unlock (minime_unlock) — a not-yet-" +
+    "interaction | decision | org | person. Requires an approved tier-2 unlock (minime_unlock) — a not-yet-" +
     "filed capture's text is tier-2-gated regardless of its eventual type (DECISIONS.md " +
     "2026-08-08). Optional overrides: title, due (YYYY-MM-DD), person_name, kind " +
     "(meeting|call|message|email|note), question, choice, mood (1-5), and tier (1|2 — honored " +
     "only when type=note, and floored to 2 whenever this capture's own stored classifier guess " +
     "was journal/interaction, so tier-2-grade text can never be filed as a lower-tier note). " +
-    "type=task/decision are rejected (BAD_INPUT) instead of downgraded when that same evidence " +
-    "says tier-2: neither table has a tier-2 representation, so file it as journal, " +
-    "interaction, or note (tier 2) instead. Rejects a non-pending item, and rejects a match " +
-    "against an existing open task (BAD_INPUT) rather than filing a duplicate. Resolves any " +
-    "open inbox_unfiled/duplicate review-queue items for this capture. Never echoes the " +
-    "capture's text back in its response.",
+    "type=org/person mint or reuse an identity (name from title or person_name) with name-only " +
+    "search chunks — the capture body is not copied onto the card. type=task/decision are " +
+    "rejected (BAD_INPUT) instead of downgraded when that same evidence says tier-2: neither " +
+    "table has a tier-2 representation, so file it as journal, interaction, or note (tier 2) " +
+    "instead. Rejects a non-pending item, and rejects a match against an existing open task " +
+    "(BAD_INPUT) rather than filing a duplicate. Resolves any open inbox_unfiled/duplicate " +
+    "review-queue items for this capture. Never echoes the capture's text back in its response.",
   schema: {
     inbox_item_id: z.string().uuid(),
     type: z.enum(REFILE_TYPE),
@@ -141,6 +157,17 @@ export const refileTool: ToolDef = {
     if (params.title !== undefined) fields.title = params.title;
     if (params.due !== undefined) fields.due = params.due;
     if (params.person_name !== undefined) fields.person_name = params.person_name;
+    if (type === "org" || type === "person") {
+      const supplied = params.title ?? params.person_name;
+      const name = identityCaptureName(text, { name: supplied });
+      if (!supplied || !name) {
+        throw new ToolError(
+          "BAD_INPUT",
+          "org/person refile needs a usable name (title or person_name)",
+        );
+      }
+      fields.name = name;
+    }
     if (params.kind !== undefined) fields.kind = params.kind;
     if (params.question !== undefined) fields.question = params.question;
     if (params.choice !== undefined) fields.choice = params.choice;

@@ -199,9 +199,10 @@ known candidates are:
   slot is now complete; CLIP/SigLIP stays deferred);
 - optional `source_file` frontmatter on capture-filed notes pointing at the
   originals-store path (deferred from this W5 slice — recovery-sensitive);
-- LLM segment pre-pass and first-class org/person capture types (the 2026-08-14
-  deterministic companion split covers legal-suffix / enumerated-company captures;
-  see `docs/known-issues/classifier-multi-entity-captures.md`); and
+- LLM segment pre-pass (the 2026-08-14 deterministic companion split covers
+  legal-suffix / enumerated-company captures; first-class org/person capture
+  types shipped 2026-08-14 — see
+  `docs/known-issues/classifier-multi-entity-captures.md`); and
 - close remaining known-issue documents once their behavioral regressions pass
   (extractor-phantom-orgs Fix C / high-edge watchdog shipped 2026-08-14; the
   live pre-Fix-B sweep and the LLM segmenter remain).

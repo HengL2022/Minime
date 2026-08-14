@@ -8,8 +8,10 @@ system losslessly and let the pipeline do the filing — do not over-process at 
 1. **Quote, don't paraphrase.** `minime_capture` with `text` = the owner's words (or the
    pasted content) verbatim. Light cleanup of dictation stutter is fine; rewriting is not.
 2. **Hint when obvious.** Set `hint` only when the type is unambiguous from what they said
-   ("remind me to…" → task; "today was…" → journal; otherwise omit and let the classifier
-   decide — a wrong hint is worse than none).
+   ("remind me to…" → task; "today was…" → journal; a company to remember as an identity →
+   `org / company record`; a person to remember as an identity → `person record`;
+   otherwise omit and let the classifier decide — a wrong hint is worse than none).
+   A first line `org: Name` or `person: Name` also files a resolvable identity instead of a page.
 3. **Confirm in one line** with the returned `inbox_item_id`: "Captured [inbox:ab12…] — the
    watcher will file it." Do not narrate the pipeline.
 4. **Low-confidence is fine.** If the watcher cannot classify it (< 0.7), it lands in the

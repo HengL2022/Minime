@@ -45,8 +45,23 @@ type AuditDelivery = "transport" | "direct";
 type AuditImporter = "calendar" | "email_meta" | "health" | "transactions";
 type AuditProvider = "ollama" | "anthropic" | "openai" | "openrouter" | "bedrock";
 type AuditEgressKind = "embed" | "classify";
-type ClassifierKind = "task" | "journal" | "interaction" | "note" | "decision_note" | "unknown";
-type FiledTable = "tasks" | "journal_entries" | "interactions" | "pages" | "decisions";
+type ClassifierKind =
+  | "task"
+  | "journal"
+  | "interaction"
+  | "note"
+  | "decision_note"
+  | "org"
+  | "person"
+  | "unknown";
+type FiledTable =
+  | "tasks"
+  | "journal_entries"
+  | "interactions"
+  | "pages"
+  | "decisions"
+  | "orgs"
+  | "people";
 // minime_correct's own type vocabulary (W2-4) — "note" not "page", matching ClassifierKind's
 // convention of naming the owner-facing type rather than the raw PARENTS table/ParentType.
 type CorrectType = "journal" | "interaction" | "decision" | "note";
@@ -596,7 +611,16 @@ function pushBrief(input: {
 }
 
 function classifierKind(value: unknown): ClassifierKind {
-  return fixed(value, ["task", "journal", "interaction", "note", "decision_note", "unknown"]);
+  return fixed(value, [
+    "task",
+    "journal",
+    "interaction",
+    "note",
+    "decision_note",
+    "org",
+    "person",
+    "unknown",
+  ]);
 }
 
 function correctType(value: unknown): CorrectType {
@@ -787,6 +811,8 @@ function inboxFiled(input: {
       "interactions",
       "pages",
       "decisions",
+      "orgs",
+      "people",
     ]),
     filed_id: uuid(input.filedId),
   });
@@ -808,6 +834,8 @@ function inboxRefiled(input: {
       "interactions",
       "pages",
       "decisions",
+      "orgs",
+      "people",
     ]),
     filed_id: uuid(input.filedId),
   });

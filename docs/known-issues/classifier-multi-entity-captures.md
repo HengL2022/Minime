@@ -3,8 +3,8 @@
 **Filed:** 2026-06-16 · **Area:** `src/pipeline/classify.ts`, `src/pipeline/watcher.ts`, `src/pipeline/segment.ts`
 **Severity:** medium (silent data-shape loss — no error, no review-queue flag)
 **Status:** mitigated 2026-08-14 — deterministic companion split for confident
-legal-suffix / enumerated-company captures. LLM segmentation and first-class
-org/person capture types remain future work.
+legal-suffix / enumerated-company captures. First-class org/person capture types
+shipped 2026-08-14. LLM segmentation remains future work.
 
 ## Symptom
 
@@ -48,14 +48,18 @@ export interface Classification {
 "this capture contains N fileable items," so the model is forced to pick the single
 best-fit type and everything else is narrative residue.
 
-### Secondary finding: there is no `org` type
+As of 2026-08-14 the closed set also includes `org` and `person` for dedicated
+identity captures. The single-label primary-row constraint remains.
 
-The classifier's type set has **no `org`/`company`/`person` creation path** at all.
-Captures describing a company are best-filed as `note` (pages). In the repro above,
-three explicit single-vendor captures *with* `hint: "org / company record"` were each
-filed as `note` (fixture pages A / B / C) — correct and searchable, but
-they are pages, not org entities, so `minime_get_context(type='org', …)` can't resolve
-them and no `works_at`-style edges can attach.
+### Secondary finding: there was no `org` type
+
+Until 2026-08-14 the classifier's type set had **no `org`/`company`/`person`
+creation path**. Captures describing a company were best-filed as `note` (pages).
+In the repro above, three explicit single-vendor captures *with*
+`hint: "org / company record"` were each filed as `note` (fixture pages A / B / C)
+— searchable, but pages, not org entities, so `minime_get_context(type='org', …)`
+could not resolve them and no `works_at`-style edges could attach. Dedicated
+identity captures now file `orgs`/`people` (see Shipped below).
 
 ## Mitigation (2026-08-14)
 
@@ -82,12 +86,18 @@ Tests: `test/segment.test.ts`, `test/multi-entity-capture.test.ts`.
 1. **LLM segment pre-pass.** Ask the model to split a capture into 1..N self-contained
    items *before* classifying each. Needed for multi-entity captures that do not use
    legal suffixes or an explicit supplier/vendor count.
-2. **First-class `org` / `person` capture types** with dedup against existing
-   `orgs`/`people` by name+alias, so a dedicated company capture becomes a resolvable
-   entity instead of a page.
-3. **`minime_search` withheld-hit signal** when a tier-2 row matched but was hidden
-   for lack of unlock — related to how this issue stayed invisible, not required for
-   the companion split.
+
+## Shipped after the companion split
+
+2. **First-class `org` / `person` capture types (2026-08-14).** Dedicated identity
+   captures (`hint: org / company record` / `person record`, or a first line
+   `org: Name` / `person: Name`) file `orgs`/`people` via `ensureOrg`/`ensurePerson`
+   (name+alias dedup). Search chunks are the name only — never the capture body.
+   `minime_refile` accepts `org` and `person`. A meeting/email/call is still
+   `interaction`.
+3. **`minime_search` withheld-hit signal.** Already shipped as
+   `suppressedTier2Count` / a gaps line on locked sessions (`hybridSearchDetailed`,
+   migration 039). Not required for the companion split.
 
 ## Workaround (still useful)
 

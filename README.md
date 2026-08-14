@@ -191,7 +191,7 @@ Owner-side companions include `unlock:approve`, `unlock:status`, `unlock:revoke`
 | `minime_state` | Builds a today-oriented snapshot: calendar, tasks, commitments, goals, reviews, upcoming dates, anomalies, filed-today, and ops health. |
 | `minime_list_metrics` | Lists every queryable metric—name, unit, description, rollup—with no SQL exposed; call before `minime_query_metric` when unsure of a name. |
 | `minime_query_metric` | Computes allowlisted numeric series in the caller's timezone; the only aggregate path to tier-0 data. |
-| `minime_capture` | Durably allocates and publishes an immutable text/Markdown inbox capture. |
+| `minime_capture` | Durably allocates and publishes an immutable text/Markdown inbox capture. Hint `org / company record` or `person record` (or a first line `org: Name` / `person: Name`) files a resolvable identity instead of a page. |
 | `minime_journal` | Writes a private journal entry with optional mood and energy. |
 | `minime_log_decision` | Saves a decision, its options/reasoning, review date, branches, and optional interview transcript. |
 | `minime_review_decision` | Records the actual outcome and can turn a learned lesson into a linked principle. |
@@ -199,7 +199,7 @@ Owner-side companions include `unlock:approve`, `unlock:status`, `unlock:revoke`
 | `minime_agenda` | Lists forward-looking tasks over a caller-zone date window, including undated open work. |
 | `minime_log_interaction` | Records a person/org interaction and updates relationship recency. |
 | `minime_review_queue` | Lists review flags and marks them resolved or dismissed; it never edits the flagged source rows. |
-| `minime_refile` | Files a pending inbox capture as a typed row under the anti-laundering evidence floor; requires an approved tier-2 unlock. |
+| `minime_refile` | Files a pending inbox capture as a typed row (task, journal, note, interaction, decision, org, or person) under the anti-laundering evidence floor; requires an approved tier-2 unlock. |
 | `minime_correct` | Amends, retracts, or retiers a journal, interaction, decision, or note; the original row is never deleted. |
 | `minime_unlock` | Requests a time-boxed tier-2 read; the owner must approve it in a local terminal. |
 | `minime_upsert_person` | Adds an alias, sets relation/context, or renames a person or org; merges are owner-run repairs. |

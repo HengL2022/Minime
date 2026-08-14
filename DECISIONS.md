@@ -3986,3 +3986,34 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   constraint migration for the same owner action.
 - **Approved by:** owner request to continue the current-state plan through the
   ordinary backlog (2026-08-14).
+
+## 2026-08-14 — First-class org/person capture types
+
+- **Context:** The closed classifier / audit / refile / `FiledTable` contract had
+  no dedicated identity destination. A company or person capture filed as a
+  `pages` note (or stayed unfiled), so `minime_get_context(type='org'|'person')`
+  could not resolve it and name+alias dedup never ran. This amends the public
+  classifier type set, `inbox:filed` / `inbox:refiled` / `inbox:unfiled` audit
+  allowlists, `minime_refile` destinations, and `inbox_items.filed_table`
+  values `orgs` / `people`. No migration and no new MCP tool.
+- **Decision:** `org` and `person` are first-class classifier types. Dedicated
+  identity captures (hint `org / company record` / `person record`, or a first
+  line `org: Name` / `company: Name` / `person: Name`) file through
+  `ensureOrg` / `ensurePerson` (`source=capture`, tier 1, `derived_from` the
+  inbox id) with name-only search chunks and `extractEdges: false`. The capture
+  body stays in the archive and is never copied onto the tier-1 card. Existing
+  canonical names and aliases are reused, not duplicated. An empty or
+  unparseable name does not mint `"Unknown"` — automatic filing leaves the
+  item unfiled; `minime_refile` requires `title` or `person_name` and rejects
+  an unusable name with `BAD_INPUT`. A meeting/email/call remains
+  `interaction`. Long notes about companies without an identity hint stay
+  `note`. Org/person refile is allowed even when the anti-laundering evidence
+  floor is 2, because the body is not indexed.
+- **Why:** The companion splitter already minted leftover identities this way;
+  the missing piece was a primary destination for a dedicated card. Pages
+  cannot attach `works_at` edges or answer get-context by org/person id.
+  Name-only chunks keep a later narrative from leaking onto a readable tier-1
+  identity. Conservative heuristics avoid stealing todos, meetings, and
+  ordinary notes.
+- **Approved by:** owner request to continue the current-state plan through the
+  ordinary backlog (2026-08-14).

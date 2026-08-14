@@ -29,7 +29,7 @@ auto-resolve).
      again), or running `bun run src/cli.ts review` in their own terminal, which lists every
      open `inbox_unfiled`/`duplicate` item with the full unmasked text and needs no unlock at
      all. Either way, once you both know what it is, ask "task, journal, note, interaction,
-     decision, or drop?" and file it with `minime_refile` — one call that reads the archived
+     decision, org, person, or drop?" and file it with `minime_refile` — one call that reads the archived
      capture itself, files the row, stamps `derived_from` back to the capture, and resolves
      this queue item (no separate `resolve` call needed). `minime_refile` always requires its
      own approved tier-2 unlock, regardless of how the owner read the text — filing tier-2-gated

@@ -12,7 +12,7 @@ import type { ToolDef } from "./registry";
 export const captureTool: ToolDef = {
   name: "minime_capture",
   description:
-    "Drop raw text into the inbox. The watcher classifies and files it (task / journal / interaction / note); low-confidence items go to the evening review queue.",
+    "Drop raw text into the inbox. The watcher classifies and files it (task / journal / interaction / note / org / person); low-confidence items go to the evening review queue. Hint `org / company record` or `person record` (or a first line `org: Name` / `person: Name`) files a resolvable identity instead of a page.",
   schema: {
     text: z.string().min(1),
     hint: z.string().optional(),

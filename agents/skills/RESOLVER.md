@@ -50,8 +50,9 @@ Writes:
 
 - `minime_capture`, `minime_journal`, `minime_log_decision`, `minime_review_decision`,
   `minime_upsert_task`, `minime_log_interaction`
-- `minime_refile` — file a pending inbox capture as a typed row; always needs an approved
-  tier-2 unlock; never echoes the capture text
+- `minime_refile` — file a pending inbox capture as a typed row (task, journal, note,
+  interaction, decision, org, or person); always needs an approved tier-2 unlock; never
+  echoes the capture text
 - `minime_correct` — amend / retract / retier a journal, interaction, decision, or note
 - `minime_upsert_person` — alias, relation/context, or rename; merges are owner-run repairs
 - `minime_set_person_date` — birthday, anniversary, or custom recurring person date
