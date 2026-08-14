@@ -102,8 +102,7 @@ describe("authoritative verification contract", () => {
         "bun --no-env-file run scripts/recovery-ops.ts drill",
       );
     } finally {
-      if (previous === undefined) delete process.env.MAKEFLAGS;
-      else process.env.MAKEFLAGS = previous;
+      process.env.MAKEFLAGS = previous;
     }
   });
 
