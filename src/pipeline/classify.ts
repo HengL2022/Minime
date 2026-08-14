@@ -5,8 +5,20 @@
 import { todayStr } from "../util/clock";
 import { config } from "../util/config";
 
+export const CLASSIFIER_TYPES = [
+  "task",
+  "journal",
+  "interaction",
+  "note",
+  "decision_note",
+  "org",
+  "person",
+  "unknown",
+] as const;
+export type ClassifierType = (typeof CLASSIFIER_TYPES)[number];
+
 export interface Classification {
-  type: "task" | "journal" | "interaction" | "note" | "decision_note" | "unknown";
+  type: ClassifierType;
   confidence: number;
   fields: Record<string, any>;
   // One-line justification for the type/confidence call. Persisted in the
@@ -25,8 +37,10 @@ export function buildPrompt(today: string): string {
   return `You classify a short personal capture into exactly one type.
 Today's date is ${today} (YYYY-MM-DD). Resolve every relative date — "today", "tomorrow",
 "this/next Friday", "in two weeks" — against ${today}. Never output a due date in the past.
-Types: task (something to do), journal (reflection/diary), interaction (met/called/messaged a person),
-note (reference information), decision_note (a decision made or being weighed), unknown.
+Types: task (something to do), journal (reflection/diary), interaction (met/called/messaged a person or org),
+note (reference information), decision_note (a decision made or being weighed),
+org (a dedicated company/vendor/institution identity — not a meeting with them),
+person (a dedicated person identity — not a meeting with them), unknown.
 Reply with ONLY a JSON object: {"type": "...", "confidence": 0.0-1.0, "reason": "...", "fields": {...}}.
 "reason" is one short sentence (<=140 chars) justifying the type and confidence; when confidence is low,
 say what made it ambiguous (e.g. "could be task or interaction", "two intents in one capture", "unknown person").
@@ -35,8 +49,10 @@ interaction -> {"person_name": string, "kind": "meeting"|"call"|"message"|"email
 For interaction, set "subject_type" to "org" when the counterparty is a COMPANY / vendor / lab /
 institution / supplier (e.g. "emailed Fjordsonics, an acoustic sensing company", "called Fjordsonics AS about the hydrophone order")
 and "person" when it is an individual human ("met Tomasz about the calibration rig"). When unsure, use "person".
+Use type org or person only for a dedicated identity capture (hint "org / company record" or
+"person record", or a first line "org: Name" / "person: Name"). A meeting/email/call is interaction.
 journal -> {"mood": 1-5 | null}; decision_note -> {"question": string, "choice": string | null};
-note -> {"title": string}; unknown -> {}.
+note -> {"title": string}; org -> {"name": string}; person -> {"name": string}; unknown -> {}.
 
 Text:
 `;
@@ -75,10 +91,7 @@ export function orgCue(text: string): boolean {
 // to the first sentence/clause boundary (before the forward-looking "but/however/need to"
 // part), strip a leading "decision:"/"decided" prefix, and cap at 120 chars.
 export function completionTitle(text: string): string {
-  const firstLine = text
-    .split("\n")[0]!
-    .replace(/^<!--.*?-->\s*/s, "")
-    .trim();
+  const firstLine = captureBodyFirstLine(text);
   // cut at the pivot into forward-looking territory, or the first sentence end
   const clause = firstLine.split(/\s*(?:[.;]|\bbut\b|\bhowever\b|\bneed to\b|\bnote:)/i)[0]!.trim();
   const base = (clause || firstLine).replace(/^(decision|decided)\b[:\s-]*/i, "").trim();
@@ -100,9 +113,7 @@ export function completionTitle(text: string): string {
 //   - the pivot is an explicit decision verb: "and decide on/whether/if/between ...".
 export function splitActionDecision(text: string): { action: string; decision: string } | null {
   if (completionSignal(text)) return null;
-  const firstLine = text
-    .split("\n")[0]!
-    .replace(/^<!--.*?-->\s*/s, "")
+  const firstLine = captureBodyFirstLine(text)
     .replace(/^(todo|task)[:\s]+/i, "")
     .trim();
   // pivot: "... and decide on/whether/if/between <rest>" (also "and decide to/about/...").
@@ -118,13 +129,46 @@ export function splitActionDecision(text: string): { action: string; decision: s
   return { action, decision };
 }
 
+// minime_capture writes `<!-- hint: … -->\n${text}`, so the usable first line is
+// after that comment — not the comment line itself.
+export function captureBodyFirstLine(text: string): string {
+  return text
+    .replace(/^<!--.*?-->\s*/s, "")
+    .split("\n")[0]!
+    .trim();
+}
+
+export function heuristicIdentityType(text: string): "org" | "person" | null {
+  const hint =
+    text
+      .match(/<!--\s*hint:\s*([^>]+?)-->/i)?.[1]
+      ?.trim()
+      .toLowerCase() ?? "";
+  if (/\borg\s*\/\s*company\b/.test(hint) || /^(org|company)(\s+record)?$/.test(hint)) return "org";
+  if (/^person(\s+record)?$/.test(hint)) return "person";
+  const first = captureBodyFirstLine(text);
+  if (/^(org|company):\s+\S/i.test(first)) return "org";
+  if (/^person:\s+\S/i.test(first)) return "person";
+  return null;
+}
+
+export function identityCaptureName(
+  text: string,
+  fields: Record<string, unknown> = {},
+): string | null {
+  const fromFields = typeof fields.name === "string" ? fields.name.trim() : "";
+  const stripped = captureBodyFirstLine(text)
+    .replace(/^(org|company|person):\s+/i, "")
+    .trim();
+  const name = (fromFields || stripped).replace(/\s+/g, " ").slice(0, 120);
+  if (name.length < 2 || !/\p{L}/u.test(name)) return null;
+  return name;
+}
+
 export function heuristicClassify(text: string): Classification {
   const t = text.trim();
   const lower = t.toLowerCase();
-  const firstLine = t
-    .split("\n")[0]!
-    .replace(/^<!--.*?-->\s*/s, "")
-    .trim();
+  const firstLine = captureBodyFirstLine(t);
 
   if (t.length < 3 || !/[a-z]/i.test(t))
     return { type: "unknown", confidence: 0.2, fields: {}, reason: "too short or no letters" };
@@ -140,6 +184,21 @@ export function heuristicClassify(text: string): Classification {
       fields: { title, due },
       reason: "explicit todo/task/remind-me prefix",
     };
+  }
+  const identity = heuristicIdentityType(t);
+  if (identity) {
+    const name = identityCaptureName(t);
+    if (name) {
+      return {
+        type: identity,
+        confidence: 0.9,
+        fields: { name },
+        reason:
+          identity === "org"
+            ? "dedicated org/company identity capture"
+            : "dedicated person identity capture",
+      };
+    }
   }
   if (/^(met|call(ed)? with|talked to|coffee with|lunch with)\b/i.test(firstLine)) {
     const m = firstLine.match(
@@ -192,9 +251,7 @@ export async function classify(text: string): Promise<Classification> {
       buildPrompt(todayStr()) + text.slice(0, 4000),
     );
     const parsed = JSON.parse(raw);
-    const type = ["task", "journal", "interaction", "note", "decision_note", "unknown"].includes(
-      parsed.type,
-    )
+    const type = (CLASSIFIER_TYPES as readonly string[]).includes(parsed.type)
       ? parsed.type
       : "unknown";
     const confidence =

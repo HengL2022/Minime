@@ -191,7 +191,7 @@
   },
   {
     "name": "minime_capture",
-    "description": "Drop raw text into the inbox. The watcher classifies and files it (task / journal / interaction / note); low-confidence items go to the evening review queue.",
+    "description": "Drop raw text into the inbox. The watcher classifies and files it (task / journal / interaction / note / org / person); low-confidence items go to the evening review queue. Hint `org / company record` or `person record` (or a first line `org: Name` / `person: Name`) files a resolvable identity instead of a page.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -715,7 +715,7 @@
   },
   {
     "name": "minime_refile",
-    "description": "File a pending inbox capture (status=pending) into a typed row: task | journal | note | interaction | decision. Requires an approved tier-2 unlock (minime_unlock) — a not-yet-filed capture's text is tier-2-gated regardless of its eventual type (DECISIONS.md 2026-08-08). Optional overrides: title, due (YYYY-MM-DD), person_name, kind (meeting|call|message|email|note), question, choice, mood (1-5), and tier (1|2 — honored only when type=note, and floored to 2 whenever this capture's own stored classifier guess was journal/interaction, so tier-2-grade text can never be filed as a lower-tier note). type=task/decision are rejected (BAD_INPUT) instead of downgraded when that same evidence says tier-2: neither table has a tier-2 representation, so file it as journal, interaction, or note (tier 2) instead. Rejects a non-pending item, and rejects a match against an existing open task (BAD_INPUT) rather than filing a duplicate. Resolves any open inbox_unfiled/duplicate review-queue items for this capture. Never echoes the capture's text back in its response.",
+    "description": "File a pending inbox capture (status=pending) into a typed row: task | journal | note | interaction | decision | org | person. Requires an approved tier-2 unlock (minime_unlock) — a not-yet-filed capture's text is tier-2-gated regardless of its eventual type (DECISIONS.md 2026-08-08). Optional overrides: title, due (YYYY-MM-DD), person_name, kind (meeting|call|message|email|note), question, choice, mood (1-5), and tier (1|2 — honored only when type=note, and floored to 2 whenever this capture's own stored classifier guess was journal/interaction, so tier-2-grade text can never be filed as a lower-tier note). type=org/person mint or reuse an identity (name from title or person_name) with name-only search chunks — the capture body is not copied onto the card. type=task/decision are rejected (BAD_INPUT) instead of downgraded when that same evidence says tier-2: neither table has a tier-2 representation, so file it as journal, interaction, or note (tier 2) instead. Rejects a non-pending item, and rejects a match against an existing open task (BAD_INPUT) rather than filing a duplicate. Resolves any open inbox_unfiled/duplicate review-queue items for this capture. Never echoes the capture's text back in its response.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -730,7 +730,9 @@
             "journal",
             "note",
             "interaction",
-            "decision"
+            "decision",
+            "org",
+            "person"
           ]
         },
         "title": {

@@ -182,8 +182,8 @@ metric (name, unit, description, rollup) with no SQL exposed — call it before
 `minime_query_metric` when unsure of a metric name; `UNKNOWN_METRIC` errors point here too.
 Numbers come only from `minime_query_metric`. `minime_timeline` is the exhaustive date-range
 read; `minime_search`'s optional `from`/`to` only filters already-ranked candidates.
-`minime_refile` files a pending capture as a typed row and always needs an approved tier-2
-unlock. `minime_correct` amends, retracts, or retiers a journal/interaction/decision/note.
+`minime_refile` files a pending capture as a typed row (task, journal, note, interaction,
+decision, org, or person) and always needs an approved tier-2 unlock. `minime_correct` amends, retracts, or retiers a journal/interaction/decision/note.
 `minime_upsert_person` / `minime_set_person_date` / `minime_upsert_goal` /
 `minime_upsert_commitment` write those objects; identity merges stay owner-run
 (`scripts/repair.ts merge-person`). `minime_log_expense` is insert-only into tier 0 and never

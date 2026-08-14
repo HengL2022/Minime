@@ -3,8 +3,9 @@
 **Filed:** 2026-06-16 · **Area:** `src/pipeline/classify.ts`, `src/pipeline/watcher.ts`, `src/pipeline/segment.ts`
 **Severity:** medium (silent data-shape loss — no error, no review-queue flag)
 **Status:** mitigated 2026-08-14 — deterministic companion split for confident
-legal-suffix / enumerated-company captures. LLM segmentation and first-class
-org/person capture types remain future work.
+legal-suffix / enumerated-company captures; first-class org/person capture types;
+LLM entity-plan fallback for suffix-less multi-name captures. A 1..N
+classify-and-file split of mixed intents remains out of scope.
 
 ## Symptom
 
@@ -48,14 +49,18 @@ export interface Classification {
 "this capture contains N fileable items," so the model is forced to pick the single
 best-fit type and everything else is narrative residue.
 
-### Secondary finding: there is no `org` type
+As of 2026-08-14 the closed set also includes `org` and `person` for dedicated
+identity captures. The single-label primary-row constraint remains.
 
-The classifier's type set has **no `org`/`company`/`person` creation path** at all.
-Captures describing a company are best-filed as `note` (pages). In the repro above,
-three explicit single-vendor captures *with* `hint: "org / company record"` were each
-filed as `note` (fixture pages A / B / C) — correct and searchable, but
-they are pages, not org entities, so `minime_get_context(type='org', …)` can't resolve
-them and no `works_at`-style edges can attach.
+### Secondary finding: there was no `org` type
+
+Until 2026-08-14 the classifier's type set had **no `org`/`company`/`person`
+creation path**. Captures describing a company were best-filed as `note` (pages).
+In the repro above, three explicit single-vendor captures *with*
+`hint: "org / company record"` were each filed as `note` (fixture pages A / B / C)
+— searchable, but pages, not org entities, so `minime_get_context(type='org', …)`
+could not resolve them and no `works_at`-style edges could attach. Dedicated
+identity captures now file `orgs`/`people` (see Shipped below).
 
 ## Mitigation (2026-08-14)
 
@@ -79,19 +84,33 @@ Tests: `test/segment.test.ts`, `test/multi-entity-capture.test.ts`.
 
 ## Still open
 
-1. **LLM segment pre-pass.** Ask the model to split a capture into 1..N self-contained
-   items *before* classifying each. Needed for multi-entity captures that do not use
-   legal suffixes or an explicit supplier/vendor count.
-2. **First-class `org` / `person` capture types** with dedup against existing
-   `orgs`/`people` by name+alias, so a dedicated company capture becomes a resolvable
-   entity instead of a page.
-3. **`minime_search` withheld-hit signal** when a tier-2 row matched but was hidden
-   for lack of unlock — related to how this issue stayed invisible, not required for
-   the companion split.
+1. **1..N classify-and-file split.** A mixed dump that is a task *and* an
+   interaction *and* a note still files one primary type. The entity-plan
+   fallback only mints leftover orgs/people. Splitting into several primary
+   rows would change inbox cardinality and stays deferred.
+
+## Shipped after the companion split
+
+1. **LLM entity-plan fallback (2026-08-14).** When the deterministic cue is
+   silent, a weaker multi-name cue (`First Last at Org` pairs, two First Last
+   names after a meet/coffee verb, or two multi-word names after emailed/called)
+   may ask the classify provider (assumed tier 2) for named orgs/people. Mock
+   mode uses the same cue heuristically. Companions reuse the existing mint
+   (tier 1, name-only chunks). Failure, junk, one name, or "met Alice and Bob"
+   stays on the single-classify path and does not unfile. Tests:
+   `test/segment.test.ts`, `test/multi-entity-capture.test.ts`.
+2. **First-class `org` / `person` capture types (2026-08-14).** Dedicated identity
+   captures (`hint: org / company record` / `person record`, or a first line
+   `org: Name` / `person: Name`) file `orgs`/`people` via `ensureOrg`/`ensurePerson`
+   (name+alias dedup). Search chunks are the name only — never the capture body.
+   `minime_refile` accepts `org` and `person`. A meeting/email/call is still
+   `interaction`.
+3. **`minime_search` withheld-hit signal.** Already shipped as
+   `suppressedTier2Count` / a gaps line on locked sessions (`hybridSearchDetailed`,
+   migration 039). Not required for the companion split.
 
 ## Workaround (still useful)
 
-Capture **one entity per call** with an unambiguous first line when the deterministic
-cue will not fire. Multi-entity events can still be logged as a single
-`interaction`/`note` for the narrative; names the splitter cannot parse still need
-their own capture.
+Capture **one entity per call** with an unambiguous first line when neither the
+legal-suffix cue nor the weaker multi-name cue will fire. Mixed-intent dumps
+(task + interaction + note) still need a split at the door.

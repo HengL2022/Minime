@@ -4211,7 +4211,7 @@ export async function restoreEntityTier(
 
 // inbox_items.filed_table (the raw SQL table name fileRow/refile.ts just filed into) -> the
 // ParentType parentMeta expects. Fixed map, not user input; mirrors refile.ts's own SOURCE_TYPE
-// (a different layer, same five destinations — pipeline/watcher.ts's FiledTable is the closed
+// (a different layer, same closed destinations — pipeline/watcher.ts's FiledTable is the
 // set fileRow ever produces). Kept local to this file rather than imported/exported: repo.ts
 // must not depend on src/pipeline or src/mcp/tools (layering).
 const FILED_TABLE_PARENT_TYPE: Record<string, ParentType> = {
@@ -4220,6 +4220,8 @@ const FILED_TABLE_PARENT_TYPE: Record<string, ParentType> = {
   pages: "page",
   interactions: "interaction",
   decisions: "decision",
+  orgs: "org",
+  people: "person",
 };
 
 // Mirrors review-queue.ts's HIDDEN sentinel. Duplicated rather than imported: repo.ts must not

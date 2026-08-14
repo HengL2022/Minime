@@ -46,22 +46,32 @@ import { auditPayload } from "../util/audit-payload";
 import { todayStr } from "../util/clock";
 import { config } from "../util/config";
 import {
+  CLASSIFIER_TYPES,
   type Classification,
+  captureBodyFirstLine,
   classify,
   completionSignal,
   completionTitle,
+  identityCaptureName,
   orgCue,
   splitActionDecision,
 } from "./classify";
 import { findDuplicate } from "./dedup";
 import { storeInboxOriginal } from "./originals";
 import { InboxParseError, type InboxParseResult, parseInboxSource } from "./parse";
-import { planCaptureEntities } from "./segment";
+import { type EntityPlan, planCaptureEntities, resolveEntityPlan } from "./segment";
 
 const ACTOR = "agent:classifier";
 const CONFIDENCE_FLOOR = 0.7;
 const RETRY_BACKOFF_MS = 5_000;
-export type FiledTable = "tasks" | "journal_entries" | "interactions" | "pages" | "decisions";
+export type FiledTable =
+  | "tasks"
+  | "journal_entries"
+  | "interactions"
+  | "pages"
+  | "decisions"
+  | "orgs"
+  | "people";
 
 export interface NoteProjection {
   absolutePath: string;
@@ -204,11 +214,7 @@ export function noteHintTier(text: string): 1 | 2 {
 }
 
 function firstLineOf(text: string): string {
-  return text
-    .split("\n")[0]!
-    .replace(/^<!--.*?-->\s*/s, "")
-    .trim()
-    .slice(0, 200);
+  return captureBodyFirstLine(text).slice(0, 200);
 }
 
 function noteProjection(c: Classification, text: string, inboxId: string): NoteProjection {
@@ -239,9 +245,7 @@ export function storedClassification(value: unknown): Classification | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<Classification>;
   if (
-    !["task", "journal", "interaction", "note", "decision_note", "unknown"].includes(
-      String(candidate.type),
-    ) ||
+    !(CLASSIFIER_TYPES as readonly string[]).includes(String(candidate.type)) ||
     typeof candidate.confidence !== "number" ||
     !candidate.fields ||
     typeof candidate.fields !== "object"
@@ -266,10 +270,11 @@ export async function fileRow(
   text: string,
   inboxId: string,
   actor: string = ACTOR,
+  plan?: EntityPlan,
 ): Promise<FiledResult | "duplicate" | null> {
   const result = await filePrimaryRow(c, text, inboxId, actor);
   if (result && result !== "duplicate") {
-    await fileCompanionEntities(c, text, inboxId, actor);
+    await fileCompanionEntities(c, text, inboxId, actor, plan ?? planCaptureEntities(text));
   }
   return result;
 }
@@ -289,13 +294,15 @@ async function fileCompanionEntities(
   text: string,
   inboxId: string,
   actor: string,
+  plan: EntityPlan,
 ): Promise<void> {
-  const plan = planCaptureEntities(text);
   if (plan.kind !== "entities") return;
   const subject =
     c.type === "interaction" && typeof c.fields.person_name === "string"
       ? c.fields.person_name
-      : null;
+      : c.type === "org" || c.type === "person"
+        ? identityCaptureName(text, c.fields)
+        : null;
   const orgIds: string[] = [];
   const personIds: string[] = [];
   const indexOpts = { ...INDEX_OPTIONS, extractEdges: false };
@@ -327,8 +334,30 @@ async function fileCompanionEntities(
   });
 }
 
-function applyUncertainEntityPlan(c: Classification, text: string): Classification {
-  const plan = planCaptureEntities(text);
+// Dedicated org/person captures become resolvable identities, not pages. Name-only
+// chunks — never the capture body — so a later narrative cannot leak onto a tier-1 card.
+// ensureOrg/ensurePerson already dedup by canonical name + alias.
+async function fileIdentityRow(
+  kind: "org" | "person",
+  c: Classification,
+  text: string,
+  inboxId: string,
+  actor: string,
+): Promise<FiledResult | null> {
+  const name = identityCaptureName(text, c.fields);
+  if (!name) return null;
+  const indexOpts = { ...INDEX_OPTIONS, extractEdges: false };
+  if (kind === "org") {
+    const org = await ensureOrg(name, actor, "capture", { tier: 1, derivedFrom: inboxId });
+    await indexParentIfEmpty("org", org.id, name, name, 1, indexOpts);
+    return { primary: ["orgs", org.id] };
+  }
+  const person = await ensurePerson(name, actor, "capture", { tier: 1, derivedFrom: inboxId });
+  await indexParentIfEmpty("person", person.id, name, name, 1, indexOpts);
+  return { primary: ["people", person.id] };
+}
+
+function applyUncertainEntityPlan(c: Classification, plan: EntityPlan): Classification {
   if (plan.kind !== "uncertain") return c;
   return {
     ...c,
@@ -564,6 +593,10 @@ async function filePrimaryRow(
       }
       return { primary: ["decisions", id] };
     }
+    case "org":
+      return fileIdentityRow("org", c, text, inboxId, actor);
+    case "person":
+      return fileIdentityRow("person", c, text, inboxId, actor);
     case "note": {
       // notes become brain pages so they live in the markdown archive (I4). Agent-session
       // captures (SessionEnd hook) carry verbatim prompt/outcome text from arbitrary
@@ -665,16 +698,18 @@ async function classifyAndFileInbox(
 ): Promise<{ inboxId: string; filed: boolean }> {
   let c = storedClassification(item.classifier_output);
   if (!c) c = await classify(text);
-  // Deterministic entity plan is derived from the parsed markdown, not the model. An
-  // unparseable multi-entity cue must land in inbox_unfiled (never guess names); persist
-  // the lowered plan so a stale-claim replay does not re-ask the model and then auto-file.
-  c = applyUncertainEntityPlan(c, text);
+  // Entity plan: deterministic legal-suffix / enumeration first; a weaker LLM
+  // fallback only when that plan is silent. An unparseable strong cue must land
+  // in inbox_unfiled (never guess names); persist the lowered plan so a stale-claim
+  // replay does not re-ask the model and then auto-file.
+  const plan = await resolveEntityPlan(text);
+  c = applyUncertainEntityPlan(c, plan);
   await setInboxClassification(item.id, token, c);
 
   const outcome = await withDbTransaction(async () => {
     await assertInboxClaim(item.id, token);
     if (c.confidence >= CONFIDENCE_FLOOR && c.type !== "unknown") {
-      const result = await fileRow(c, text, item.id);
+      const result = await fileRow(c, text, item.id, ACTOR, plan);
       if (result === "duplicate") {
         await setInboxPendingClaimed(item.id, token, c);
         return { filed: false } as const;
