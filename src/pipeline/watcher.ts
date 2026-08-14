@@ -35,7 +35,7 @@ import {
   upsertPage,
   upsertTask,
 } from "../db/repo";
-import { drainEmbedBacklog, indexParent } from "../search/index-parent";
+import { drainEmbedBacklog, indexParent, indexParentIfEmpty } from "../search/index-parent";
 import {
   assertNoSymlinkComponents,
   atomicCreatePrivate,
@@ -53,6 +53,7 @@ import {
   splitActionDecision,
 } from "./classify";
 import { findDuplicate } from "./dedup";
+import { planCaptureEntities } from "./segment";
 
 const ACTOR = "agent:classifier";
 const CONFIDENCE_FLOOR = 0.7;
@@ -248,13 +249,90 @@ export function storedClassification(value: unknown): Classification | null {
 // minime_refile (W2-3) passes its ctx.actor so an owner-initiated filing is attributed to the
 // real MCP caller instead of the classifier (I5 provenance; invariant-review 2026-08-08). The
 // bookkeeping events below (inbox:duplicate, inbox:split-decision, inbox:split-done-task,
-// inbox:closed-existing-task) still log actor=ACTOR either way — the wrapping tool:minime_refile
-// and inbox:refiled audit events already record the true actor for a refile-triggered call.
+// inbox:split-entities, inbox:closed-existing-task) still log actor=ACTOR either way — the
+// wrapping tool:minime_refile and inbox:refiled audit events already record the true actor
+// for a refile-triggered call.
 export async function fileRow(
   c: Classification,
   text: string,
   inboxId: string,
   actor: string = ACTOR,
+): Promise<FiledResult | "duplicate" | null> {
+  const result = await filePrimaryRow(c, text, inboxId, actor);
+  if (result && result !== "duplicate") {
+    await fileCompanionEntities(c, text, inboxId, actor);
+  }
+  return result;
+}
+
+function sameEntityName(a: string, b: string): boolean {
+  return (
+    a.replace(/\s+/g, " ").trim().toLowerCase() === b.replace(/\s+/g, " ").trim().toLowerCase()
+  );
+}
+
+// After the single-label primary row, mint any extra named orgs/people the capture
+// confidently listed. Identity only (tier 1, name-only chunks) — never copy the capture
+// body onto a companion, or a tier-2 interaction would leak into a tier-1 org chunk.
+// Existing names are reused, not duplicated; the interaction subject is skipped.
+async function fileCompanionEntities(
+  c: Classification,
+  text: string,
+  inboxId: string,
+  actor: string,
+): Promise<void> {
+  const plan = planCaptureEntities(text);
+  if (plan.kind !== "entities") return;
+  const subject =
+    c.type === "interaction" && typeof c.fields.person_name === "string"
+      ? c.fields.person_name
+      : null;
+  const orgIds: string[] = [];
+  const personIds: string[] = [];
+  const indexOpts = { ...INDEX_OPTIONS, extractEdges: false };
+  for (const entity of plan.entities) {
+    if (subject && sameEntityName(entity.name, subject)) continue;
+    if (entity.kind === "org") {
+      const org = await ensureOrg(entity.name, actor, "capture", {
+        tier: 1,
+        derivedFrom: inboxId,
+      });
+      await indexParentIfEmpty("org", org.id, entity.name, entity.name, 1, indexOpts);
+      orgIds.push(org.id);
+    } else {
+      const person = await ensurePerson(entity.name, actor, "capture", {
+        tier: 1,
+        derivedFrom: inboxId,
+      });
+      await indexParentIfEmpty("person", person.id, entity.name, entity.name, 1, indexOpts);
+      personIds.push(person.id);
+    }
+  }
+  if (orgIds.length === 0 && personIds.length === 0) return;
+  await logEvent({
+    actor: ACTOR,
+    verb: "inbox:split-entities",
+    entityType: "inbox_item",
+    entityId: inboxId,
+    payload: auditPayload.inboxSplitEntities({ orgIds, personIds }),
+  });
+}
+
+function applyUncertainEntityPlan(c: Classification, text: string): Classification {
+  const plan = planCaptureEntities(text);
+  if (plan.kind !== "uncertain") return c;
+  return {
+    ...c,
+    confidence: Math.min(c.confidence, 0.4),
+    reason: plan.reason,
+  };
+}
+
+async function filePrimaryRow(
+  c: Classification,
+  text: string,
+  inboxId: string,
+  actor: string,
 ): Promise<FiledResult | "duplicate" | null> {
   const firstLine = firstLineOf(text);
   switch (c.type) {
@@ -550,10 +628,12 @@ async function processInboxSnapshot(
     let c = storedClassification(claim.item.classifier_output);
     if (!c) {
       c = await classify(text);
-      // Persist the model plan under the fenced claim before finalization. If the process dies,
-      // a stale claimant reuses the same plan instead of asking the model to segment differently.
-      await setInboxClassification(item.id, claim.token, c);
     }
+    // Deterministic entity plan is derived from the bytes, not the model. An unparseable
+    // multi-entity cue must land in inbox_unfiled (never guess names); persist the lowered
+    // plan so a stale-claim replay does not re-ask the model and then auto-file.
+    c = applyUncertainEntityPlan(c, text);
+    await setInboxClassification(item.id, claim.token, c);
 
     const outcome = await withDbTransaction(async () => {
       await assertInboxClaim(item.id, claim.token);

@@ -187,9 +187,10 @@ known candidates are:
 
 - coordinate multiple MCP processes so one process owns watcher/dream/backup work with clean
   takeover;
-- split genuine multi-entity inbox captures into idempotent typed items, routing uncertainty to
-  review; and
-- close related known-issue documents once their behavioral regressions pass.
+- LLM segment pre-pass and first-class org/person capture types (the 2026-08-14
+  deterministic companion split covers legal-suffix / enumerated-company captures;
+  see `docs/known-issues/classifier-multi-entity-captures.md`); and
+- close remaining known-issue documents once their behavioral regressions pass.
 
 Agent skill wording for owner-approved tier-2 unlocks and timezone-aware output should stay aligned
 as ordinary documentation maintenance. These improvements matter, but bundling them into the

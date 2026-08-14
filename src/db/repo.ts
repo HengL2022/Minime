@@ -788,6 +788,15 @@ export async function recentEventsByVerb(verb: string, limit: number): Promise<a
 
 // ---------------------------------------------------------------- chunks & search
 
+export async function parentHasChunks(parentType: ParentType, parentId: string): Promise<boolean> {
+  // count(*)::int, not exists(): postgres.js has returned a truthy non-boolean for a
+  // false exists, which would skip indexing a newly minted companion identity.
+  const [row] = await db()`
+    select count(*)::int as n from chunks
+    where parent_type = ${parentType} and parent_id = ${parentId}`;
+  return (row?.n ?? 0) > 0;
+}
+
 export async function replaceChunks(
   parentType: ParentType,
   parentId: string,

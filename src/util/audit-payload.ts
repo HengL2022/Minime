@@ -23,6 +23,7 @@ type AuditPayloadKind =
   | "inboxRefiled"
   | "inboxSplitDecision"
   | "inboxSplitDoneTask"
+  | "inboxSplitEntities"
   | "inboxUnfiled"
   | "llmClassifyEgress"
   | "llmClassifyOutcome"
@@ -760,6 +761,15 @@ function inboxSplitDoneTask(input: { decisionId: string; taskId: string }): Audi
   });
 }
 
+function inboxSplitEntities(input: { orgIds: string[]; personIds: string[] }): AuditPayload {
+  return construct("inboxSplitEntities", {
+    org_ids: uuids(input.orgIds),
+    person_ids: uuids(input.personIds),
+    org_count: nonNegativeInteger(input.orgIds.length),
+    person_count: nonNegativeInteger(input.personIds.length),
+  });
+}
+
 function inboxFiled(input: {
   kind: ClassifierKind;
   confidence: number;
@@ -835,6 +845,7 @@ export const auditPayload = Object.freeze({
   inboxRefiled,
   inboxSplitDecision,
   inboxSplitDoneTask,
+  inboxSplitEntities,
   inboxUnfiled,
   llmEgress,
   llmEgressOutcome,
@@ -910,6 +921,7 @@ function expectedPayloadKind(verb: string, payload: AuditPayload): AuditPayloadK
     "inbox:refiled": "inboxRefiled",
     "inbox:split-decision": "inboxSplitDecision",
     "inbox:split-done-task": "inboxSplitDoneTask",
+    "inbox:split-entities": "inboxSplitEntities",
     "inbox:unfiled": "inboxUnfiled",
     "onboard:complete": "onboardComplete",
     "person:upsert": "personUpsert",

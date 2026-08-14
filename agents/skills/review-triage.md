@@ -21,6 +21,9 @@ auto-resolve).
    - **inbox_unfiled** — the queue item always carries the classifier's `type`/`confidence`
      guess under `payload.capture` (e.g. "note, 0.62"); its `reason` and a ~500-char text
      excerpt read `[above current tier]` until this session has an approved tier-2 unlock.
+     `reason` may be a multi-entity parse failure (the capture named several companies or
+     people but the names could not be extracted confidently — file one entity at a time,
+     or refile the narrative and capture the missing names separately).
      Offer the owner a choice: a short unlock (`minime_unlock`, hand them the returned local
      approval command, wait for them to approve it before re-reading — a reconnect locks it
      again), or running `bun run src/cli.ts review` in their own terminal, which lists every

@@ -3863,3 +3863,30 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   that authorized this branch's fully autonomous, wave-by-wave execution across the W4 workstream
   — task W4-10's own spec named this narrowing, the allowlist, and the disclosure up front and
   required this entry as a privacy/public-interface change to redaction semantics.
+
+## 2026-08-14 — Deterministic multi-entity inbox companions
+
+- **Context:** The 2026-08-06 inbox-identity decision left general model-driven multi-entity
+  segmentation on the backlog. A capture that names several companies or people still files as
+  one typed row; the other names survive only in that row's body. When that row is a tier-2
+  interaction, those names are invisible to search without an unlock. This changes the inbox
+  filing contract and adds a public audit verb. It does not add an LLM call, a new review-queue
+  kind, or a first-class org/person capture type.
+- **Decision:** Before auto-file, derive a deterministic entity plan from the capture bytes
+  (`planCaptureEntities`). The plan is inert unless the text has two or more legal-suffix
+  organizations or an explicit supplier/vendor/company enumeration — "met Alice and Bob" stays
+  on the single-classify path. A confident plan of 2–8 names files the existing single-label
+  primary row, then mints leftover orgs/people at tier 1 with `derived_from = inbox_item.id`
+  and name-only search chunks (never the capture body). The interaction subject is not minted
+  twice. The split commits in the same fenced inbox transaction as the other conservative
+  companions and is audited as `inbox:split-entities` with ids and counts, never names. An
+  unparseable cue, or more than eight names, lowers classifier confidence to ≤0.4 so the
+  existing `inbox_unfiled` path runs; the owner files or recaptures rather than the system
+  guessing. Replay of an already-filed capture does not mint again.
+- **Why:** The classifier remains single-label; guessing extra rows from a model segmenter
+  would be a larger, less reversible contract. Restricting the cue and capping the count keeps
+  ordinary captures at one classify call. Tier-1 name-only companions make the named
+  suppliers resolvable without copying tier-2 narrative onto a lower-tier chunk. Uncertainty
+  reuses `inbox_unfiled` so there is no new review kind to teach or mask.
+- **Approved by:** owner request to continue the current-state plan through the multi-entity
+  inbox splitter (2026-08-14).
