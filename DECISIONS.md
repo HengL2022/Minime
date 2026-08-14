@@ -3964,6 +3964,7 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   RFC822 sniff avoids stealing ordinary captures.
 - **Approved by:** owner request to continue the current-state plan through the
   ordinary backlog (2026-08-14).
+<<<<<<< HEAD
 
 ## 2026-08-14 — Extract-org high-edge watchdog
 
@@ -3986,3 +3987,5 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   constraint migration for the same owner action.
 - **Approved by:** owner request to continue the current-state plan through the
   ordinary backlog (2026-08-14).
+=======
+>>>>>>> origin/main
