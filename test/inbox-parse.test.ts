@@ -2,7 +2,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { access, mkdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { extname, join } from "node:path";
 import { buildTextPdf, corruptPdfBytes } from "../fixtures/parse/text-pdf";
 import { ensureInboxItemIdentity, getInboxItem } from "../src/db/repo";
 import { processInboxFile, readArchivedCapture } from "../src/pipeline/watcher";
@@ -22,6 +22,35 @@ async function exists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function expectOriginalStored(
+  inboxId: string,
+  bytes: Uint8Array,
+  rawPath: string,
+): Promise<void> {
+  const inbox = await getInboxItem(inboxId);
+  expect(inbox?.content_hash).toBe(sha256(bytes));
+  const year = new Date(inbox!.received_at).getUTCFullYear();
+  const ext =
+    extname(rawPath)
+      .replace(/[^a-zA-Z0-9.]/g, "")
+      .slice(0, 16) || ".bin";
+  const rel = `files/${year}/${inbox!.content_hash}${ext}`;
+  expect(Buffer.from(await readFile(join(config.dataDir, rel)))).toEqual(Buffer.from(bytes));
+  const matches = (await readFile(join(config.dataDir, "files", "manifest.ndjson"), "utf8"))
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+    .filter((row) => row.hash === inbox!.content_hash);
+  expect(matches).toHaveLength(1);
+  expect(matches[0]).toEqual({
+    hash: inbox!.content_hash,
+    path: rel,
+    ext,
+    year,
+    inbox_id: inboxId,
+  });
 }
 
 beforeAll(async () => {
@@ -63,6 +92,7 @@ describe("inbox parse seam", () => {
     const archivePath = join(config.dataDir, String(item.archive_path));
     expect(await exists(archivePath)).toBe(true);
     expect(Buffer.from(await readFile(archivePath))).toEqual(Buffer.from(bytes));
+    await expectOriginalStored(first.inboxId, bytes, path);
 
     expect(
       await testSql`
@@ -132,6 +162,7 @@ describe("inbox parse seam", () => {
     expect(Buffer.from(await readFile(join(config.dataDir, String(item!.archive_path))))).toEqual(
       Buffer.from(bytes),
     );
+    await expectOriginalStored(result.inboxId, bytes, path);
     const [task] = await testSql`select title from tasks where derived_from = ${result.inboxId}`;
     expect(task!.title).toContain("fictional tidepool sample trays");
     const inbox = await getInboxItem(result.inboxId);
@@ -151,5 +182,6 @@ describe("inbox parse seam", () => {
     expect(item!.mime).toBe("text/markdown");
     expect(item!.status).toBe("filed");
     expect(item!.filed_table).toBe("tasks");
+    await expectOriginalStored(result.inboxId, Buffer.from(body), path);
   });
 });

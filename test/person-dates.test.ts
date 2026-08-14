@@ -11,6 +11,7 @@ import { toolByName } from "../src/mcp/tools";
 import { type ToolResult, invokeTool } from "../src/mcp/tools/registry";
 import { setNow } from "../src/util/clock";
 import { resetDb, testSql } from "./helpers";
+import { type TrackedTestSqlPoolHandle, trackTestSqlPool } from "./setup";
 import { dropTestAppRole, mintTestAppRole } from "./support/app-role";
 import { requestAndApproveTier2, sessionToolCtx } from "./support/unlock";
 
@@ -280,14 +281,17 @@ describe("tier gating and minime_state integration", () => {
 describe("person_dates RLS (minime_app boundary)", () => {
   let appRole: Awaited<ReturnType<typeof mintTestAppRole>>;
   let app: ReturnType<typeof postgres>;
+  let appHeld: TrackedTestSqlPoolHandle | undefined;
 
   beforeAll(async () => {
     appRole = await mintTestAppRole(process.env.DATABASE_URL!);
     app = postgres(appRole.databaseUrl, { max: 1, onnotice: () => {} });
+    appHeld = trackTestSqlPool(app);
   });
 
   afterAll(async () => {
-    await app?.end({ timeout: 2 });
+    await appHeld?.close();
+    appHeld?.unregister();
     if (appRole) await dropTestAppRole(appRole);
   });
 

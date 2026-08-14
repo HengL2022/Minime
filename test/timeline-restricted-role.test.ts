@@ -21,6 +21,7 @@ import {
   upsertCalendarEvent,
 } from "../src/db/repo";
 import { expectSqlReject, resetDb, testSql } from "./helpers";
+import { type TrackedTestSqlPoolHandle, trackTestSqlPool } from "./setup";
 import { type TestAppRoleLease, dropTestAppRole, mintTestAppRole } from "./support/app-role";
 
 const FROM = "2021-07-01";
@@ -31,6 +32,7 @@ const INTERACTION_SENTINEL = "RESTRICTED-ROLE-INTERACTION-SENTINEL";
 
 let app: ReturnType<typeof postgres>;
 let appRole: TestAppRoleLease;
+let appHeld: TrackedTestSqlPoolHandle | undefined;
 
 async function readTimelineAsLockedApp(from: string, to: string): Promise<any> {
   const source = `
@@ -69,6 +71,7 @@ beforeAll(async () => {
   await resetDb();
   appRole = await mintTestAppRole(process.env.DATABASE_URL!);
   app = postgres(appRole.databaseUrl, { max: 2, onnotice: () => {} });
+  appHeld = trackTestSqlPool(app);
 
   // Tier-1 control row, so the surrounding read (not just the locked count) is proven correct
   // through the restricted role too.
@@ -115,7 +118,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await app?.end({ timeout: 2 });
+  await appHeld?.close();
+  appHeld?.unregister();
   if (appRole) await dropTestAppRole(appRole);
 });
 

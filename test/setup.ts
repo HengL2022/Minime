@@ -1,7 +1,7 @@
 // Test preload: each process owns one guarded loopback database. The application pool is
 // imported only after DATABASE_URL points at that retained plan.
 
-import { afterAll } from "bun:test";
+import { afterAll, setDefaultTimeout } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -57,6 +57,35 @@ const testDatabaseCloserRegistry = createTestDatabaseCloserRegistry();
 
 export function registerTestDatabaseCloser(closer: TestDatabaseCloser): () => void {
   return testDatabaseCloserRegistry.register(closer);
+}
+
+export type TrackedTestSqlPool = {
+  end: (options?: { timeout?: number }) => Promise<void>;
+};
+
+// File afterAll can run after or concurrent with this preload closer. minime is not
+// superuser, so leftover minime_test_app_* / engineer_ro clients block DROP DATABASE
+// for the ordinary 2s budget and then fail closed. Register those pools here so drain
+// closes them before dispose, independent of file hook order.
+export type TrackedTestSqlPoolHandle = {
+  close: () => Promise<void>;
+  unregister: () => void;
+};
+
+export function trackTestSqlPool(pool: TrackedTestSqlPool): TrackedTestSqlPoolHandle {
+  let closePromise: Promise<void> | undefined;
+  const close = (): Promise<void> => {
+    if (!closePromise) {
+      const held = pool;
+      closePromise = Promise.resolve()
+        .then(() => held.end({ timeout: 5 }))
+        .catch(() => {
+          throw fixedCleanupError();
+        });
+    }
+    return closePromise;
+  };
+  return { close, unregister: registerTestDatabaseCloser(close) };
 }
 
 const DEFAULT_DATABASE_URL = "postgres://minime:minime@localhost:5432/minime";
@@ -160,6 +189,17 @@ export async function bootstrapTestDatabase(
   }
 }
 
+// disposeTestDatabase may wait TEARDOWN_BACKGROUND_MAX_CYCLES (300) *
+// TEARDOWN_RECHECK_INTERVAL_MS (100ms) = 30s on a busy Docker Postgres.
+// closeAndDispose also drains closers and closeDb (postgres.js end timeout 5s).
+// Bun 1.3.13 reports a timed-out afterAll as an unnamed beforeEach/afterEach
+// hook. A long suite on a slow runner can spend >5s in this closer or in a
+// file afterAll that drops a scratch app role. Raise the process default so
+// those hooks share the 40s budget already declared on afterAll below.
+const SETUP_AFTER_ALL_TIMEOUT_MS = 40_000;
+setDefaultTimeout(SETUP_AFTER_ALL_TIMEOUT_MS);
+
+// biome-ignore format: isolation contract requires `afterAll(async () =>` on one line
 afterAll(async () => {
   await closeAndDisposeOnce(
     retainedHandle,
@@ -167,7 +207,7 @@ afterAll(async () => {
     disposeTestDatabase,
     drainTestDatabaseClosers,
   );
-});
+}, SETUP_AFTER_ALL_TIMEOUT_MS);
 
 for (const [signal, code] of [
   ["SIGINT", 130],

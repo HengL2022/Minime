@@ -2265,9 +2265,46 @@ describe("setup cleanup contract", () => {
     expect(source).toContain("MINIME_KEEP_TEST_DATABASE");
     expect(source).toContain("testDatabaseCloserRegistry.drain");
     expect(source).toContain("const drainTestDatabaseClosers");
+    expect(source).toContain("setDefaultTimeout(SETUP_AFTER_ALL_TIMEOUT_MS)");
+    expect(source).toContain("const SETUP_AFTER_ALL_TIMEOUT_MS = 40_000");
     expect(source).toMatch(
       /closeAndDisposeOnce\(\s*retainedHandle,[\s\S]*drainTestDatabaseClosers/,
     );
     expect(source).toMatch(/afterAll\(async \(\) =>[\s\S]*closeAndDisposeOnce/);
+  });
+
+  test("trackTestSqlPool registers an idempotent closer on the process registry", async () => {
+    const { trackTestSqlPool } = await import("./setup");
+    let ended = 0;
+    const held = trackTestSqlPool({
+      async end() {
+        ended += 1;
+      },
+    });
+    try {
+      await held.close();
+      await held.close();
+      expect(ended).toBe(1);
+    } finally {
+      held.unregister();
+    }
+  });
+
+  test("beforeAll app-role pools register a process closer", () => {
+    for (const file of [
+      "test/entity-tier-split.test.ts",
+      "test/log-expense.test.ts",
+      "test/m15.roles.test.ts",
+      "test/person-dates.test.ts",
+      "test/runtime-role.test.ts",
+      "test/suppressed-hits.test.ts",
+      "test/timeline-restricted-role.test.ts",
+      "test/entity-tier-provenance.test.ts",
+      "test/unlock-approval.test.ts",
+      "test/unlock-lifecycle.test.ts",
+    ]) {
+      const source = readFileSync(resolve(repoRoot, file), "utf8");
+      expect(source).toMatch(/trackTestSqlPool|registerTestDatabaseCloser/);
+    }
   });
 });

@@ -54,6 +54,7 @@ import {
   splitActionDecision,
 } from "./classify";
 import { findDuplicate } from "./dedup";
+import { storeInboxOriginal } from "./originals";
 import { InboxParseError, type InboxParseResult, parseInboxSource } from "./parse";
 import { planCaptureEntities } from "./segment";
 
@@ -742,12 +743,16 @@ async function processInboxSnapshot(
     const current = await getInboxItem(item.id);
     if (!current) throw new Error("inbox_item_missing");
     await verifyOrHealStoredArchive(current, bytes);
+    // Heal is idempotent: same hash does not replace the file or append a second line.
+    await storeInboxOriginal(current, bytes);
     await reconcileFiledProjection(current, bytes);
     return { inboxId: current.id, filed: current.status === "filed" };
   }
 
   try {
     await archiveSnapshot(claim.item, claim.token, bytes);
+    // Store raw bytes even if parse later fails; a store fault must stay retryable.
+    await storeInboxOriginal(claim.item, bytes);
     return await finalizeClaimedInbox(claim, bytes, parsed);
   } catch (error) {
     // A normal failure becomes immediately reclaimable; an actual process crash leaves the

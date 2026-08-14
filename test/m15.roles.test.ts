@@ -24,7 +24,11 @@ import {
 } from "../scripts/repair";
 import { config } from "../src/util/config";
 import { expectSqlReject, resetDb, testSql } from "./helpers";
-import { registerTestDatabaseCloser } from "./setup";
+import {
+  type TrackedTestSqlPoolHandle,
+  registerTestDatabaseCloser,
+  trackTestSqlPool,
+} from "./setup";
 import { type TestAppRoleLease, dropTestAppRole, mintTestAppRole } from "./support/app-role";
 
 const roUrl = config.databaseUrl.replace(/\/\/[^@]+@/, "//minime_engineer_ro:minime@");
@@ -33,6 +37,7 @@ let app: ReturnType<typeof postgres>;
 let appRole: TestAppRoleLease;
 let roClosePromise: Promise<void> | undefined;
 let unregisterRo: (() => void) | undefined;
+let appHeld: TrackedTestSqlPoolHandle | undefined;
 
 function fixedCleanupError(): Error {
   return new Error("test_database_cleanup_failed");
@@ -63,15 +68,18 @@ beforeAll(async () => {
   openRoPool();
   appRole = await mintTestAppRole(config.databaseUrl);
   app = postgres(appRole.databaseUrl, { max: 1, onnotice: () => {} });
+  appHeld = trackTestSqlPool(app);
 });
 
 afterAll(async () => {
-  if (!roClosePromise && !unregisterRo) return;
+  if (!roClosePromise && !unregisterRo && !appHeld) return;
   try {
     await closeRoOnce();
     unregisterRo?.();
     unregisterRo = undefined;
-    await app?.end({ timeout: 5 });
+    await appHeld?.close();
+    appHeld?.unregister();
+    appHeld = undefined;
     await dropTestAppRole(appRole);
   } catch {
     throw fixedCleanupError();

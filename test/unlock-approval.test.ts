@@ -15,19 +15,23 @@ import { buildServer } from "../src/mcp/server";
 import type { ToolDef } from "../src/mcp/tools/registry";
 import { unlockTool } from "../src/mcp/tools/unlock";
 import { resetDb, testSql } from "./helpers";
+import { type TrackedTestSqlPoolHandle, trackTestSqlPool } from "./setup";
 import { dropTestAppRole, mintTestAppRole } from "./support/app-role";
 
 let app: ReturnType<typeof postgres>;
 let appRole: Awaited<ReturnType<typeof mintTestAppRole>>;
+let appHeld: TrackedTestSqlPoolHandle | undefined;
 
 beforeAll(async () => {
   await resetDb();
   appRole = await mintTestAppRole(process.env.DATABASE_URL!);
   app = postgres(appRole.databaseUrl, { max: 1, onnotice: () => {} });
+  appHeld = trackTestSqlPool(app);
 });
 
 afterAll(async () => {
-  await app?.end({ timeout: 2 });
+  await appHeld?.close();
+  appHeld?.unregister();
   if (appRole) await dropTestAppRole(appRole);
 });
 

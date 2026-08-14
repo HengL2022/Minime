@@ -16,7 +16,7 @@ import {
 const repoRoot = resolve(import.meta.dir, "..");
 const REAL_INTEGRATION_TIMEOUT_MS = 30_000;
 const TARGET_IDLE_POLL_INTERVAL_MS = 50;
-const TARGET_IDLE_POLL_ATTEMPTS = 100;
+const TARGET_IDLE_POLL_ATTEMPTS = 200;
 
 function makeDryRun(target: string, ...args: string[]): string {
   const result = Bun.spawnSync(["make", "-n", target, ...args], {
@@ -343,8 +343,10 @@ describe("database-reset eval isolation", () => {
     "real bootstrap failure disposes the exact generated target and preserves its primary error",
     async () => {
       const deps = createDefaultTestDatabaseDeps();
-      const sourceBefore = await databaseOwnershipAndSessions("minime_test");
-      expect(sourceBefore?.sessions).toBe(0);
+      // A prior suite or sibling file clone can leave autovacuum/client residue on
+      // the installer template. Wait for idle instead of treating that as failure.
+      const sourceBefore = await waitForOwnedDatabaseIdle("minime_test");
+      expect(sourceBefore).toEqual({ owner: "minime", sessions: 0 });
       let generatedName: string | undefined;
       let spawnCalls = 0;
 
@@ -377,7 +379,7 @@ describe("database-reset eval isolation", () => {
       expect(generatedName).toBeDefined();
       expect(spawnCalls).toBe(0);
       expect(await databaseExists(generatedName!)).toBe(false);
-      expect(await databaseOwnershipAndSessions("minime_test")).toEqual(sourceBefore);
+      expect(await waitForOwnedDatabaseIdle("minime_test")).toEqual(sourceBefore);
     },
     { timeout: REAL_INTEGRATION_TIMEOUT_MS },
   );
@@ -605,7 +607,12 @@ describe("database-reset eval isolation", () => {
   test(
     "two simultaneous wrappers serialize cloning and leave distinct targets",
     async () => {
-      const before = await databaseNames();
+      // The installer template can still show autovacuum/client residue after a
+      // prior suite or the install re-run. Clone fails closed on that; wait first.
+      expect(await waitForOwnedDatabaseIdle("minime_test")).toEqual({
+        owner: "minime",
+        sessions: 0,
+      });
       const spawn = () =>
         Bun.spawn(
           [
@@ -630,12 +637,14 @@ describe("database-reset eval isolation", () => {
         );
       const [first, second] = [spawn(), spawn()];
       const [firstCode, secondCode] = await Promise.all([first.exited, second.exited]);
-      expect(firstCode).toBe(0);
-      expect(secondCode).toBe(0);
-      const [firstOutput, secondOutput] = await Promise.all([
+      const [firstOutput, secondOutput, firstErr, secondErr] = await Promise.all([
         new Response(first.stdout).text(),
         new Response(second.stdout).text(),
+        new Response(first.stderr).text(),
+        new Response(second.stderr).text(),
       ]);
+      expect(firstCode, firstErr || firstOutput).toBe(0);
+      expect(secondCode, secondErr || secondOutput).toBe(0);
       const firstChild = JSON.parse(firstOutput.trim().split("\n").at(-1) ?? "{}");
       const secondChild = JSON.parse(secondOutput.trim().split("\n").at(-1) ?? "{}");
       expect(firstChild.name).not.toBe(secondChild.name);
