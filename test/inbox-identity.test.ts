@@ -18,9 +18,11 @@ import { config } from "../src/util/config";
 import { expectSqlReject, resetDb, testSql } from "./helpers";
 
 const inboxDir = join(config.dataDir, "inbox");
-// Bun's default test timeout is 5s; waitForFiledIdentity can wait 10s, and a
-// loaded CI runner often needs two sequential file+process cycles.
-const WATCHER_TEST_TIMEOUT_MS = 20_000;
+// Bun's default test timeout is 5s. A loaded Linux CI runner can spend most of a
+// 10s poll on chokidar's awaitWriteFinish plus note-index/embed after file, so
+// the helper wait and the enclosing test both need two sequential cycles.
+const WATCHER_WAIT_MS = 15_000;
+const WATCHER_TEST_TIMEOUT_MS = 40_000;
 
 function sha256(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
@@ -38,7 +40,7 @@ async function exists(path: string): Promise<boolean> {
 async function waitForFiledIdentity(
   rawPath: string,
   contentHash: string,
-  timeoutMs = 10_000,
+  timeoutMs = WATCHER_WAIT_MS,
 ): Promise<{ id: string; archive_path: string }> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -650,13 +652,15 @@ describe("inbox byte identity (classifier mocked by the test preload)", () => {
     "the real watcher files a stable content change at an existing path",
     async () => {
       const path = join(inboxDir, "watcher-change.md");
-      const bytesA =
-        "watcher reference for a fictional paper garden\n\nthe first stable version uses a copper marker.";
-      const bytesB =
-        "watcher reference for a fictional paper garden\n\nthe second stable version uses a cobalt marker.";
+      // Distinct todo titles (and dues >3 days apart) so B cannot match A's open
+      // task via titleSimilarity ≥ 0.5. Near-duplicate todos stay pending.
+      // Write A before watch: drainStartup files it. The B rewrite is the
+      // change-at-existing-path this case is named for.
+      const bytesA = "todo: catalogue the fictional copper garden stakes by 2027-08-01";
+      const bytesB = "todo: reserve the imaginary cobalt kiln shelf by 2029-03-15";
+      await Bun.write(path, bytesA);
       const watcher = await startWatcher();
       try {
-        await Bun.write(path, bytesA);
         const versionA = await waitForFiledIdentity(path, sha256(bytesA));
         await Bun.write(path, bytesB);
         const versionB = await waitForFiledIdentity(path, sha256(bytesB));
