@@ -34,6 +34,7 @@ import {
   withActorDurableDbSession,
 } from "../../db/repo";
 import { type Classification, identityCaptureName } from "../../pipeline/classify";
+import { resolveEntityPlan } from "../../pipeline/segment";
 import {
   type FiledTable,
   type NoteProjection,
@@ -151,6 +152,8 @@ export const refileTool: ToolDef = {
     }
     const text = await readArchivedCapture(item);
     if (text === null) throw new ToolError("NOT_FOUND", "capture archive unavailable");
+    // Resolve before the claim transaction — an LLM fallback must not hold the row.
+    const plan = await resolveEntityPlan(text);
 
     const type = CLASSIFICATION_TYPE[params.type as RefileType];
     const fields: Record<string, unknown> = {};
@@ -237,7 +240,7 @@ export const refileTool: ToolDef = {
         // I5 provenance: attribute the filed row — and any org/person/companion row it creates —
         // to the real MCP caller, not fileRow's ACTOR default, which is only correct for the
         // watcher's own automatic-pipeline callers (fileRow's doc comment, watcher.ts).
-        const result = await fileRow(classification, text, item.id, ctx.actor);
+        const result = await fileRow(classification, text, item.id, ctx.actor, plan);
         if (result === "duplicate") {
           throw new ToolError(
             "BAD_INPUT",

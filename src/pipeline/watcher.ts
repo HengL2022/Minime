@@ -59,7 +59,7 @@ import {
 import { findDuplicate } from "./dedup";
 import { storeInboxOriginal } from "./originals";
 import { InboxParseError, type InboxParseResult, parseInboxSource } from "./parse";
-import { planCaptureEntities } from "./segment";
+import { type EntityPlan, planCaptureEntities, resolveEntityPlan } from "./segment";
 
 const ACTOR = "agent:classifier";
 const CONFIDENCE_FLOOR = 0.7;
@@ -270,10 +270,11 @@ export async function fileRow(
   text: string,
   inboxId: string,
   actor: string = ACTOR,
+  plan?: EntityPlan,
 ): Promise<FiledResult | "duplicate" | null> {
   const result = await filePrimaryRow(c, text, inboxId, actor);
   if (result && result !== "duplicate") {
-    await fileCompanionEntities(c, text, inboxId, actor);
+    await fileCompanionEntities(c, text, inboxId, actor, plan ?? planCaptureEntities(text));
   }
   return result;
 }
@@ -293,8 +294,8 @@ async function fileCompanionEntities(
   text: string,
   inboxId: string,
   actor: string,
+  plan: EntityPlan,
 ): Promise<void> {
-  const plan = planCaptureEntities(text);
   if (plan.kind !== "entities") return;
   const subject =
     c.type === "interaction" && typeof c.fields.person_name === "string"
@@ -356,8 +357,7 @@ async function fileIdentityRow(
   return { primary: ["people", person.id] };
 }
 
-function applyUncertainEntityPlan(c: Classification, text: string): Classification {
-  const plan = planCaptureEntities(text);
+function applyUncertainEntityPlan(c: Classification, plan: EntityPlan): Classification {
   if (plan.kind !== "uncertain") return c;
   return {
     ...c,
@@ -698,16 +698,18 @@ async function classifyAndFileInbox(
 ): Promise<{ inboxId: string; filed: boolean }> {
   let c = storedClassification(item.classifier_output);
   if (!c) c = await classify(text);
-  // Deterministic entity plan is derived from the parsed markdown, not the model. An
-  // unparseable multi-entity cue must land in inbox_unfiled (never guess names); persist
-  // the lowered plan so a stale-claim replay does not re-ask the model and then auto-file.
-  c = applyUncertainEntityPlan(c, text);
+  // Entity plan: deterministic legal-suffix / enumeration first; a weaker LLM
+  // fallback only when that plan is silent. An unparseable strong cue must land
+  // in inbox_unfiled (never guess names); persist the lowered plan so a stale-claim
+  // replay does not re-ask the model and then auto-file.
+  const plan = await resolveEntityPlan(text);
+  c = applyUncertainEntityPlan(c, plan);
   await setInboxClassification(item.id, token, c);
 
   const outcome = await withDbTransaction(async () => {
     await assertInboxClaim(item.id, token);
     if (c.confidence >= CONFIDENCE_FLOOR && c.type !== "unknown") {
-      const result = await fileRow(c, text, item.id);
+      const result = await fileRow(c, text, item.id, ACTOR, plan);
       if (result === "duplicate") {
         await setInboxPendingClaimed(item.id, token, c);
         return { filed: false } as const;

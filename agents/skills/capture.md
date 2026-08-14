@@ -29,5 +29,7 @@ Skip the inbox and write directly when the owner's intent is explicit and comple
 ## Answer rules
 
 - One capture per distinct thought; split a brain-dump into separate captures.
+  Named companies/people in one event can become companion identities; a mixed
+  task+meeting+note dump still needs a split at the door.
 - Never editorialize inside the captured text; your commentary goes in the chat, not the DB.
 - Provenance is automatic (`created_by`, `source: capture`) — do not add your own headers.

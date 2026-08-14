@@ -3,8 +3,9 @@
 **Filed:** 2026-06-16 · **Area:** `src/pipeline/classify.ts`, `src/pipeline/watcher.ts`, `src/pipeline/segment.ts`
 **Severity:** medium (silent data-shape loss — no error, no review-queue flag)
 **Status:** mitigated 2026-08-14 — deterministic companion split for confident
-legal-suffix / enumerated-company captures. First-class org/person capture types
-shipped 2026-08-14. LLM segmentation remains future work.
+legal-suffix / enumerated-company captures; first-class org/person capture types;
+LLM entity-plan fallback for suffix-less multi-name captures. A 1..N
+classify-and-file split of mixed intents remains out of scope.
 
 ## Symptom
 
@@ -83,12 +84,21 @@ Tests: `test/segment.test.ts`, `test/multi-entity-capture.test.ts`.
 
 ## Still open
 
-1. **LLM segment pre-pass.** Ask the model to split a capture into 1..N self-contained
-   items *before* classifying each. Needed for multi-entity captures that do not use
-   legal suffixes or an explicit supplier/vendor count.
+1. **1..N classify-and-file split.** A mixed dump that is a task *and* an
+   interaction *and* a note still files one primary type. The entity-plan
+   fallback only mints leftover orgs/people. Splitting into several primary
+   rows would change inbox cardinality and stays deferred.
 
 ## Shipped after the companion split
 
+1. **LLM entity-plan fallback (2026-08-14).** When the deterministic cue is
+   silent, a weaker multi-name cue (`First Last at Org` pairs, two First Last
+   names after a meet/coffee verb, or two multi-word names after emailed/called)
+   may ask the classify provider (assumed tier 2) for named orgs/people. Mock
+   mode uses the same cue heuristically. Companions reuse the existing mint
+   (tier 1, name-only chunks). Failure, junk, one name, or "met Alice and Bob"
+   stays on the single-classify path and does not unfile. Tests:
+   `test/segment.test.ts`, `test/multi-entity-capture.test.ts`.
 2. **First-class `org` / `person` capture types (2026-08-14).** Dedicated identity
    captures (`hint: org / company record` / `person record`, or a first line
    `org: Name` / `person: Name`) file `orgs`/`people` via `ensureOrg`/`ensurePerson`
@@ -101,7 +111,6 @@ Tests: `test/segment.test.ts`, `test/multi-entity-capture.test.ts`.
 
 ## Workaround (still useful)
 
-Capture **one entity per call** with an unambiguous first line when the deterministic
-cue will not fire. Multi-entity events can still be logged as a single
-`interaction`/`note` for the narrative; names the splitter cannot parse still need
-their own capture.
+Capture **one entity per call** with an unambiguous first line when neither the
+legal-suffix cue nor the weaker multi-name cue will fire. Mixed-intent dumps
+(task + interaction + note) still need a split at the door.

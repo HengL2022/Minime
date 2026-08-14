@@ -4017,3 +4017,30 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   ordinary notes.
 - **Approved by:** owner request to continue the current-state plan through the
   ordinary backlog (2026-08-14).
+
+## 2026-08-14 — LLM entity-plan fallback for suffix-less captures
+
+- **Context:** The 2026-08-14 deterministic companion decision left model-driven
+  multi-entity work on the backlog and said guessing extra typed primary rows
+  would be a larger, less reversible contract. Captures that name several people
+  or companies without a legal suffix or supplier count still filed one row and
+  left the other names as narrative. This amends that filing contract and adds
+  a second assumed-tier-2 `egress:classify` path (the segment prompt) when the
+  weaker cue fires. No new MCP tool, review kind, audit verb, or migration.
+- **Decision:** `resolveEntityPlan` still prefers `planCaptureEntities`. When
+  that plan is `none`, a weaker cue may ask the classify provider (tier 2, same
+  routing/ceiling as inbox classify) for `{"entities":[{"kind":"org"|"person",
+  "name":"..."}]}`. Offline/mock uses a conservative heuristic. Confident 2–8
+  usable names reuse the existing companion mint (tier 1, name-only chunks,
+  `inbox:split-entities`). "met Alice and Bob", a single name, junk JSON, more
+  than eight model names, provider failure, and a cloud route above
+  `CLOUD_MAX_TIER` are `none` — they do not unfile a good one-thing capture and
+  do not mint `"Unknown"`. The inbox item still has one primary row; this is
+  not a 1..N classify-and-file split.
+- **Why:** The documented gap was suffix-less multi-entity captures, not a new
+  primary-row cardinality. Reusing companions keeps the fenced one-primary
+  inbox identity. Gating the extra classify call keeps ordinary captures at one
+  model job. Fail-closed on the weak cue avoids the unfile-on-uncertainty rule
+  that exists only for the strong deterministic cue.
+- **Approved by:** owner request to continue the current-state plan through the
+  ordinary backlog (2026-08-14).

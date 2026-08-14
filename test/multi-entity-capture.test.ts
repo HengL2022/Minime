@@ -183,3 +183,43 @@ describe("multi-entity capture split (e2e, classifier mocked)", () => {
     expect(splits!.n).toBe(1);
   });
 });
+
+describe("LLM-cue companion split without legal suffixes (heuristic, mocked)", () => {
+  test("person-at-org pairs mint leftover identities with name-only chunks", async () => {
+    const text =
+      "I talked to Sigrid Halvorsen at Havlyd and Tomasz Berg at Fjordsonics about the hydrophone quote.";
+    expect(heuristicClassify(text).type).toBe("note");
+    const path = await writeInbox("at-from.md", text);
+    const result = await processInboxFile(path);
+    expect(result.filed).toBe(true);
+
+    const names = await orgNames();
+    expect(names).toEqual(expect.arrayContaining(["Havlyd", "Fjordsonics"]));
+    const people = await sql`select canonical_name from people order by canonical_name`;
+    expect(people.map((p) => p.canonical_name)).toEqual(["Sigrid Halvorsen", "Tomasz Berg"]);
+    const [split] = await sql`
+      select payload from events
+      where verb = 'inbox:split-entities' and entity_id = ${result.inboxId}`;
+    const payload = split!.payload as { org_count: number; person_count: number };
+    expect(payload.org_count).toBe(2);
+    expect(payload.person_count).toBe(2);
+
+    const chunks = await sql`
+      select text from chunks where parent_type in ('org', 'person')`;
+    expect(chunks.length).toBeGreaterThanOrEqual(4);
+    for (const chunk of chunks) {
+      expect(String(chunk.text)).not.toContain("hydrophone quote");
+    }
+  });
+
+  test("met Alice and Bob still files one row and does not emit a companion split", async () => {
+    const path = await writeInbox("alice-bob.md", "met Alice and Bob about the calibration rig");
+    const result = await processInboxFile(path);
+    expect(result.filed).toBe(true);
+    const [item] = await sql`select filed_table from inbox_items where id = ${result.inboxId}`;
+    expect(item!.filed_table).toBe("interactions");
+    const [splits] = await sql`
+      select count(*)::int as n from events where verb = 'inbox:split-entities'`;
+    expect(splits!.n).toBe(0);
+  });
+});
