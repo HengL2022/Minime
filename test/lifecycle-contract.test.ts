@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
@@ -11,6 +11,11 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { repositoryInstallPendingState } from "../src/util/config";
+
+// Hermetic shell contracts should finish well under this. The real hang-stop is
+// mocking docker/native probes so CI never waits on a daemon.
+const LIFECYCLE_CONTRACT_TIMEOUT_MS = 15_000;
+setDefaultTimeout(LIFECYCLE_CONTRACT_TIMEOUT_MS);
 
 const repoRoot = resolve(import.meta.dir, "..");
 const lib = resolve(repoRoot, "scripts/lib.sh");
@@ -237,9 +242,13 @@ printf '%s\\n' "$PG_STATE_RULE"`,
 
   test("unpersisted fresh setup never adopts an already-open matching service", () => {
     const f = fixtureEnv("DATABASE_URL=postgres://minime:minime@localhost:55448/minime\n");
+    // Fresh pg_install_port_is_safe probes running backends directly, not
+    // selected_pg_backend_matches_service. Mock those so CI never talks to Docker.
     const result = runShell(
       `. "$1"
 docker_available(){ return 0; }
+docker_running_backend_matches_port(){ return 0; }
+native_running_backend_matches_port(){ return 1; }
 port_open(){ return 0; }
 selected_pg_backend_matches_service(){ printf selected > "$3"; return 0; }
 resolve_pg_lifecycle "$2" 0 1 || exit 9

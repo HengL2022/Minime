@@ -160,6 +160,13 @@ export async function bootstrapTestDatabase(
   }
 }
 
+// disposeTestDatabase may wait TEARDOWN_BACKGROUND_MAX_CYCLES (300) *
+// TEARDOWN_RECHECK_INTERVAL_MS (100ms) = 30s on a busy Docker Postgres.
+// closeAndDispose also drains closers and closeDb (postgres.js end timeout 5s).
+// Bun's 5s default hook timeout is too tight for that process-wide closer.
+const SETUP_AFTER_ALL_TIMEOUT_MS = 40_000;
+
+// biome-ignore format: isolation contract requires `afterAll(async () =>` on one line
 afterAll(async () => {
   await closeAndDisposeOnce(
     retainedHandle,
@@ -167,7 +174,7 @@ afterAll(async () => {
     disposeTestDatabase,
     drainTestDatabaseClosers,
   );
-});
+}, { timeout: SETUP_AFTER_ALL_TIMEOUT_MS });
 
 for (const [signal, code] of [
   ["SIGINT", 130],
