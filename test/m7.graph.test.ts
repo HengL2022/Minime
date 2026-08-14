@@ -251,7 +251,8 @@ My physiotherapist Solveig Dahl at Lade Fysio fixed my knee.`;
     const [worksAt] = await testSql`
       select e.confidence from edges e
       where e.rel = 'works_at' and e.src_id = ${astrid.id} and e.dst_id = ${havlyd.id}`;
-    expect(worksAt).toBeDefined();
+    // page-dominant @0.6 is review-queued, not written (Fix B write floor 0.7)
+    expect(worksAt).toBeUndefined();
     const solveig = await resolvePerson("Solveig Dahl");
     const fysio = await resolveOrg("Lade Fysio");
     const [physioEdge] = await testSql`
@@ -381,7 +382,8 @@ My physiotherapist Solveig Dahl at Lade Fysio fixed my knee.`;
     const havlyd = await resolveOrg("Havlyd AS");
     const edges = await edgesAround("org", havlyd.id, 20);
     const workers = edges.filter((e: any) => e.rel === "works_at");
-    expect(workers.length).toBe(2); // Astrid (manager) + Piotr (lead), both page-dominant
+    // Astrid + Piotr were page-dominant @0.6; Fix B withholds those edges
+    expect(workers.length).toBe(0);
   });
 });
 

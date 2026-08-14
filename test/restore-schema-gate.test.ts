@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import postgres, { type Sql } from "postgres";
@@ -8,6 +8,11 @@ const REPO_ROOT = resolve(import.meta.dir, "..");
 const GATE_SCRIPT = resolve(REPO_ROOT, "scripts", "restore-schema-gate.ts");
 const MIGRATIONS_DIR = resolve(REPO_ROOT, "db", "migrations");
 const SCRATCH_DATABASE = "minime_restore";
+// Each case rebuilds a scratch database from template and reapplies the ledger.
+// Bun's 5s default is enough locally and too tight on a loaded Linux CI runner;
+// a timeout mid-prepareScratch also poisons the next cases (owned scratch leftover).
+const GATE_TEST_TIMEOUT_MS = 30_000;
+setDefaultTimeout(GATE_TEST_TIMEOUT_MS);
 const migrationFiles = readdirSync(MIGRATIONS_DIR)
   .filter((name) => name.endsWith(".sql"))
   .sort();
@@ -22,11 +27,11 @@ let adminSql: Sql;
 let ownsScratch = false;
 
 async function waitForScratchConnectionsToClose(): Promise<void> {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
     const active = await adminSql`select 1 from pg_stat_activity
       where datname = ${SCRATCH_DATABASE} and pid <> pg_backend_pid()`;
     if (active.length === 0) return;
-    await Bun.sleep(25);
+    await Bun.sleep(50);
   }
   throw new Error("restore_schema_gate_scratch_busy");
 }

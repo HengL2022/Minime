@@ -31,6 +31,7 @@ import {
   setInboxArchivePath,
   setInboxClassification,
   setInboxFiledClaimed,
+  setInboxMime,
   setInboxPendingClaimed,
   upsertPage,
   upsertTask,
@@ -53,6 +54,7 @@ import {
   splitActionDecision,
 } from "./classify";
 import { findDuplicate } from "./dedup";
+import { InboxParseError, type InboxParseResult, parseInboxSource } from "./parse";
 import { planCaptureEntities } from "./segment";
 
 const ACTOR = "agent:classifier";
@@ -181,7 +183,13 @@ export async function readArchivedCapture(item: InboxItem): Promise<string | nul
     return null;
   }
   if (sha256(bytes) !== item.content_hash) return null;
-  return bytes.toString("utf8");
+  // Classify/review text is parsed markdown. Raw UTF-8 would mojibake a PDF archive.
+  // Parse failure is fail-closed (null), never a binary snapshot across MCP.
+  try {
+    return parseInboxSource(item.raw_path, bytes).markdown;
+  } catch {
+    return null;
+  }
 }
 
 const AGENT_SESSION_HINT_RE = /<!-- hint: agent work session -->/;
@@ -603,12 +611,128 @@ async function reconcileFiledProjection(item: InboxItem, bytes: Uint8Array): Pro
   if (item.status !== "filed" || item.filed_table !== "pages") return;
   const c = storedClassification(item.classifier_output);
   if (!c || c.type !== "note") return;
-  await publishNoteProjection(noteProjection(c, Buffer.from(bytes).toString("utf8"), item.id));
+  const parsed = tryParseInbox(item.raw_path, bytes);
+  if (!parsed.ok) return;
+  await publishNoteProjection(noteProjection(c, parsed.result.markdown, item.id));
+}
+
+type ParsedInbox = { ok: true; result: InboxParseResult } | { ok: false; error: InboxParseError };
+
+function tryParseInbox(filePath: string, bytes: Uint8Array): ParsedInbox {
+  try {
+    return { ok: true, result: parseInboxSource(filePath, bytes) };
+  } catch (error) {
+    if (error instanceof InboxParseError) return { ok: false, error };
+    throw error;
+  }
+}
+
+// mime/code only — review and audit must never snapshot capture bytes or markdown.
+function parseFailureClassification(error: InboxParseError): Classification {
+  return {
+    type: "unknown",
+    confidence: 0,
+    reason: error.code,
+    fields: { mime: error.mime, code: error.code },
+  };
+}
+
+async function queueUnfiledInbox(
+  itemId: string,
+  token: string,
+  c: Classification,
+): Promise<{ inboxId: string; filed: false }> {
+  await withDbTransaction(async () => {
+    await assertInboxClaim(itemId, token);
+    await setInboxPendingClaimed(itemId, token, c);
+    await insertReviewItem("inbox_unfiled", { inbox_item_id: itemId });
+    await logEvent({
+      actor: ACTOR,
+      verb: "inbox:unfiled",
+      entityType: "inbox_item",
+      entityId: itemId,
+      payload: auditPayload.inboxUnfiled({ kind: c.type, confidence: c.confidence }),
+    });
+  });
+  return { inboxId: itemId, filed: false };
+}
+
+async function classifyAndFileInbox(
+  item: InboxItem,
+  token: string,
+  text: string,
+): Promise<{ inboxId: string; filed: boolean }> {
+  let c = storedClassification(item.classifier_output);
+  if (!c) c = await classify(text);
+  // Deterministic entity plan is derived from the parsed markdown, not the model. An
+  // unparseable multi-entity cue must land in inbox_unfiled (never guess names); persist
+  // the lowered plan so a stale-claim replay does not re-ask the model and then auto-file.
+  c = applyUncertainEntityPlan(c, text);
+  await setInboxClassification(item.id, token, c);
+
+  const outcome = await withDbTransaction(async () => {
+    await assertInboxClaim(item.id, token);
+    if (c.confidence >= CONFIDENCE_FLOOR && c.type !== "unknown") {
+      const result = await fileRow(c, text, item.id);
+      if (result === "duplicate") {
+        await setInboxPendingClaimed(item.id, token, c);
+        return { filed: false } as const;
+      }
+      if (result) {
+        const [filedTable, filedId] = result.primary;
+        await setInboxFiledClaimed(item.id, token, filedTable, filedId, c);
+        await logEvent({
+          actor: ACTOR,
+          verb: "inbox:filed",
+          entityType: "inbox_item",
+          entityId: item.id,
+          payload: auditPayload.inboxFiled({
+            kind: c.type,
+            confidence: c.confidence,
+            filedTable,
+            filedId,
+          }),
+        });
+        return { filed: true, projection: result.projection } as const;
+      }
+    }
+    await setInboxPendingClaimed(item.id, token, c);
+    await insertReviewItem("inbox_unfiled", { inbox_item_id: item.id });
+    await logEvent({
+      actor: ACTOR,
+      verb: "inbox:unfiled",
+      entityType: "inbox_item",
+      entityId: item.id,
+      payload: auditPayload.inboxUnfiled({ kind: c.type, confidence: c.confidence }),
+    });
+    return { filed: false } as const;
+  });
+
+  // Publish the note mirror only after commit so a rolled-back finalization leaves no
+  // visible derivative; replay heals a post-commit publication failure.
+  if (outcome.projection) await publishNoteProjection(outcome.projection);
+  if (outcome.filed) await drainEmbedBacklog(64).catch(() => {});
+  return { inboxId: item.id, filed: outcome.filed };
+}
+
+async function finalizeClaimedInbox(
+  claim: { item: InboxItem; token: string },
+  bytes: Uint8Array,
+  parsed?: ParsedInbox,
+): Promise<{ inboxId: string; filed: boolean }> {
+  const outcome = parsed ?? tryParseInbox(claim.item.raw_path, bytes);
+  const mime = outcome.ok ? outcome.result.mime : outcome.error.mime;
+  if (mime !== claim.item.mime) await setInboxMime(claim.item.id, claim.token, mime);
+  if (!outcome.ok) {
+    return queueUnfiledInbox(claim.item.id, claim.token, parseFailureClassification(outcome.error));
+  }
+  return classifyAndFileInbox(claim.item, claim.token, outcome.result.markdown);
 }
 
 async function processInboxSnapshot(
   item: InboxItem,
   bytes: Uint8Array,
+  parsed?: ParsedInbox,
 ): Promise<{ inboxId: string; filed: boolean }> {
   if (!item.content_hash || sha256(bytes) !== item.content_hash)
     throw new Error("inbox_snapshot_hash_mismatch");
@@ -624,63 +748,7 @@ async function processInboxSnapshot(
 
   try {
     await archiveSnapshot(claim.item, claim.token, bytes);
-    const text = Buffer.from(bytes).toString("utf8");
-    let c = storedClassification(claim.item.classifier_output);
-    if (!c) {
-      c = await classify(text);
-    }
-    // Deterministic entity plan is derived from the bytes, not the model. An unparseable
-    // multi-entity cue must land in inbox_unfiled (never guess names); persist the lowered
-    // plan so a stale-claim replay does not re-ask the model and then auto-file.
-    c = applyUncertainEntityPlan(c, text);
-    await setInboxClassification(item.id, claim.token, c);
-
-    const outcome = await withDbTransaction(async () => {
-      await assertInboxClaim(item.id, claim.token);
-      if (c.confidence >= CONFIDENCE_FLOOR && c.type !== "unknown") {
-        const result = await fileRow(c, text, item.id);
-        if (result === "duplicate") {
-          // fileRow already queued a duplicate review item in this transaction.
-          await setInboxPendingClaimed(item.id, claim.token, c);
-          return { filed: false } as const;
-        }
-        if (result) {
-          const [filedTable, filedId] = result.primary;
-          await setInboxFiledClaimed(item.id, claim.token, filedTable, filedId, c);
-          await logEvent({
-            actor: ACTOR,
-            verb: "inbox:filed",
-            entityType: "inbox_item",
-            entityId: item.id,
-            payload: auditPayload.inboxFiled({
-              kind: c.type,
-              confidence: c.confidence,
-              filedTable,
-              filedId,
-            }),
-          });
-          return { filed: true, projection: result.projection } as const;
-        }
-      }
-
-      await setInboxPendingClaimed(item.id, claim.token, c);
-      await insertReviewItem("inbox_unfiled", { inbox_item_id: item.id });
-      await logEvent({
-        actor: ACTOR,
-        verb: "inbox:unfiled",
-        entityType: "inbox_item",
-        entityId: item.id,
-        payload: auditPayload.inboxUnfiled({ kind: c.type, confidence: c.confidence }),
-      });
-      return { filed: false } as const;
-    });
-
-    // The Markdown mirror is a deterministic projection. Publishing only after the database
-    // commit guarantees that a rolled-back finalization leaves no visible note derivative;
-    // replay heals a post-commit publication failure.
-    if (outcome.projection) await publishNoteProjection(outcome.projection);
-    if (outcome.filed) await drainEmbedBacklog(64).catch(() => {});
-    return { inboxId: item.id, filed: outcome.filed };
+    return await finalizeClaimedInbox(claim, bytes, parsed);
   } catch (error) {
     // A normal failure becomes immediately reclaimable; an actual process crash leaves the
     // timestamp untouched and is reclaimed after the lease expires. The token fences late work.
@@ -699,14 +767,16 @@ async function processInboxSourceSnapshot(snapshot: {
   bytes: Buffer;
 }): Promise<{ inboxId: string; filed: boolean }> {
   const contentHash = sha256(snapshot.bytes);
+  const parsed = tryParseInbox(snapshot.path, snapshot.bytes);
+  const mime = parsed.ok ? parsed.result.mime : parsed.error.mime;
   const item = await ensureInboxItemIdentity({
     rawPath: snapshot.path,
     contentHash,
-    mime: extname(snapshot.path).toLowerCase() === ".md" ? "text/markdown" : "text/plain",
+    mime,
     createdBy: ACTOR,
     source: "capture",
   });
-  return processInboxSnapshot(item, snapshot.bytes);
+  return processInboxSnapshot(item, snapshot.bytes, parsed);
 }
 
 async function rejectOrphan(item: InboxItem): Promise<void> {

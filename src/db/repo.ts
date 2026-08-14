@@ -3889,6 +3889,17 @@ export async function setInboxArchivePath(
   assertClaimUpdate(rows);
 }
 
+/** Parser-derived mime may beat the extension guess on a reused identity. */
+export async function setInboxMime(id: string, token: string, mime: string): Promise<void> {
+  const rows = await db()`
+    update inbox_items set mime = ${mime}
+    where id = ${id}
+      and tier >= 1 and tier <= app_allowed_tier()
+      and status = 'processing' and claim_token = ${token}::uuid
+    returning id`;
+  assertClaimUpdate(rows);
+}
+
 export async function setInboxClassification(
   id: string,
   token: string,

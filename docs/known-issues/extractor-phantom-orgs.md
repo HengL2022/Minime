@@ -104,7 +104,33 @@ TDD: 6 new tests in `test/m7.graph.test.ts` (RED→GREEN). Full suite 163 pass /
 `tsc` clean. Verified end-to-end against a fictional fixture lexicon: the poisoned sentence
 that previously minted phantom orgs now yields **zero** orgs and edges.
 
-**Still open (not in Fix A):** org dedup-on-write fuzzy match (item 3,
-`Fjordsonic AS`≈`Fjordsonics AS`)
-and the low-confidence→review-queue path (item 4) — candidates for Fix B (dream-step safety
-net). A local watchdog remains as the third belt-and-suspenders layer.
+**Then still open (shipped in Fix B below):** org dedup-on-write fuzzy match (item 3) and
+the low-confidence→review-queue path (item 4). A local watchdog remains open.
+
+## STATUS — Fix B shipped (2026-08-14)
+
+Write-time prevention landed in `src/pipeline/extract-edges.ts` (`extractAndLink`), using the
+lexicon already loaded by `allOrgsWithAliases()` — no new SQL.
+
+- **Unique near-match → merge.** After legal-suffix strip + case-fold, a candidate that is
+  Levenshtein-1 or trailing `s`/`es` from exactly one existing org (canonical or alias; both
+  keys length ≥ 4) is treated as that org. The new spelling is stored as an alias via
+  `addOrgAlias`. `Fjordsonic AS` merges into existing `Fjordsonics AS`. Suffix-only pairs
+  (`Havlyd` / `Havlyd AS`) stay on the exact `ensureExtractedOrg` path.
+- **Ambiguous near-match → flag, do not create.** Two or more existing orgs within the
+  threshold queue one open `extract_suspect` (`reason: fuzzy_org_ambiguous`, candidate +
+  match ids/names, no source text) and mint no third row. Replay dedupes on `flag_key`.
+- **Confidence floor 0.7.** `works_at` below 0.7 (today: page-dominant 0.6) is not written.
+  An `extract_suspect` (`reason: low_confidence_edge`, person/org ids+names + confidence, no
+  source text) is queued instead. Same-sentence 0.85 and paragraph-scope 0.7 still write.
+- **Orgs from high-precision cues still mint.** `facts.orgs` (legal suffix, join-verb,
+  role-is, prep+work-cue) still call `ensureExtractedOrg`. A page-dominant 0.6 edge may
+  therefore attach to an org that already exists from those cues; only the edge is withheld.
+  No live-data owner-name sweep migration was added.
+
+TDD: `test/extract-fix-b.test.ts`. Fix A / org-poisoning guards in `test/m7.graph.test.ts`
+are unchanged; two extractAndLink write assertions now expect the 0.7 floor.
+
+**Still open:** LLM segmenter quality (sibling known-issue) and a local watchdog for
+`system:extract` orgs with an unusually high edge count and no human confirmation. Existing
+pre-Fix-B phantom/duplicate rows are not swept.

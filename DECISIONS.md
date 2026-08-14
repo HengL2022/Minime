@@ -3909,3 +3909,33 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   dream/backup lock, so a crashed MCP child can hand off watching without stealing maintenance.
 - **Approved by:** owner request to continue the current-state plan through the ordinary
   backlog (2026-08-14).
+
+## 2026-08-14 — Inbox parse registry classifies markdown, not raw bytes
+
+- **Context:** Inbox ingest was UTF-8-only: `processInboxSnapshot` decoded original bytes with
+  `Buffer.toString("utf8")` and classified that string. `inbox_items.mime` existed but was set
+  from the file extension (`.md` → `text/markdown`, else `text/plain`), never from content.
+  Binary drops would mojibake into classify or fail in ways that looked like a lost capture.
+  This changes the public ingest contract: what the watcher classifies, how mime is assigned,
+  and how an unreadable file is retained.
+- **Decision:** A local `src/pipeline/parse/` registry sniffs magic bytes first, then extension.
+  `parseInboxSource(filePath, bytes)` returns `{ markdown, mime, meta? }` for classify/file.
+  Hash, identity, and `data/archive/...` stay on the original bytes. The parser sets
+  `inbox_items.mime` (and may update a reused identity via `setInboxMime`). `%PDF` / `.pdf`
+  uses a small in-repo extractor (uncompressed + `/FlateDecode` via `node:zlib`, `Tj`/`TJ`/`'`/`"`
+  literals). Valid UTF-8 / `.md` / `.txt` passthrough; empty files are empty `text/plain`.
+  Unknown binary or a corrupt PDF throws typed `InboxParseError` (`unsupported_type` /
+  `parse_failed`). The watcher still creates/reuses the inbox identity and archives the
+  original bytes, does not classify, marks pending, and reuses the existing `inbox_unfiled`
+  review path plus `inbox:unfiled` / `auditPayload.inboxUnfiled({ kind: "unknown", confidence: 0 })`.
+  The stored classifier object is `{ type: "unknown", confidence: 0, reason: <code>, fields:
+  { mime, code } }` — mime/code only, never file contents. Replay of a finished failed identity
+  does not add a second review item or event. The W5 originals-store
+  (`data/files/<yyyy>/<hash>.<ext>` + `manifest.ndjson`) and remaining parsers (docx, xlsx/csv,
+  eml) are deferred. No new npm dependency for PDF v1.
+- **Why:** Downstream classify/file is already format-agnostic once it sees markdown. A
+  registry plus one proving parser unblocks PDF without pretending to be a full document
+  engine or adding a pinned dependency. Parse failure must never silently drop a capture or
+  UTF-8-mojibake binary; the existing unfiled/audit verbs already teach that path. Keeping
+  originals in today's archive (not a second store) keeps this slice reversible.
+- **Approved by:** owner request to implement the post-W4 W5 first slice (2026-08-14).
