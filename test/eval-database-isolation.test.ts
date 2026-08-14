@@ -607,7 +607,12 @@ describe("database-reset eval isolation", () => {
   test(
     "two simultaneous wrappers serialize cloning and leave distinct targets",
     async () => {
-      const before = await databaseNames();
+      // The installer template can still show autovacuum/client residue after a
+      // prior suite or the install re-run. Clone fails closed on that; wait first.
+      expect(await waitForOwnedDatabaseIdle("minime_test")).toEqual({
+        owner: "minime",
+        sessions: 0,
+      });
       const spawn = () =>
         Bun.spawn(
           [
@@ -632,12 +637,14 @@ describe("database-reset eval isolation", () => {
         );
       const [first, second] = [spawn(), spawn()];
       const [firstCode, secondCode] = await Promise.all([first.exited, second.exited]);
-      expect(firstCode).toBe(0);
-      expect(secondCode).toBe(0);
-      const [firstOutput, secondOutput] = await Promise.all([
+      const [firstOutput, secondOutput, firstErr, secondErr] = await Promise.all([
         new Response(first.stdout).text(),
         new Response(second.stdout).text(),
+        new Response(first.stderr).text(),
+        new Response(second.stderr).text(),
       ]);
+      expect(firstCode, firstErr || firstOutput).toBe(0);
+      expect(secondCode, secondErr || secondOutput).toBe(0);
       const firstChild = JSON.parse(firstOutput.trim().split("\n").at(-1) ?? "{}");
       const secondChild = JSON.parse(secondOutput.trim().split("\n").at(-1) ?? "{}");
       expect(firstChild.name).not.toBe(secondChild.name);
