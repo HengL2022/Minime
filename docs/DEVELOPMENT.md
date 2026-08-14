@@ -185,11 +185,11 @@ ratchet, evidence-hash hierarchy, or approval receipt is needed.
 After the release gate, resume product work as outcome-sized tasks under this workflow. Current
 known candidates are:
 
-- coordinate multiple MCP processes so one process owns watcher/dream/backup work with clean
-  takeover;
 - LLM segment pre-pass and first-class org/person capture types (the 2026-08-14
   deterministic companion split covers legal-suffix / enumerated-company captures;
-  see `docs/known-issues/classifier-multi-entity-captures.md`); and
+  see `docs/known-issues/classifier-multi-entity-captures.md`);
+- org fuzzy-dedup on extract write and a low-confidence extract→review path
+  (`docs/known-issues/extractor-phantom-orgs.md` Fix B); and
 - close remaining known-issue documents once their behavioral regressions pass.
 
 Agent skill wording for owner-approved tier-2 unlocks and timezone-aware output should stay aligned

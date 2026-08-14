@@ -3890,3 +3890,22 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   reuses `inbox_unfiled` so there is no new review kind to teach or mask.
 - **Approved by:** owner request to continue the current-state plan through the multi-entity
   inbox splitter (2026-08-14).
+
+## 2026-08-14 — Single inbox-watcher owner in the runtime child
+
+- **Context:** W3-5 gave dream/backup a single maintenance owner and left watcher coordination
+  on the backlog. Inbox claims are already fenced, but every `serve:runtime` child still started
+  its own chokidar watcher, so two MCP hosts against the same database double-drained the inbox.
+  Moving the watcher into the supervisor would file captures on the owner DSN and break the
+  app-role child boundary.
+- **Decision:** The runtime child acquires a non-blocking advisory lock on
+  `(1296649541, 3)` — distinct from compiled-notes `(…, 1)` and maintenance `(…, 2)` — before
+  starting the watcher. The winner watches; a loser logs that another process owns the watcher
+  and retries every 5 minutes. Close or process death releases the lock so a survivor can take
+  over. Direct `startWatcher()` callers (tests, one-shot drains) are unchanged.
+- **Why:** Two watchers are wasted work, not a correctness hole, but they are the remaining
+  half of "one process owns watcher/dream/backup." Keeping the lock in the child preserves
+  privilege separation. A third key keeps watcher takeover independent of the supervisor's
+  dream/backup lock, so a crashed MCP child can hand off watching without stealing maintenance.
+- **Approved by:** owner request to continue the current-state plan through the ordinary
+  backlog (2026-08-14).

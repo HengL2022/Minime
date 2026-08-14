@@ -3253,13 +3253,20 @@ export async function withCompiledNoteTargetLease<T>(
 // releaseMaintenanceLock(), or automatically by Postgres if the holding connection/process dies —
 // so a crashed owner cannot deadlock a survivor's takeover retry.
 const MAINTENANCE_LOCK_KEY = [1296649541, 2] as const;
+// Inbox watcher ownership (runtime child). Distinct from compiled-notes (1) and maintenance (2)
+// so a supervisor that already holds dream/backup does not also pin the child's watcher slot,
+// and a second MCP child can take over watching if the first child dies.
+const WATCHER_LOCK_KEY = [1296649541, 3] as const;
+
+type AdvisoryLockKey = readonly [number, number];
 
 export interface MaintenanceLockHandle {
   readonly reservation: DbReservation;
 }
 
-/** Non-blocking: resolves a handle when the caller becomes the maintenance owner, else null. */
-export async function tryAcquireMaintenanceLock(): Promise<MaintenanceLockHandle | null> {
+export type WatcherLockHandle = MaintenanceLockHandle;
+
+async function tryAcquireAdvisoryLock(key: AdvisoryLockKey): Promise<DbReservation | null> {
   const reservation = await reserveDb();
   // The query runs on a reservation the caller doesn't own yet (unlike withReservedDb's
   // single-call try/finally, this reservation is meant to outlive the function on success), so a
@@ -3267,9 +3274,9 @@ export async function tryAcquireMaintenanceLock(): Promise<MaintenanceLockHandle
   // restart, backend termination) leaks the reservation forever and eventually starves the pool.
   try {
     const [row] = (await reservation.executor`
-      select pg_try_advisory_lock(${MAINTENANCE_LOCK_KEY[0]}, ${MAINTENANCE_LOCK_KEY[1]}) as locked
+      select pg_try_advisory_lock(${key[0]}, ${key[1]}) as locked
     `) as { locked: boolean }[];
-    if (row?.locked) return { reservation };
+    if (row?.locked) return reservation;
   } catch (error) {
     await reservation.release();
     throw error;
@@ -3278,14 +3285,35 @@ export async function tryAcquireMaintenanceLock(): Promise<MaintenanceLockHandle
   return null;
 }
 
+async function releaseAdvisoryLock(
+  reservation: DbReservation,
+  key: AdvisoryLockKey,
+): Promise<void> {
+  try {
+    await reservation.executor`select pg_advisory_unlock(${key[0]}, ${key[1]})`;
+  } finally {
+    await reservation.release();
+  }
+}
+
+async function advisoryLockHeld(key: AdvisoryLockKey): Promise<boolean> {
+  const rows = await db()`
+    select 1 from pg_locks
+    where locktype = 'advisory' and granted
+      and classid = ${key[0]} and objid = ${key[1]}
+    limit 1`;
+  return rows.length > 0;
+}
+
+/** Non-blocking: resolves a handle when the caller becomes the maintenance owner, else null. */
+export async function tryAcquireMaintenanceLock(): Promise<MaintenanceLockHandle | null> {
+  const reservation = await tryAcquireAdvisoryLock(MAINTENANCE_LOCK_KEY);
+  return reservation ? { reservation } : null;
+}
+
 /** Release a handle from tryAcquireMaintenanceLock() and return its connection to the pool. */
 export async function releaseMaintenanceLock(handle: MaintenanceLockHandle): Promise<void> {
-  try {
-    await handle.reservation.executor`
-      select pg_advisory_unlock(${MAINTENANCE_LOCK_KEY[0]}, ${MAINTENANCE_LOCK_KEY[1]})`;
-  } finally {
-    await handle.reservation.release();
-  }
+  await releaseAdvisoryLock(handle.reservation, MAINTENANCE_LOCK_KEY);
 }
 
 // `minime doctor` (W3-7): true when SOME process (any backend, not necessarily the caller) holds
@@ -3293,12 +3321,21 @@ export async function releaseMaintenanceLock(handle: MaintenanceLockHandle): Pro
 // it, so this answers "is anything currently scheduled to run dream/backup" without taking or
 // releasing the lock itself.
 export async function maintenanceLockHeld(): Promise<boolean> {
-  const rows = await db()`
-    select 1 from pg_locks
-    where locktype = 'advisory' and granted
-      and classid = ${MAINTENANCE_LOCK_KEY[0]} and objid = ${MAINTENANCE_LOCK_KEY[1]}
-    limit 1`;
-  return rows.length > 0;
+  return advisoryLockHeld(MAINTENANCE_LOCK_KEY);
+}
+
+/** Non-blocking: resolves a handle when this runtime child should own the inbox watcher. */
+export async function tryAcquireWatcherLock(): Promise<WatcherLockHandle | null> {
+  const reservation = await tryAcquireAdvisoryLock(WATCHER_LOCK_KEY);
+  return reservation ? { reservation } : null;
+}
+
+export async function releaseWatcherLock(handle: WatcherLockHandle): Promise<void> {
+  await releaseAdvisoryLock(handle.reservation, WATCHER_LOCK_KEY);
+}
+
+export async function watcherLockHeld(): Promise<boolean> {
+  return advisoryLockHeld(WATCHER_LOCK_KEY);
 }
 
 export async function listActivePages(actor?: AccessActor): Promise<any[]> {

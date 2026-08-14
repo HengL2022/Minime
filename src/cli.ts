@@ -34,7 +34,8 @@ import { type DoctorCheck, runDoctorChecks } from "./ops/doctor";
 import { dbSnapshot, preUpdateSnapshot } from "./pipeline/backup";
 import { brainSync } from "./pipeline/brain-sync";
 import { dream } from "./pipeline/dream";
-import { readArchivedCapture, startWatcher, storedClassification } from "./pipeline/watcher";
+import { readArchivedCapture, storedClassification } from "./pipeline/watcher";
+import { startOwnedInboxWatcher } from "./pipeline/watcher-owner";
 import { drainEmbedBacklog } from "./search/index-parent";
 import {
   assertRuntimeChildBoundary,
@@ -1013,10 +1014,10 @@ async function main(): Promise<number> {
       process.once("SIGINT", onSigint);
       process.once("SIGTERM", onSigterm);
       process.stdin.once("end", onEnd);
-      let watcher: Awaited<ReturnType<typeof startWatcher>> | undefined;
+      let watcher: Awaited<ReturnType<typeof startOwnedInboxWatcher>> | undefined;
       let server: Awaited<ReturnType<typeof startMcpServer>> | undefined;
       try {
-        watcher = await startWatcher();
+        watcher = await startOwnedInboxWatcher();
         server = await startMcpServer();
         void server.closed.then(() => stop(0));
         return await stopped;
