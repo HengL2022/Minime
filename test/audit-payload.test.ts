@@ -241,6 +241,7 @@ describe("audit payload boundary", () => {
       "2d_goal_backlog_index": 4,
       "3_contradictions": 1,
       "3b_phantom_persons": 0,
+      "3d_high_edge_orgs": 2,
       "3c_validate_edges": {
         checked: 4,
         confirmed: 2,
@@ -276,6 +277,7 @@ describe("audit payload boundary", () => {
       goal_backlog_indexed_count: 4,
       contradiction_count: 1,
       phantom_person_count: 0,
+      high_edge_org_count: 2,
       edge_checked_count: 4,
       edge_confirmed_count: 2,
       edge_denied_count: 1,
