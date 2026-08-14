@@ -4,21 +4,26 @@
 // discovery of new people/orgs anchored to high-precision cues. Deterministic regex only —
 // no model calls — so it is cheap, auditable, and runs on every write (indexParent) plus
 // a nightly backlog pass (dream step 2). Confidence: 0.85 same sentence, 0.7 same
-// paragraph, 0.6 page-dominant org.
+// paragraph, 0.6 page-dominant org. Write floor is 0.7: page-dominant works_at is
+// queued as extract_suspect instead of written live (Fix B / never-guess).
 
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   type EntityRef,
+  addOrgAlias,
   allOrgsWithAliases,
   allPeopleWithAliases,
   deleteExtractedEdgesForSource,
   ensureExtractedOrg,
   ensureExtractedPerson,
+  insertReviewItem,
   parentTable,
   personHasNonWorkingRelation,
   resolveOrg,
   resolvePerson,
+  reviewItemExists,
   setPersonRelationIfNull,
   sourceTierForParent,
   upsertExtractedEdge,
@@ -468,6 +473,177 @@ async function resolveOrCreateOrg(
   return ensureExtractedOrg(name, base, ACTOR, derivation);
 }
 
+// Write-time org identity (Fix B). Suffix-stripped fold is the key so "Havlyd" /
+// "Havlyd AS" stay exact and keep going through ensureExtractedOrg. Near-match is
+// Levenshtein ≤ 1 or a trailing s/es, both keys length ≥ 4 — unique → merge+alias,
+// 2+ → flag, never mint a twin. Cue-discovered facts.orgs still create live orgs;
+// only below-floor works_at edges are withheld.
+const WORKS_AT_WRITE_FLOOR = 0.7;
+
+function foldOrgKey(name: string): string {
+  return name.replace(LEGAL_SUFFIX, "").toLowerCase();
+}
+
+function extractFlagKey(kind: string, material: string): string {
+  return `${kind}:${createHash("sha256").update(material).digest("hex").slice(0, 16)}`;
+}
+
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  const rows: number[][] = [];
+  for (let i = 0; i <= a.length; i++) {
+    rows[i] = [i];
+    for (let j = 1; j <= b.length; j++) {
+      if (i === 0) {
+        rows[0]![j] = j;
+        continue;
+      }
+      const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+      rows[i]![j] = Math.min(
+        (rows[i - 1]![j] ?? 0) + 1,
+        (rows[i]![j - 1] ?? 0) + 1,
+        (rows[i - 1]![j - 1] ?? 0) + cost,
+      );
+    }
+  }
+  return rows[a.length]![b.length] ?? 0;
+}
+
+function isNearOrgKey(a: string, b: string): boolean {
+  if (a === b || a.length < 4 || b.length < 4) return false;
+  if (a === `${b}s` || b === `${a}s` || a === `${b}es` || b === `${a}es`) return true;
+  return levenshtein(a, b) <= 1;
+}
+
+function orgDisplayName(names: string[]): string {
+  let best = names[0] ?? "";
+  for (const n of names) if (n.length > best.length) best = n;
+  return best;
+}
+
+function exactOrgInLexicon(name: string, lexicon: { names: string[] }[]): boolean {
+  const folded = name.toLowerCase();
+  const key = foldOrgKey(name);
+  return lexicon.some((e) =>
+    e.names.some((n) => n.toLowerCase() === folded || foldOrgKey(n) === key),
+  );
+}
+
+function nearOrgHits(
+  name: string,
+  lexicon: { id: string; names: string[] }[],
+): { id: string; name: string }[] {
+  const key = foldOrgKey(name);
+  const hits: { id: string; name: string }[] = [];
+  for (const e of lexicon) {
+    if (e.names.some((n) => isNearOrgKey(key, foldOrgKey(n)))) {
+      hits.push({ id: e.id, name: orgDisplayName(e.names) });
+    }
+  }
+  return hits;
+}
+
+function rememberOrgInLexicon(
+  lexicon: { id: string; names: string[] }[],
+  id: string,
+  name: string,
+): void {
+  const entry = lexicon.find((e) => e.id === id);
+  if (entry) {
+    if (!entry.names.some((n) => n.toLowerCase() === name.toLowerCase())) entry.names.push(name);
+    return;
+  }
+  const base = name.replace(LEGAL_SUFFIX, "");
+  lexicon.push({
+    id,
+    names: base.toLowerCase() === name.toLowerCase() ? [name] : [name, base],
+  });
+}
+
+async function queueExtractSuspect(
+  payload: Record<string, unknown>,
+  key: string,
+  value: string,
+): Promise<void> {
+  if (await reviewItemExists("extract_suspect", key, value)) return;
+  await insertReviewItem("extract_suspect", payload);
+}
+
+async function resolveExtractedOrg(
+  name: string,
+  lexicon: { id: string; names: string[] }[],
+  derivation: ExtractionDerivation,
+): Promise<{ id: string; created: boolean } | null> {
+  if (exactOrgInLexicon(name, lexicon)) return resolveOrCreateOrg(name, derivation);
+  const near = nearOrgHits(name, lexicon);
+  if (near.length === 1) {
+    const hit = near[0]!;
+    await addOrgAlias(hit.id, name, {
+      tier: derivation.tier,
+      createdBy: ACTOR,
+      source: "extract",
+      derivedFrom: derivation.derivedFrom,
+    });
+    return { id: hit.id, created: false };
+  }
+  if (near.length >= 2) {
+    const flagKey = extractFlagKey("fuzzy_org_ambiguous", foldOrgKey(name));
+    await queueExtractSuspect(
+      {
+        reason: "fuzzy_org_ambiguous",
+        flag_key: flagKey,
+        candidate: name,
+        matches: near.map((m) => ({ type: "org", id: m.id, name: m.name })),
+      },
+      "flag_key",
+      flagKey,
+    );
+    return null;
+  }
+  return resolveOrCreateOrg(name, derivation);
+}
+
+async function applyWorksAtEdge(
+  w: WorksAt,
+  personIds: Map<string, string>,
+  orgIds: Map<string, string>,
+  parentId: string,
+  srcTable: string,
+): Promise<boolean> {
+  const personId = personIds.get(w.person.toLowerCase()) ?? (await resolvePerson(w.person))?.id;
+  const orgId = orgIds.get(w.org.toLowerCase()) ?? (await resolveOrg(w.org))?.id;
+  if (!personId || !orgId) return false;
+  if (await personHasNonWorkingRelation(personId)) {
+    console.error("extract:skip-works-at non-working relation");
+    return false;
+  }
+  if (w.confidence < WORKS_AT_WRITE_FLOOR) {
+    const flagKey = `low_confidence_edge:${personId}:${orgId}`;
+    await queueExtractSuspect(
+      {
+        reason: "low_confidence_edge",
+        flag_key: flagKey,
+        person: { type: "person", id: personId, name: w.person },
+        org: { type: "org", id: orgId, name: w.org },
+        confidence: w.confidence,
+      },
+      "flag_key",
+      flagKey,
+    );
+    return false;
+  }
+  return upsertExtractedEdge({
+    srcType: "person",
+    srcId: personId,
+    rel: "works_at",
+    dstType: "org",
+    dstId: orgId,
+    sourceTable: srcTable,
+    sourceId: parentId,
+    confidence: w.confidence,
+  });
+}
+
 export interface ExtractStats {
   edges: number;
   people: number;
@@ -502,9 +678,11 @@ export async function extractAndLink(
   }
   const orgIds = new Map<string, string>();
   for (const o of facts.orgs) {
-    const { id, created } = await resolveOrCreateOrg(o, derivation);
-    orgIds.set(o.toLowerCase(), id);
-    if (created) stats.orgs++;
+    const resolved = await resolveExtractedOrg(o, lexicon.orgs, derivation);
+    if (!resolved) continue;
+    orgIds.set(o.toLowerCase(), resolved.id);
+    if (resolved.created) stats.orgs++;
+    rememberOrgInLexicon(lexicon.orgs, resolved.id, o);
   }
 
   const mentionRefs: EntityRef[] = [
@@ -512,12 +690,26 @@ export async function extractAndLink(
     ...[...personIds.values()].map((id) => ({ type: "person" as const, id })),
     ...[...orgIds.values()].map((id) => ({ type: "org" as const, id })),
   ];
+  stats.edges += await upsertMentionEdges(mentionRefs, parentType, parentId, srcTable);
+  for (const w of facts.worksAt) {
+    if (await applyWorksAtEdge(w, personIds, orgIds, parentId, srcTable)) stats.edges++;
+  }
+  return stats;
+}
+
+async function upsertMentionEdges(
+  refs: EntityRef[],
+  parentType: string,
+  parentId: string,
+  srcTable: string,
+): Promise<number> {
   const seen = new Set<string>();
-  for (const ref of mentionRefs) {
+  let created = 0;
+  for (const ref of refs) {
     const key = `${ref.type}:${ref.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const created = await upsertExtractedEdge({
+    const wrote = await upsertExtractedEdge({
       srcType: parentType,
       srcId: parentId,
       rel: "mentions",
@@ -527,31 +719,7 @@ export async function extractAndLink(
       sourceId: parentId,
       confidence: 0.8,
     });
-    if (created) stats.edges++;
+    if (wrote) created++;
   }
-
-  for (const w of facts.worksAt) {
-    const personId = personIds.get(w.person.toLowerCase()) ?? (await resolvePerson(w.person))?.id;
-    const orgId = orgIds.get(w.org.toLowerCase()) ?? (await resolveOrg(w.org))?.id;
-    if (!personId || !orgId) continue;
-    // Family/household relations can't "work at" an org. A child co-mentioned with a
-    // school/clinic + work cue used to get a phantom works_at edge from paragraph-scope
-    // / page-dominant inference; refuse it here where the stored relation is known.
-    if (await personHasNonWorkingRelation(personId)) {
-      console.error("extract:skip-works-at non-working relation");
-      continue;
-    }
-    const created = await upsertExtractedEdge({
-      srcType: "person",
-      srcId: personId,
-      rel: "works_at",
-      dstType: "org",
-      dstId: orgId,
-      sourceTable: srcTable,
-      sourceId: parentId,
-      confidence: w.confidence,
-    });
-    if (created) stats.edges++;
-  }
-  return stats;
+  return created;
 }

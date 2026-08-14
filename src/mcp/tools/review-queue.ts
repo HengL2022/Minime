@@ -174,28 +174,43 @@ async function maskReviewPayload(item: any, actor: string): Promise<any> {
   // tier (edges inherit their source parent's tier): invisible → mask rel + names, keep
   // edge_id/rule_key/verdict/entity_type for post-unlock triage; visible → still re-resolve
   // each endpoint name at the caller's tier. Fail closed on any lookup error.
-  if (item.kind === "extract_suspect" && typeof item.payload?.edge_id === "string") {
-    const raw = item.payload;
-    try {
-      payload = (await edgeVisibleAtTier(raw.edge_id, actor))
-        ? {
-            ...payload,
-            src: await visibleEndpoint(raw.src, actor),
-            dst: await visibleEndpoint(raw.dst, actor),
-          }
-        : {
-            ...payload,
-            rel: HIDDEN,
-            src: maskEndpointName(raw.src),
-            dst: maskEndpointName(raw.dst),
-          };
-    } catch {
+  // Fix B flags (no edge_id) carry the same endpoint shape plus a machine-code reason;
+  // restore that code after CONTENT_KEYS masking and re-resolve names the same way.
+  if (item.kind === "extract_suspect") {
+    const raw = item.payload ?? {};
+    if (raw.reason === "fuzzy_org_ambiguous" || raw.reason === "low_confidence_edge") {
+      payload = { ...payload, reason: raw.reason };
+    }
+    if (Array.isArray(raw.matches)) {
       payload = {
         ...payload,
-        rel: HIDDEN,
-        src: maskEndpointName(raw.src),
-        dst: maskEndpointName(raw.dst),
+        matches: await Promise.all(raw.matches.map((ep: unknown) => visibleEndpoint(ep, actor))),
       };
+    }
+    if (raw.person) payload = { ...payload, person: await visibleEndpoint(raw.person, actor) };
+    if (raw.org) payload = { ...payload, org: await visibleEndpoint(raw.org, actor) };
+    if (typeof raw.edge_id === "string") {
+      try {
+        payload = (await edgeVisibleAtTier(raw.edge_id, actor))
+          ? {
+              ...payload,
+              src: await visibleEndpoint(raw.src, actor),
+              dst: await visibleEndpoint(raw.dst, actor),
+            }
+          : {
+              ...payload,
+              rel: HIDDEN,
+              src: maskEndpointName(raw.src),
+              dst: maskEndpointName(raw.dst),
+            };
+      } catch {
+        payload = {
+          ...payload,
+          rel: HIDDEN,
+          src: maskEndpointName(raw.src),
+          dst: maskEndpointName(raw.dst),
+        };
+      }
     }
   }
 
