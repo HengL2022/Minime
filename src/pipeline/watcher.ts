@@ -48,6 +48,7 @@ import { config } from "../util/config";
 import {
   CLASSIFIER_TYPES,
   type Classification,
+  captureBodyFirstLine,
   classify,
   completionSignal,
   completionTitle,
@@ -213,11 +214,7 @@ export function noteHintTier(text: string): 1 | 2 {
 }
 
 function firstLineOf(text: string): string {
-  return text
-    .split("\n")[0]!
-    .replace(/^<!--.*?-->\s*/s, "")
-    .trim()
-    .slice(0, 200);
+  return captureBodyFirstLine(text).slice(0, 200);
 }
 
 function noteProjection(c: Classification, text: string, inboxId: string): NoteProjection {

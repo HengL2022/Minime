@@ -91,10 +91,7 @@ export function orgCue(text: string): boolean {
 // to the first sentence/clause boundary (before the forward-looking "but/however/need to"
 // part), strip a leading "decision:"/"decided" prefix, and cap at 120 chars.
 export function completionTitle(text: string): string {
-  const firstLine = text
-    .split("\n")[0]!
-    .replace(/^<!--.*?-->\s*/s, "")
-    .trim();
+  const firstLine = captureBodyFirstLine(text);
   // cut at the pivot into forward-looking territory, or the first sentence end
   const clause = firstLine.split(/\s*(?:[.;]|\bbut\b|\bhowever\b|\bneed to\b|\bnote:)/i)[0]!.trim();
   const base = (clause || firstLine).replace(/^(decision|decided)\b[:\s-]*/i, "").trim();
@@ -116,9 +113,7 @@ export function completionTitle(text: string): string {
 //   - the pivot is an explicit decision verb: "and decide on/whether/if/between ...".
 export function splitActionDecision(text: string): { action: string; decision: string } | null {
   if (completionSignal(text)) return null;
-  const firstLine = text
-    .split("\n")[0]!
-    .replace(/^<!--.*?-->\s*/s, "")
+  const firstLine = captureBodyFirstLine(text)
     .replace(/^(todo|task)[:\s]+/i, "")
     .trim();
   // pivot: "... and decide on/whether/if/between <rest>" (also "and decide to/about/...").
@@ -134,6 +129,15 @@ export function splitActionDecision(text: string): { action: string; decision: s
   return { action, decision };
 }
 
+// minime_capture writes `<!-- hint: … -->\n${text}`, so the usable first line is
+// after that comment — not the comment line itself.
+export function captureBodyFirstLine(text: string): string {
+  return text
+    .replace(/^<!--.*?-->\s*/s, "")
+    .split("\n")[0]!
+    .trim();
+}
+
 export function heuristicIdentityType(text: string): "org" | "person" | null {
   const hint =
     text
@@ -142,10 +146,7 @@ export function heuristicIdentityType(text: string): "org" | "person" | null {
       .toLowerCase() ?? "";
   if (/\borg\s*\/\s*company\b/.test(hint) || /^(org|company)(\s+record)?$/.test(hint)) return "org";
   if (/^person(\s+record)?$/.test(hint)) return "person";
-  const first = text
-    .split("\n")[0]!
-    .replace(/^<!--.*?-->\s*/s, "")
-    .trim();
+  const first = captureBodyFirstLine(text);
   if (/^(org|company):\s+\S/i.test(first)) return "org";
   if (/^person:\s+\S/i.test(first)) return "person";
   return null;
@@ -156,11 +157,9 @@ export function identityCaptureName(
   fields: Record<string, unknown> = {},
 ): string | null {
   const fromFields = typeof fields.name === "string" ? fields.name.trim() : "";
-  const first = text
-    .split("\n")[0]!
-    .replace(/^<!--.*?-->\s*/s, "")
+  const stripped = captureBodyFirstLine(text)
+    .replace(/^(org|company|person):\s+/i, "")
     .trim();
-  const stripped = first.replace(/^(org|company|person):\s+/i, "").trim();
   const name = (fromFields || stripped).replace(/\s+/g, " ").slice(0, 120);
   if (name.length < 2 || !/\p{L}/u.test(name)) return null;
   return name;
@@ -169,10 +168,7 @@ export function identityCaptureName(
 export function heuristicClassify(text: string): Classification {
   const t = text.trim();
   const lower = t.toLowerCase();
-  const firstLine = t
-    .split("\n")[0]!
-    .replace(/^<!--.*?-->\s*/s, "")
-    .trim();
+  const firstLine = captureBodyFirstLine(t);
 
   if (t.length < 3 || !/[a-z]/i.test(t))
     return { type: "unknown", confidence: 0.2, fields: {}, reason: "too short or no letters" };

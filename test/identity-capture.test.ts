@@ -61,6 +61,9 @@ describe("heuristic identity capture", () => {
 
   test("todo and met cues still win over a company name in the body", () => {
     expect(heuristicClassify("todo: email Fjordsonics AS about the order").type).toBe("task");
+    expect(
+      heuristicClassify("<!-- hint: org / company record -->\ntodo: email Fjordsonics AS").type,
+    ).toBe("task");
     expect(heuristicClassify("met Tomasz about the calibration run").type).toBe("interaction");
   });
 
