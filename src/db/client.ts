@@ -117,17 +117,24 @@ export async function withRuntimeDbTransaction<T>(
   return (await runtimePool.begin((tx) => transactionScope.run(tx, () => work(tx)))) as T;
 }
 
+const outstandingReservations = new Set<DbReservation>();
+
 export async function reserveDb(): Promise<DbReservation> {
   const pool = executorScope.getStore() === "admin" ? adminSql : runtimePool;
   const executor = await pool.reserve();
   let releasePromise: Promise<void> | undefined;
-  return {
+  const reservation: DbReservation = {
     executor,
     release: () => {
-      releasePromise ??= Promise.resolve().then(() => executor.release());
+      releasePromise ??= Promise.resolve().then(async () => {
+        outstandingReservations.delete(reservation);
+        await executor.release();
+      });
       return releasePromise;
     },
   };
+  outstandingReservations.add(reservation);
+  return reservation;
 }
 
 export async function withReservedDb<T>(work: (connection: DbReserved) => Promise<T>): Promise<T> {
@@ -162,6 +169,9 @@ export async function withDurableRuntimeDbTransaction<T>(
 }
 
 export async function closeDb(): Promise<void> {
+  const leftover = [...outstandingReservations];
+  outstandingReservations.clear();
+  await Promise.allSettled(leftover.map((reservation) => reservation.release()));
   const adminClose = adminDisabled ? Promise.resolve() : adminSql.end({ timeout: 5 });
   await Promise.all([
     runtimePool.end({ timeout: 5 }),

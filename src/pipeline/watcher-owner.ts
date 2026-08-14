@@ -55,13 +55,25 @@ export async function startOwnedInboxWatcher(
     if (!handle) return;
     lock = handle;
     retry?.stop();
-    await becomeOwner();
+    try {
+      await becomeOwner();
+    } catch (error) {
+      lock = null;
+      await releaseWatcherLock(handle);
+      throw error;
+    }
   };
 
   const initial = await tryAcquireWatcherLock();
   if (initial) {
     lock = initial;
-    await becomeOwner();
+    try {
+      await becomeOwner();
+    } catch (error) {
+      lock = null;
+      await releaseWatcherLock(initial);
+      throw error;
+    }
   } else {
     console.error("[minime] inbox watcher owned by another process");
     retry = createCron(WATCHER_RETRY_CRON, { timezone: config.tz }, () => run(attemptTakeover));

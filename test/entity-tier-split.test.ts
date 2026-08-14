@@ -22,6 +22,7 @@ import { toolByName } from "../src/mcp/tools";
 import { invokeTool } from "../src/mcp/tools/registry";
 import { extractAndLink } from "../src/pipeline/extract-edges";
 import { expectSqlReject, resetDb, testSql } from "./helpers";
+import { registerTestDatabaseCloser } from "./setup";
 import { dropTestAppRole, mintTestAppRole } from "./support/app-role";
 import { requestAndApproveTier2, sessionToolCtx } from "./support/unlock";
 
@@ -53,11 +54,16 @@ describe("identity/content tier split", () => {
     // tier 1 — resolving them is not "deriving" them.
     const priorAliases = await testSql`
       select alias, tier from person_aliases where person_id = ${personId}
-        and lower(alias) in ('erik voss', 'e. voss') order by alias`;
-    expect(priorAliases.map((row) => ({ ...row }))).toEqual([
-      { alias: "E. Voss", tier: 1 },
-      { alias: "Erik Voss", tier: 1 },
-    ]);
+        and lower(alias) in ('erik voss', 'e. voss')`;
+    // Do not ORDER BY alias in SQL: en_US.UTF-8 ignores punctuation, so "Erik Voss"
+    // sorts before "E. Voss". Membership and tiers are the contract, not collation.
+    expect(priorAliases).toHaveLength(2);
+    expect(priorAliases.map((row) => ({ alias: row.alias, tier: row.tier }))).toEqual(
+      expect.arrayContaining([
+        { alias: "E. Voss", tier: 1 },
+        { alias: "Erik Voss", tier: 1 },
+      ]),
+    );
 
     // A brand-new alias minted BY this tier-2 extraction (the bare first name, never on file
     // before) is content-derived and stays at the content's own tier: 2.
@@ -223,8 +229,22 @@ describe("identity/content tier split", () => {
 describe("keep_entity_tier_guarded trigger (adversarial: minime_app vs. the owner connection)", () => {
   let appRole: Awaited<ReturnType<typeof mintTestAppRole>>;
   let app: ReturnType<typeof postgres>;
+  let unregisterApp: (() => void) | undefined;
+  let appClosePromise: Promise<void> | undefined;
   const appActor = "agent:tier-guard-adversarial";
   const appSessionId = crypto.randomUUID();
+
+  function closeAppOnce(): Promise<void> {
+    if (!appClosePromise) {
+      const pool = app;
+      appClosePromise = Promise.resolve()
+        .then(() => pool.end({ timeout: 5 }))
+        .catch(() => {
+          throw new Error("test_database_cleanup_failed");
+        });
+    }
+    return appClosePromise;
+  }
 
   beforeAll(async () => {
     await resetDb();
@@ -235,6 +255,7 @@ describe("keep_entity_tier_guarded trigger (adversarial: minime_app vs. the owne
     // already rely on.
     await testSql.unsafe(`grant minime_app to "${appRole.roleName}"`);
     app = postgres(appRole.databaseUrl, { max: 2, onnotice: () => {} });
+    unregisterApp = registerTestDatabaseCloser(closeAppOnce);
 
     // Unlock this session once, up front. RLS's own tier_update policy on people/orgs
     // (tier >= 1 and tier <= app_allowed_tier()) gates which row an UPDATE can even TARGET,
@@ -251,8 +272,14 @@ describe("keep_entity_tier_guarded trigger (adversarial: minime_app vs. the owne
   });
 
   afterAll(async () => {
-    await app?.end({ timeout: 2 });
-    if (appRole) await dropTestAppRole(appRole);
+    try {
+      await closeAppOnce();
+      unregisterApp?.();
+      unregisterApp = undefined;
+      if (appRole) await dropTestAppRole(appRole);
+    } catch {
+      throw new Error("test_database_cleanup_failed");
+    }
   });
 
   // SET LOCAL ROLE and set_config's `true` (local) flag are both transaction-scoped, so both

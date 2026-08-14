@@ -18,6 +18,9 @@ import { config } from "../src/util/config";
 import { expectSqlReject, resetDb, testSql } from "./helpers";
 
 const inboxDir = join(config.dataDir, "inbox");
+// Bun's default test timeout is 5s; waitForFiledIdentity can wait 10s, and a
+// loaded CI runner often needs two sequential file+process cycles.
+const WATCHER_TEST_TIMEOUT_MS = 20_000;
 
 function sha256(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
@@ -391,11 +394,13 @@ describe("inbox byte identity (classifier mocked by the test preload)", () => {
     expect(await readFile(join(config.dataDir, String(item!.archive_path)), "utf8")).toBe(bytes);
   });
 
-  test("a fresh crash lease wakes at expiry without another filesystem event", async () => {
-    const path = join(inboxDir, "fresh-crash-lease.md");
-    const bytes = "todo: catalogue the fictional onyx tabs by 2027-04-14";
-    await Bun.write(path, bytes);
-    const [fresh] = await testSql`
+  test(
+    "a fresh crash lease wakes at expiry without another filesystem event",
+    async () => {
+      const path = join(inboxDir, "fresh-crash-lease.md");
+      const bytes = "todo: catalogue the fictional onyx tabs by 2027-04-14";
+      await Bun.write(path, bytes);
+      const [fresh] = await testSql`
       insert into inbox_items
         (raw_path, mime, status, content_hash, claim_token, claimed_at, created_by, source, tier)
       values
@@ -404,54 +409,62 @@ describe("inbox byte identity (classifier mocked by the test preload)", () => {
          'agent:classifier', 'capture', 1)
       returning id`;
 
-    const watcher = await startWatcher();
-    try {
-      const [beforeExpiry] = await testSql`
+      const watcher = await startWatcher();
+      try {
+        const [beforeExpiry] = await testSql`
         select status from inbox_items where id = ${fresh!.id}`;
-      expect(beforeExpiry!.status).toBe("processing");
-      const filed = await waitForFiledIdentity(path, sha256(bytes));
-      expect(filed.id).toBe(fresh!.id);
-      expect(await testSql`select id from tasks where derived_from = ${fresh!.id}`).toHaveLength(1);
-    } finally {
-      await watcher.close();
-    }
-  });
+        expect(beforeExpiry!.status).toBe("processing");
+        const filed = await waitForFiledIdentity(path, sha256(bytes));
+        expect(filed.id).toBe(fresh!.id);
+        expect(await testSql`select id from tasks where derived_from = ${fresh!.id}`).toHaveLength(
+          1,
+        );
+      } finally {
+        await watcher.close();
+      }
+    },
+    WATCHER_TEST_TIMEOUT_MS,
+  );
 
-  test("recovery finds a deterministic archive published before archive_path committed", async () => {
-    const path = join(inboxDir, "archive-gap.md");
-    const archivedBytes = "todo: inventory the fictional topaz reels by 2027-04-21";
-    const currentBytes = "todo: map the fictional violet cairns by 2027-04-22";
-    await Bun.write(path, currentBytes);
-    const [stale] = await testSql`
+  test(
+    "recovery finds a deterministic archive published before archive_path committed",
+    async () => {
+      const path = join(inboxDir, "archive-gap.md");
+      const archivedBytes = "todo: inventory the fictional topaz reels by 2027-04-21";
+      const currentBytes = "todo: map the fictional violet cairns by 2027-04-22";
+      await Bun.write(path, currentBytes);
+      const [stale] = await testSql`
       insert into inbox_items
         (raw_path, mime, status, content_hash, claim_token, claimed_at, created_by, source, tier)
       values
         (${path}, 'text/markdown', 'processing', ${sha256(archivedBytes)}, ${randomUUID()}::uuid,
          clock_timestamp() - interval '10 minutes', 'agent:classifier', 'capture', 1)
       returning id, received_at`;
-    const receivedAt = new Date(stale!.received_at);
-    const relativeArchive = join(
-      "archive",
-      String(receivedAt.getUTCFullYear()),
-      String(receivedAt.getUTCMonth() + 1).padStart(2, "0"),
-      `${stale!.id}-archive-gap.md`,
-    );
-    await atomicWritePrivate(join(config.dataDir, relativeArchive), archivedBytes);
+      const receivedAt = new Date(stale!.received_at);
+      const relativeArchive = join(
+        "archive",
+        String(receivedAt.getUTCFullYear()),
+        String(receivedAt.getUTCMonth() + 1).padStart(2, "0"),
+        `${stale!.id}-archive-gap.md`,
+      );
+      await atomicWritePrivate(join(config.dataDir, relativeArchive), archivedBytes);
 
-    const watcher = await startWatcher();
-    try {
-      const recovered = await waitForFiledIdentity(path, sha256(archivedBytes));
-      const changed = await waitForFiledIdentity(path, sha256(currentBytes));
-      expect(recovered.id).toBe(stale!.id);
-      expect(changed.id).not.toBe(stale!.id);
-      const [healed] = await testSql`
+      const watcher = await startWatcher();
+      try {
+        const recovered = await waitForFiledIdentity(path, sha256(archivedBytes));
+        const changed = await waitForFiledIdentity(path, sha256(currentBytes));
+        expect(recovered.id).toBe(stale!.id);
+        expect(changed.id).not.toBe(stale!.id);
+        const [healed] = await testSql`
         select status, archive_path from inbox_items where id = ${stale!.id}`;
-      expect(healed).toEqual({ status: "filed", archive_path: relativeArchive });
-      expect(await readFile(join(config.dataDir, relativeArchive), "utf8")).toBe(archivedBytes);
-    } finally {
-      await watcher.close();
-    }
-  });
+        expect(healed).toEqual({ status: "filed", archive_path: relativeArchive });
+        expect(await readFile(join(config.dataDir, relativeArchive), "utf8")).toBe(archivedBytes);
+      } finally {
+        await watcher.close();
+      }
+    },
+    WATCHER_TEST_TIMEOUT_MS,
+  );
 
   test("a reclaimed item fences the old claim token from late writes", async () => {
     const path = join(inboxDir, "claim-fence.md");
@@ -489,48 +502,54 @@ describe("inbox byte identity (classifier mocked by the test preload)", () => {
     expect(await testSql`select id from tasks where derived_from = ${item.id}`).toHaveLength(1);
   });
 
-  test("startup preserves first-seen bytes beside an unhashed terminal legacy row and later edits", async () => {
-    const path = join(inboxDir, "legacy-terminal-change.md");
-    const legacyBytes = "legacy capture bytes with no trustworthy historical digest";
-    const changedBytes = "todo: file the new fictional amber index cards by 2027-06-06";
-    await Bun.write(path, legacyBytes);
-    const [legacy] = await testSql`
+  test(
+    "startup preserves first-seen bytes beside an unhashed terminal legacy row and later edits",
+    async () => {
+      const path = join(inboxDir, "legacy-terminal-change.md");
+      const legacyBytes = "legacy capture bytes with no trustworthy historical digest";
+      const changedBytes = "todo: file the new fictional amber index cards by 2027-06-06";
+      await Bun.write(path, legacyBytes);
+      const [legacy] = await testSql`
       insert into inbox_items (raw_path, status, classifier_output, created_by, source)
       values (${path}, 'filed', ${testSql.json({ legacy: true })}, 'human', 'capture')
       returning id`;
 
-    const firstWatcher = await startWatcher();
-    try {
-      const beforeChange = await testSql`
+      const firstWatcher = await startWatcher();
+      try {
+        const beforeChange = await testSql`
         select id, content_hash
         from inbox_items where raw_path = ${path}`;
-      expect(beforeChange).toHaveLength(2);
-      expect(beforeChange.some((row) => row.id === legacy!.id && row.content_hash == null)).toBe(
-        true,
-      );
-      const firstObserved = await waitForFiledIdentity(path, sha256(legacyBytes));
-      expect(firstObserved.id).not.toBe(legacy!.id);
-    } finally {
-      await firstWatcher.close();
-    }
+        expect(beforeChange).toHaveLength(2);
+        expect(beforeChange.some((row) => row.id === legacy!.id && row.content_hash == null)).toBe(
+          true,
+        );
+        const firstObserved = await waitForFiledIdentity(path, sha256(legacyBytes));
+        expect(firstObserved.id).not.toBe(legacy!.id);
+      } finally {
+        await firstWatcher.close();
+      }
 
-    // No watcher is running: the next startup scan must detect this changed baseline.
-    await Bun.write(path, changedBytes);
-    const secondWatcher = await startWatcher();
-    try {
-      const changed = await waitForFiledIdentity(path, sha256(changedBytes));
-      expect(changed.id).not.toBe(legacy!.id);
-      expect(await testSql`select id from inbox_items where raw_path = ${path}`).toHaveLength(3);
-    } finally {
-      await secondWatcher.close();
-    }
-  });
+      // No watcher is running: the next startup scan must detect this changed baseline.
+      await Bun.write(path, changedBytes);
+      const secondWatcher = await startWatcher();
+      try {
+        const changed = await waitForFiledIdentity(path, sha256(changedBytes));
+        expect(changed.id).not.toBe(legacy!.id);
+        expect(await testSql`select id from inbox_items where raw_path = ${path}`).toHaveLength(3);
+      } finally {
+        await secondWatcher.close();
+      }
+    },
+    WATCHER_TEST_TIMEOUT_MS,
+  );
 
-  test("startup processing failure remains retryable instead of rejecting a present source", async () => {
-    const path = join(inboxDir, "startup-retryable.md");
-    const bytes = "todo: sort the fictional mica cards by 2027-07-07";
-    await Bun.write(path, bytes);
-    const [item] = await testSql`
+  test(
+    "startup processing failure remains retryable instead of rejecting a present source",
+    async () => {
+      const path = join(inboxDir, "startup-retryable.md");
+      const bytes = "todo: sort the fictional mica cards by 2027-07-07";
+      await Bun.write(path, bytes);
+      const [item] = await testSql`
       insert into inbox_items
         (raw_path, mime, status, content_hash, claim_token, claimed_at, created_by, source, tier)
       values
@@ -538,7 +557,7 @@ describe("inbox byte identity (classifier mocked by the test preload)", () => {
          clock_timestamp() - interval '10 minutes', 'agent:classifier', 'capture', 1)
       returning id`;
 
-    await testSql.unsafe(`
+      await testSql.unsafe(`
       create function test_fail_startup_filed() returns trigger as $$
       begin
         if new.status = 'filed' then
@@ -548,61 +567,67 @@ describe("inbox byte identity (classifier mocked by the test preload)", () => {
       end;
       $$ language plpgsql
     `);
-    await testSql.unsafe(`
+      await testSql.unsafe(`
       create trigger test_fail_startup_filed
       before update of status on inbox_items
       for each row execute function test_fail_startup_filed()
     `);
 
-    try {
-      const watcher = await startWatcher();
-      await watcher.close();
-      const [failed] = await testSql`
+      try {
+        const watcher = await startWatcher();
+        await watcher.close();
+        const [failed] = await testSql`
         select status, classifier_output from inbox_items where id = ${item!.id}`;
-      expect(failed!.status).toBe("processing");
-      expect(failed!.classifier_output).not.toBeNull();
-    } finally {
-      await testSql.unsafe("drop trigger if exists test_fail_startup_filed on inbox_items");
-      await testSql.unsafe("drop function if exists test_fail_startup_filed()");
-    }
-    expect(await processInboxFile(path)).toEqual({ inboxId: item!.id, filed: true });
-  });
+        expect(failed!.status).toBe("processing");
+        expect(failed!.classifier_output).not.toBeNull();
+      } finally {
+        await testSql.unsafe("drop trigger if exists test_fail_startup_filed on inbox_items");
+        await testSql.unsafe("drop function if exists test_fail_startup_filed()");
+      }
+      expect(await processInboxFile(path)).toEqual({ inboxId: item!.id, filed: true });
+    },
+    WATCHER_TEST_TIMEOUT_MS,
+  );
 
-  test("duplicate untouched legacy rows converge to one identity and one audited rejection", async () => {
-    const path = join(inboxDir, "legacy-duplicate.md");
-    const bytes = "todo: label the fictional nacre trays by 2027-07-17";
-    await Bun.write(path, bytes);
-    const legacyRows = await testSql`
+  test(
+    "duplicate untouched legacy rows converge to one identity and one audited rejection",
+    async () => {
+      const path = join(inboxDir, "legacy-duplicate.md");
+      const bytes = "todo: label the fictional nacre trays by 2027-07-17";
+      await Bun.write(path, bytes);
+      const legacyRows = await testSql`
       insert into inbox_items (raw_path, status, created_by, source, tier)
       values
         (${path}, 'pending', 'human', 'capture', 1),
         (${path}, 'pending', 'human', 'capture', 1)
       returning id`;
 
-    const watcher = await startWatcher();
-    try {
-      const filed = await waitForFiledIdentity(path, sha256(bytes));
-      expect(legacyRows.some((row) => row.id === filed.id)).toBe(true);
-      const rows = await testSql`
+      const watcher = await startWatcher();
+      try {
+        const filed = await waitForFiledIdentity(path, sha256(bytes));
+        expect(legacyRows.some((row) => row.id === filed.id)).toBe(true);
+        const rows = await testSql`
         select id, status, content_hash from inbox_items
         where raw_path = ${path} order by id`;
-      expect(rows).toHaveLength(2);
-      expect(rows.filter((row) => row.status === "filed" && row.content_hash != null)).toHaveLength(
-        1,
-      );
-      const [duplicate] = rows.filter(
-        (row) => row.status === "rejected" && row.content_hash == null,
-      );
-      expect(duplicate).toBeTruthy();
-      expect(
-        await testSql`
+        expect(rows).toHaveLength(2);
+        expect(
+          rows.filter((row) => row.status === "filed" && row.content_hash != null),
+        ).toHaveLength(1);
+        const [duplicate] = rows.filter(
+          (row) => row.status === "rejected" && row.content_hash == null,
+        );
+        expect(duplicate).toBeTruthy();
+        expect(
+          await testSql`
           select id from events
           where verb = 'inbox:legacy-duplicate' and entity_id = ${duplicate!.id}`,
-      ).toHaveLength(1);
-    } finally {
-      await watcher.close();
-    }
-  });
+        ).toHaveLength(1);
+      } finally {
+        await watcher.close();
+      }
+    },
+    WATCHER_TEST_TIMEOUT_MS,
+  );
 
   test("repository inbox content reads and claims exclude tier zero", async () => {
     const path = join(inboxDir, "tier-zero-poison.md");
@@ -621,30 +646,34 @@ describe("inbox byte identity (classifier mocked by the test preload)", () => {
     expect(unchanged).toEqual({ status: "pending", claim_token: null });
   });
 
-  test("the real watcher files a stable content change at an existing path", async () => {
-    const path = join(inboxDir, "watcher-change.md");
-    const bytesA =
-      "watcher reference for a fictional paper garden\n\nthe first stable version uses a copper marker.";
-    const bytesB =
-      "watcher reference for a fictional paper garden\n\nthe second stable version uses a cobalt marker.";
-    const watcher = await startWatcher();
-    try {
-      await Bun.write(path, bytesA);
-      const versionA = await waitForFiledIdentity(path, sha256(bytesA));
-      await Bun.write(path, bytesB);
-      const versionB = await waitForFiledIdentity(path, sha256(bytesB));
+  test(
+    "the real watcher files a stable content change at an existing path",
+    async () => {
+      const path = join(inboxDir, "watcher-change.md");
+      const bytesA =
+        "watcher reference for a fictional paper garden\n\nthe first stable version uses a copper marker.";
+      const bytesB =
+        "watcher reference for a fictional paper garden\n\nthe second stable version uses a cobalt marker.";
+      const watcher = await startWatcher();
+      try {
+        await Bun.write(path, bytesA);
+        const versionA = await waitForFiledIdentity(path, sha256(bytesA));
+        await Bun.write(path, bytesB);
+        const versionB = await waitForFiledIdentity(path, sha256(bytesB));
 
-      expect(versionB.id).not.toBe(versionA.id);
-      expect(await testSql`select id from inbox_items where raw_path = ${path}`).toHaveLength(2);
-      expect(await readFile(join(config.dataDir, versionA.archive_path), "utf8")).toBe(bytesA);
-      expect(await readFile(join(config.dataDir, versionB.archive_path), "utf8")).toBe(bytesB);
-      expect(
-        await testSql`
+        expect(versionB.id).not.toBe(versionA.id);
+        expect(await testSql`select id from inbox_items where raw_path = ${path}`).toHaveLength(2);
+        expect(await readFile(join(config.dataDir, versionA.archive_path), "utf8")).toBe(bytesA);
+        expect(await readFile(join(config.dataDir, versionB.archive_path), "utf8")).toBe(bytesB);
+        expect(
+          await testSql`
           select id from events
           where verb = 'inbox:filed' and entity_id in (${versionA.id}, ${versionB.id})`,
-      ).toHaveLength(2);
-    } finally {
-      await watcher.close();
-    }
-  });
+        ).toHaveLength(2);
+      } finally {
+        await watcher.close();
+      }
+    },
+    WATCHER_TEST_TIMEOUT_MS,
+  );
 });
