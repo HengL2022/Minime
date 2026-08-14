@@ -23,7 +23,7 @@ const agents = readFileSync(resolve(repoRoot, "AGENTS.md"), "utf8");
 const readme = readFileSync(resolve(repoRoot, "README.md"), "utf8");
 
 function makeDryRun(target: string, variables: string[] = []): string {
-  const result = Bun.spawnSync(["make", "-n", target, ...variables], {
+  const result = Bun.spawnSync(["make", "-n", "--no-print-directory", target, ...variables], {
     cwd: repoRoot,
     stdout: "pipe",
     stderr: "pipe",
@@ -31,7 +31,13 @@ function makeDryRun(target: string, variables: string[] = []): string {
   const stdout = new TextDecoder().decode(result.stdout);
   const stderr = new TextDecoder().decode(result.stderr);
   expect(result.exitCode).toBe(0);
-  return `${stdout}\n${stderr}`;
+  // Nested `make verify-offline` sets MAKEFLAGS=--print-directory. The explicit
+  // `--no-print-directory` usually wins, but still strip Entering/Leaving
+  // banners so the assertion is the recipe text, not the invoker's chatter.
+  return `${stdout}\n${stderr}`
+    .split("\n")
+    .filter((line) => !/^make(\[\d+\])?: (Entering|Leaving) directory/.test(line))
+    .join("\n");
 }
 
 describe("authoritative verification contract", () => {
@@ -84,6 +90,20 @@ describe("authoritative verification contract", () => {
       expect(existsSync(sentinel)).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("dry-run recipe text ignores nested make directory banners", () => {
+    const previous = process.env.MAKEFLAGS;
+    process.env.MAKEFLAGS = "--print-directory";
+    try {
+      expect(makeDryRun("verify-offline").trim()).toBe("bash scripts/verify-offline.sh");
+      expect(makeDryRun("restore-drill").trim()).toBe(
+        "bun --no-env-file run scripts/recovery-ops.ts drill",
+      );
+    } finally {
+      if (previous === undefined) delete process.env.MAKEFLAGS;
+      else process.env.MAKEFLAGS = previous;
     }
   });
 

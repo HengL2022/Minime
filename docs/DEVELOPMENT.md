@@ -172,13 +172,18 @@ ratchet, evidence-hash hierarchy, or approval receipt is needed.
 
 - **Delivered 2026-08-14:** owner and agent documentation matches the 22-tool surface
   (`README.md`, `AGENTS.md`, `agents/skills/RESOLVER.md`). Stale "14 functions" / "14 tools"
-  claims are gone. A contract test pins every registered tool name in those three files.
+  claims are gone. A contract test pins every registered tool name in those three files
+  and reads Make recipes without nested `--print-directory` banners.
   `make eval-search` held every committed mock floor. Lint, typecheck, typecheck-ops, and
-  `check-subsystems` pass.
-- Remaining owner-only gates: unsandboxed `make verify` (this agent sandbox blocks fixture
-  `git init` hooks), a real-snapshot `make restore-drill`, the outgoing privacy scan with the
-  owner's private terms, then the release handoff. Pushing remains the owner's explicit
-  action or authorization. Do not create another release train unless the owner asks for one.
+  `check-subsystems` pass. Focused suites for the 22-tool contract, multi-entity companion
+  split, and single inbox-watcher lock pass.
+- Remaining owner-only gates (do not start these from an agent session without an explicit
+  ask): a full `make verify` on the owner's machine (this cloud VM already binds native
+  Postgres on 5432 and skipped Ollama, so installer/launch suites cannot prove a clean
+  first-install path here), a real-snapshot `make restore-drill`, the outgoing privacy
+  scan with the owner's private terms, live migrate through 040 after backup, then the
+  release handoff. Merging to `main` and any history rewrite remain the owner's explicit
+  action. Do not create another release train unless the owner asks for one.
 
 ## Ordinary product backlog (not release blockers)
 
