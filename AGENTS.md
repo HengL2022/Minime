@@ -285,3 +285,37 @@ name is compatibility wording, not a WAL/PITR claim). Promotion stays a delibera
 - Stop: `make down` uses the persisted Docker/native backend and refuses to infer another service.
 - **Destructive**: `docker compose down -v` deletes the database volume. Your captured
   files stay in `data/` either way — that directory is the archive; treat it like one.
+
+## Cursor Cloud specific instructions
+
+The Cloud Agent VM snapshot already has Bun (pinned `1.3.13`, symlinked to `/usr/local/bin/bun`),
+a native PostgreSQL 16 + pgvector cluster, `node_modules`, and a generated `.env`. The startup
+update script only refreshes dependencies (`bun install --frozen-lockfile`); it does **not** start
+any service. Notes below are the non-obvious bits — standard commands are in `## After install`
+and `CLAUDE.md`.
+
+- **Start Postgres first, every session.** The cluster does not auto-start on boot; run `make up`
+  before `bun test`, `make verify-offline`, or `serve`. The test suite creates scratch DBs on the
+  running server via `scripts/with-test-database.ts`, so a stopped cluster fails most of the suite.
+- **Postgres runs on port `55432`, not the default 5432 — this is deliberate and must stay that
+  way.** `.env` pins this (mirrors the CI convention in `.github/workflows/install.yml`). The
+  installer-fixture tests in `test/h2.ollama-shell.test.ts` spawn `scripts/install.sh` on the
+  default port 5432 and **fail if any Postgres occupies 5432**. Keeping Minime's own cluster on
+  55432 leaves 5432 free so the full offline suite stays green. Do not re-point `.env` to 5432 or
+  start a second cluster there.
+- **git must be ≥ 2.47.** `scripts/check-tracked-privacy.ts` (and its tests) rely on
+  `git rev-list --objects -z` emitting NUL-delimited output, which Ubuntu 24.04's stock git 2.43
+  does not do. The snapshot ships an upgraded git (2.55 via the `git-core` PPA); the 3 privacy
+  scanner tests fail on older git.
+- **Degraded mode (no Ollama) is the standing dev config here.** Semantic search falls back to
+  full-text, and inbox captures queue for manual review instead of auto-filing. This does not
+  affect tests (they mock Ollama via `MINIME_MOCK_OLLAMA=1`) or non-LLM MCP tools (tasks, agenda,
+  state, people, decisions, expenses). To exercise full semantic/classify behavior, install Ollama
+  and pull `nomic-embed-text` + `llama3.1:8b`, then `make embed`.
+- **Running the app / MCP door.** `serve` is a stdio MCP server: `bun run src/cli.ts serve`. Drive
+  it end-to-end with any `@modelcontextprotocol/sdk` `StdioClientTransport` client (it inherits
+  `.env`), e.g. create a task with `minime_upsert_task` and read it back with `minime_agenda` /
+  `minime_search` / `minime_state` — none of which need Ollama.
+- **Lint / typecheck / test / build** are the repo standards: `bun run lint`, `bun run typecheck`
+  (+ `bun run typecheck:ops`), `bun test`, and the aggregate gate `make verify-offline`. There is
+  no separate build step (Bun runs TypeScript directly).
