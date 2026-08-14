@@ -3939,3 +3939,28 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   UTF-8-mojibake binary; the existing unfiled/audit verbs already teach that path. Keeping
   originals in today's archive (not a second store) keeps this slice reversible.
 - **Approved by:** owner request to implement the post-W4 W5 first slice (2026-08-14).
+
+## 2026-08-14 — W5 originals-store and remaining inbox parsers
+
+- **Context:** The 2026-08-14 parse-registry decision deferred a second originals
+  store and the remaining v1 parsers (docx, xlsx/csv, eml). This amends that public
+  ingest contract. Hash, inbox identity, and `data/archive/...` still use original
+  bytes; classify/file still use parsed markdown. No new npm dependency.
+- **Decision:** After a successful archive write (and on archive heal), the watcher
+  also stores the raw bytes at `data/files/<yyyy>/<sha256>.<ext>` and appends one
+  line to `data/files/manifest.ndjson` (`hash`, `path`, `ext`, `year`, `inbox_id`
+  only). Same hash does not overwrite or append a second line. A store fault is
+  retryable, same as an archive fault; parse failure still stores originals.
+  `parseInboxSource` now also handles docx, xlsx, csv, and eml via in-repo
+  extractors (local-header ZIP + deflate, RFC4180-ish CSV, RFC822 text/plain).
+  HTML-only mail and empty `.eml` extracts fail closed. RFC822 magic requires
+  `From` plus a mail-specific header (`MIME-Version` / `Received` / `Return-Path` /
+  `Message-ID`) so a todo/journal that mentions `From:` stays text. Proving
+  subset: no images/OLE/formulas, no attachment bodies, 8 MiB zip-entry cap,
+  200-row table cap. `source_file` frontmatter on filed notes is still deferred.
+- **Why:** Downstream classify is already format-agnostic. A content-addressed
+  copy next to today's per-identity archive lets restic keep originals without a
+  new backup path or SQL column. In-repo parsers keep the pinned stack. Tight
+  RFC822 sniff avoids stealing ordinary captures.
+- **Approved by:** owner request to continue the current-state plan through the
+  ordinary backlog (2026-08-14).

@@ -195,8 +195,10 @@ ratchet, evidence-hash hierarchy, or approval receipt is needed.
 After the release gate, resume product work as outcome-sized tasks under this workflow. Current
 known candidates are:
 
-- remaining W5 ingest parsers (docx, xlsx/csv, eml) and the originals-store
-  (`data/files/<yyyy>/<hash>.<ext>` + append-only `manifest.ndjson`);
+- W6 image capture after an owner VLM bake-off of 10 fictional images (the parse
+  slot is now complete; CLIP/SigLIP stays deferred);
+- optional `source_file` frontmatter on capture-filed notes pointing at the
+  originals-store path (deferred from this W5 slice — recovery-sensitive);
 - LLM segment pre-pass and first-class org/person capture types (the 2026-08-14
   deterministic companion split covers legal-suffix / enumerated-company captures;
   see `docs/known-issues/classifier-multi-entity-captures.md`); and
