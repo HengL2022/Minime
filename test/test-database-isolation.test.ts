@@ -2265,6 +2265,8 @@ describe("setup cleanup contract", () => {
     expect(source).toContain("MINIME_KEEP_TEST_DATABASE");
     expect(source).toContain("testDatabaseCloserRegistry.drain");
     expect(source).toContain("const drainTestDatabaseClosers");
+    expect(source).toContain("setDefaultTimeout(SETUP_AFTER_ALL_TIMEOUT_MS)");
+    expect(source).toContain("const SETUP_AFTER_ALL_TIMEOUT_MS = 40_000");
     expect(source).toMatch(
       /closeAndDisposeOnce\(\s*retainedHandle,[\s\S]*drainTestDatabaseClosers/,
     );

@@ -1,7 +1,7 @@
 // Test preload: each process owns one guarded loopback database. The application pool is
 // imported only after DATABASE_URL points at that retained plan.
 
-import { afterAll } from "bun:test";
+import { afterAll, setDefaultTimeout } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -192,8 +192,12 @@ export async function bootstrapTestDatabase(
 // disposeTestDatabase may wait TEARDOWN_BACKGROUND_MAX_CYCLES (300) *
 // TEARDOWN_RECHECK_INTERVAL_MS (100ms) = 30s on a busy Docker Postgres.
 // closeAndDispose also drains closers and closeDb (postgres.js end timeout 5s).
-// Bun's 5s default hook timeout is too tight for that process-wide closer.
+// Bun 1.3.13 reports a timed-out afterAll as an unnamed beforeEach/afterEach
+// hook. A long suite on a slow runner can spend >5s in this closer or in a
+// file afterAll that drops a scratch app role. Raise the process default so
+// those hooks share the 40s budget already declared on afterAll below.
 const SETUP_AFTER_ALL_TIMEOUT_MS = 40_000;
+setDefaultTimeout(SETUP_AFTER_ALL_TIMEOUT_MS);
 
 // biome-ignore format: isolation contract requires `afterAll(async () =>` on one line
 afterAll(async () => {
@@ -203,7 +207,7 @@ afterAll(async () => {
     disposeTestDatabase,
     drainTestDatabaseClosers,
   );
-}, { timeout: SETUP_AFTER_ALL_TIMEOUT_MS });
+}, SETUP_AFTER_ALL_TIMEOUT_MS);
 
 for (const [signal, code] of [
   ["SIGINT", 130],
