@@ -1,5 +1,5 @@
-# Preferred runtime per spec §4 when Docker is available.
-# On boxes without Docker, `make up` falls back to Homebrew Postgres (see Makefile + DECISIONS.md).
+# Preferred runtime per spec §4 when Docker is the persisted backend.
+# `make up` uses MINIME_PG_BACKEND from .env and never infers a fallback.
 services:
   db:
     image: pgvector/pgvector:pg16

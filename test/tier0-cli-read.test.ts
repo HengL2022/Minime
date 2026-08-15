@@ -121,6 +121,15 @@ describe("tier-0 CLI reads (W4-5)", () => {
       select payload from events where verb = 'cli:tx:list'
       and payload ->> 'month' = '2026-04' order by at desc limit 1`;
     expect(event!.payload).toEqual({ month: "2026-04", row_count: 1, match_used: false });
+
+    const ambient = await spawnTier0Cli(["tx", "list", "--month", "2026-04"], {
+      NODE_ENV: "cli",
+      MINIME_SKIP_REPO_DOTENV: "1",
+      MINIME_ALLOW_NON_TTY_TIER0: "1",
+    });
+    expect(ambient.code).toBe(4);
+    expect(ambient.stdout).toBe("");
+    expect(`${ambient.stdout}\n${ambient.stderr}`).not.toContain("Fictional Refusal Sentinel");
   });
 
   test("(4) listHealthSamples filters by exact kind and an inclusive local-calendar-date range", async () => {

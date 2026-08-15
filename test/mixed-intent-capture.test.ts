@@ -16,6 +16,12 @@ note: they want a written redline`;
 const TWO_TODOS = `todo: send the SILDRE contract
 todo: book the wet-lab bench`;
 
+const NARRATIVE = `Need to send the SILDRE contract by Friday.
+
+Had coffee with Nadia Rossi about the Q3 quote.
+
+They want a written redline before the wet-lab booking.`;
+
 const SUPPLIER = `I emailed three fictional suppliers about calibration gel for Project SILDRE:
 Northstar Reagents AS (Bergen), Bluefin Labs AS (Oslo), and Aster Bio AS (Trondheim).
 Nadia Rossi, the sales lead at Corvid Biotech, was asked to help.`;
@@ -91,6 +97,28 @@ describe("mixed-intent capture split (e2e, classifier mocked)", () => {
       select id from events
       where verb = 'inbox:split-intents' and entity_id = ${result.inboxId}`;
     expect(split).toBeUndefined();
+  });
+
+  test("a narrative dump without prefixes files leftover typed companions", async () => {
+    const path = await writeInbox("narrative-intents.md", NARRATIVE);
+    const result = await processInboxFile(path);
+    expect(result.filed).toBe(true);
+    const [item] = await sql`
+      select filed_table, status from inbox_items where id = ${result.inboxId}`;
+    expect(item!.status).toBe("filed");
+    expect(item!.filed_table).toBe("tasks");
+    expect(await sql`select id from tasks`).toHaveLength(1);
+    expect(await sql`select id from interactions`).toHaveLength(1);
+    expect(await sql`select id from pages`).toHaveLength(1);
+    const [split] = await sql`
+      select payload from events
+      where verb = 'inbox:split-intents' and entity_id = ${result.inboxId}`;
+    expect(split).toBeTruthy();
+    const payload = split!.payload as { extra_count: number; extra_types: string[] };
+    expect(payload.extra_count).toBe(2);
+    expect(payload.extra_types).toEqual(["interaction", "note"]);
+    expect(JSON.stringify(payload)).not.toContain("SILDRE");
+    expect(JSON.stringify(payload)).not.toContain("Nadia");
   });
 
   test("the supplier repro still files entities, not mixed-intent extras", async () => {

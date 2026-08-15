@@ -6,19 +6,24 @@
 //   2. FAIL-OPEN: any error (server down, timeout, bad payload) returns null and the
 //      caller keeps the RRF order — a flaky reranker must never break search.
 
+import { ollamaRequest } from "../llm/ollama-http";
 import type { FetchFn } from "../llm/types";
 import { config } from "../util/config";
+import { type OllamaEndpoint, validateOllamaUrl } from "../util/ollama-url";
 
 const TIMEOUT_MS = 10_000;
 
-export function rerankEnabled(): boolean {
-  if (!config.rerankUrl) return false;
+function rerankEndpoint(): OllamaEndpoint | null {
+  if (!config.rerankUrl) return null;
   try {
-    const host = new URL(config.rerankUrl).hostname;
-    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+    return validateOllamaUrl(config.rerankUrl);
   } catch {
-    return false;
+    return null;
   }
+}
+
+export function rerankEnabled(): boolean {
+  return rerankEndpoint() !== null;
 }
 
 let warnedOnce = false;
@@ -33,24 +38,28 @@ function warnOnce(reason: string): void {
 export async function rerank(
   query: string,
   texts: string[],
-  fetchFn: FetchFn = fetch,
+  fetchFn?: FetchFn,
 ): Promise<number[] | null> {
-  if (!rerankEnabled() || texts.length === 0) return null;
+  const endpoint = rerankEndpoint();
+  if (!endpoint || texts.length === 0) return null;
+  const init: RequestInit = {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    // defensive cap well under the server's batch budget; chunks are ≤~450 tokens anyway
+    body: JSON.stringify({
+      model: config.rerankModel,
+      query: query.slice(0, 2000),
+      documents: texts.map((t) => t.slice(0, 6000)),
+    }),
+    // localhost-only must hold for EVERY hop: a redirect from the local port could
+    // re-POST chunk text to a remote host, so redirects are a hard error (I1)
+    redirect: "error",
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  };
   try {
-    const res = await fetchFn(`${config.rerankUrl}/v1/rerank`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      // defensive cap well under the server's batch budget; chunks are ≤~450 tokens anyway
-      body: JSON.stringify({
-        model: config.rerankModel,
-        query: query.slice(0, 2000),
-        documents: texts.map((t) => t.slice(0, 6000)),
-      }),
-      // localhost-only must hold for EVERY hop: a redirect from the local port could
-      // re-POST chunk text to a remote host, so redirects are a hard error (I1)
-      redirect: "error",
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
+    const res = fetchFn
+      ? await fetchFn(`${config.rerankUrl}/v1/rerank`, init)
+      : await ollamaRequest(endpoint, "/v1/rerank", init, { timeoutMs: TIMEOUT_MS });
     if (!res.ok) {
       warnOnce(`HTTP ${res.status}`);
       return null;

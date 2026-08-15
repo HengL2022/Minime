@@ -41,6 +41,7 @@ import {
   recognizeCompiledNote,
   renderCompiledNoteArchive,
   resolveCompiledNoteArchiveTarget,
+  withSourceFileFrontmatter,
 } from "../src/util/compiled-note-archive";
 import { REPO_ROOT, config } from "../src/util/config";
 
@@ -240,6 +241,34 @@ describe("canonical compiled-note archive codec", () => {
     expect(parseCompiledNoteArchive(rendered.text.replace("tier: 1", "tier: 3"))).toBeNull();
     expect(parseCompiledNoteArchive("body")).toBeNull();
     expect(parseCompiledNoteArchive("---\ntitle: title\ntier: 1\n---\nbody\n\n")).toBeNull();
+  });
+
+  test("source_file is optional and ignored when the path is not an originals relative", () => {
+    const hash = "a".repeat(64);
+    const ok = `files/2019/${hash}.md`;
+    expect(
+      parseFrontmatterDocument(`---\ntitle: Tray\ntier: 1\nsource_file: ${ok}\n---\nbody\n`),
+    ).toEqual({
+      title: "Tray",
+      tier: 1,
+      source_file: ok,
+      body: "body\n",
+    });
+    expect(
+      parseFrontmatterDocument("---\ntitle: Tray\ntier: 1\nsource_file: /etc/passwd\n---\nbody\n"),
+    ).toEqual({
+      title: "Tray",
+      tier: 1,
+      body: "body\n",
+    });
+    const rendered = renderCompiledNoteArchive({
+      title: "Tray",
+      tier: 1,
+      bodyMd: "body",
+    });
+    expect(rendered.text).not.toContain("source_file");
+    expect(withSourceFileFrontmatter("# Tray\n\nbody", ok)).toContain(`source_file: ${ok}`);
+    expect(withSourceFileFrontmatter("# Tray\n\nbody", "../secret")).toBe("# Tray\n\nbody");
   });
 
   test("frontmatter keeps safe single-quoted tier scalars and a closing delimiter at EOF compatible", () => {

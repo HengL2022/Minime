@@ -6,11 +6,30 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 COMPOSE=(docker compose -f "$ROOT/docker-compose.demo.yml" -p minime-demo)
 DEMO_URL="postgres://minime:minime@127.0.0.1:5433/minime"
+# Published fictional demo password — not an owner secret. Length matches the
+# provisioner charset so `serve` can use a distinct minime_app DSN.
+DEMO_APP_PASSWORD="minime_demo_app_password_ok"
 
 die() {
   echo "ERROR: $1" >&2
   echo "FIX: $2" >&2
   exit "${3:-1}"
+}
+
+demo_app_url() {
+  DATABASE_URL="$DEMO_URL" MINIME_APP_PASSWORD="$DEMO_APP_PASSWORD" \
+    bun --no-env-file -e 'import { derivePostgresCredentials } from "./src/util/postgres-url"; console.log(derivePostgresCredentials(process.env.DATABASE_URL, "minime_app", process.env.MINIME_APP_PASSWORD, "minime"))'
+}
+
+# Isolate from a live repo .env. A leftover MINIME_APP_DATABASE_URL on another
+# port would fail validateMinimeDatabasePair at module load.
+demo_env() {
+  export MINIME_SKIP_REPO_DOTENV=1
+  export DATABASE_URL="$DEMO_URL"
+  export MINIME_APP_PASSWORD="$DEMO_APP_PASSWORD"
+  export MINIME_APP_DATABASE_URL
+  MINIME_APP_DATABASE_URL="$(demo_app_url)"
+  export MINIME_DATA_DIR="${MINIME_DATA_DIR:-$ROOT/data/demo}"
 }
 
 wait_ready() {
@@ -31,14 +50,17 @@ case "${1:-up}" in
     wait_ready
     (
       cd "$ROOT"
-      DATABASE_URL="$DEMO_URL" bun --no-env-file run src/cli.ts migrate --context direct
-      DATABASE_URL="$DEMO_URL" bun --no-env-file run src/cli.ts seed
+      demo_env
+      bun --no-env-file run src/cli.ts migrate --context direct
+      bun --no-env-file run src/cli.ts seed
+      bun --no-env-file run scripts/provision-runtime-role.ts
     )
+    APP_URL="$(cd "$ROOT" && demo_app_url)"
     echo "==== MINIME DEMO ===="
     echo "status: ready"
     echo "postgres: docker minime-demo-db @ 127.0.0.1:5433"
     echo "demo: seeded (fictional)"
-    echo "mcp: DATABASE_URL=$DEMO_URL bun run $ROOT/src/cli.ts serve"
+    echo "mcp: MINIME_SKIP_REPO_DOTENV=1 DATABASE_URL=$DEMO_URL MINIME_APP_DATABASE_URL=$APP_URL MINIME_DATA_DIR=$ROOT/data/demo bun run $ROOT/src/cli.ts serve"
     echo "stop: make demo-down"
     echo "====================="
     ;;

@@ -62,6 +62,7 @@ export function openaiCompatProvider(
           response_format: { type: "json_object" },
           temperature: 0,
         }),
+        redirect: "error",
       });
       if (!res.ok) throw new Error(`${s.name} chat failed: ${res.status} ${await res.text()}`);
       const json = (await res.json()) as { choices: { message: { content: string } }[] };
@@ -77,6 +78,7 @@ export function openaiCompatProvider(
         method: "POST",
         headers,
         body: JSON.stringify({ model: s.embedModel, input: batch, dimensions: EMBED_DIMS }),
+        redirect: "error",
       });
       if (!res.ok) throw new Error(`${s.name} embed failed: ${res.status} ${await res.text()}`);
       const json = (await res.json()) as { data: { index: number; embedding: number[] }[] };

@@ -34,6 +34,7 @@ import {
   withActorDurableDbSession,
 } from "../../db/repo";
 import { type Classification, identityCaptureName } from "../../pipeline/classify";
+import { inboxOriginalRelativePath } from "../../pipeline/originals";
 import { resolveEntityPlan } from "../../pipeline/segment";
 import {
   type FiledTable,
@@ -240,7 +241,9 @@ export const refileTool: ToolDef = {
         // I5 provenance: attribute the filed row — and any org/person/companion row it creates —
         // to the real MCP caller, not fileRow's ACTOR default, which is only correct for the
         // watcher's own automatic-pipeline callers (fileRow's doc comment, watcher.ts).
-        const result = await fileRow(classification, text, item.id, ctx.actor, plan);
+        const result = await fileRow(classification, text, item.id, ctx.actor, plan, {
+          sourceFile: inboxOriginalRelativePath(claim.item) ?? undefined,
+        });
         if (result === "duplicate") {
           throw new ToolError(
             "BAD_INPUT",

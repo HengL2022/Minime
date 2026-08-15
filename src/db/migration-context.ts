@@ -213,12 +213,31 @@ async function applyMigrations(executor: DbPool): Promise<string[]> {
   const expected = await checkedOutMigrationNames();
   const { applyCheckedOutMigration, ensureSchemaMigrationLedger, schemaMigrationNames } =
     await import("./repo");
+  const { sha256Hex } = await import("../util/hash");
   await ensureSchemaMigrationLedger(executor);
+  const appliedRows = await executor<{ name: string; checksum: string | null }[]>`
+    select name, checksum from schema_migrations`;
+  const appliedChecksums = new Map(
+    appliedRows.map((row) => [
+      String(row.name),
+      row.checksum == null ? null : String(row.checksum),
+    ]),
+  );
   const applied = new Set(await schemaMigrationNames(executor));
   const ran: string[] = [];
   for (const file of expected) {
-    if (applied.has(file)) continue;
     const body = await Bun.file(join(MIGRATIONS_DIR, file)).text();
+    const digest = sha256Hex(body);
+    if (applied.has(file)) {
+      const recorded = appliedChecksums.get(file);
+      if (recorded === null || recorded === undefined) {
+        await executor`
+          update schema_migrations set checksum = ${digest} where name = ${file} and checksum is null`;
+        continue;
+      }
+      if (recorded !== digest) throw new Error("migration_checksum_mismatch");
+      continue;
+    }
     await applyCheckedOutMigration(executor, file, body);
     ran.push(file);
   }
