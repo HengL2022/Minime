@@ -28,11 +28,13 @@ Skip the inbox and write directly when the owner's intent is explicit and comple
 
 ## Answer rules
 
-- One capture per distinct thought; split a brain-dump into separate captures
-  when the intents are not on their own prefixed lines. Named companies/people
-  in one event can become companion identities. A dump whose lines start with
-  `todo:` / `met` / `note:` (or the other strong prefixes) can file leftover
-  typed rows as companions; a narrative mix without those prefixes still needs
-  a split at the door.
+- One capture per distinct thought when you can. Named companies/people in one
+  event can become companion identities. A dump whose lines start with `todo:` /
+  `met` / `note:` (or the other strong prefixes) files leftover typed rows as
+  companions. A short narrative mix without those prefixes (2–4 blocks or
+  sentences, at least two intent classes) may split the same way; junk, one
+  type, or a supplier-style entity dump stays one primary. `minime_refile` does
+  not auto-split. Inbox cardinality is still one `filed_id` — companions share
+  `derived_from`.
 - Never editorialize inside the captured text; your commentary goes in the chat, not the DB.
 - Provenance is automatic (`created_by`, `source: capture`) — do not add your own headers.

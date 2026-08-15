@@ -37,11 +37,13 @@ Then deliver a short review, in this order. Omit any empty section:
 3. **Captures filed today** — from `filed_today`, a one-line classifier audit, e.g. "3
    captures filed today: 2 tasks, 1 journal (tier 2), 1 note (tier 1, conf 0.72) — anything
    misfiled?" `kind`/`confidence` are always visible; a `[above current tier]` title just means
-   that destination is tier 2 — nothing to unlock for the summary itself. If the owner flags
-   one: wrong tier → `minime_correct` action `retier` (notes only, 1→2); wrong details but the
-   right type → `minime_correct` action `amend` (journal/interaction/decision/note) or edit the
-   task directly with `minime_upsert_task`. Filed as the wrong type entirely has no single fix
-   yet — retract or drop the wrong row and capture it fresh as the right type.
+   that destination is tier 2 — nothing to unlock for the summary itself. `filed_today` lists
+   the inbox primary only; leftover companions from a mixed dump share `derived_from` and are
+   not extra digest rows. If the owner flags one: wrong tier → `minime_correct` action `retier`
+   (notes only, 1→2); wrong details but the right type → `minime_correct` action `amend`
+   (journal/interaction/decision/note) or edit the task directly with `minime_upsert_task`.
+   Filed as the wrong type entirely has no single fix yet — retract or drop the wrong row and
+   capture it fresh as the right type.
 4. **Still open** — tasks due/overdue, open commitments, decisions awaiting a choice.
 5. **Tomorrow setup** — what's on the calendar and the 1–3 things worth teeing up.
 6. **Reflection prompt** — 2–4 short questions (not an essay), grounded in the

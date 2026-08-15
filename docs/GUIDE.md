@@ -53,7 +53,13 @@ Phrasing nudges the classifier (all optional):
 | `note: they want a written redline` | a reference note → a brain page |
 | `Today felt scattered. Energy low…` | a journal entry (tier 2, private) |
 | a dump with those prefixes on their own lines | one primary plus leftover companion rows |
+| a short dump mixing 2–4 intents without prefixes | one primary plus leftover companion rows |
 | anything else substantial | a reference note → a brain page |
+
+Filed notes keep a pointer to the immutable original at
+`data/files/<yyyy>/<hash>.<ext>` (`source_file` in the page frontmatter). The
+inbox file itself is still archived under `data/archive/`. Changing
+`MINIME_DATA_DIR` does not move either store.
 
 **Recurring tasks**: ask your agent to make a task repeat — "make watering the plants a weekly
 task" → `minime_upsert_task` with `recur_freq` (daily/weekly/monthly/yearly, optionally every N

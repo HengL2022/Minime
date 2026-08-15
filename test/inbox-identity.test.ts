@@ -12,8 +12,10 @@ import {
   retryableInboxItems,
   setInboxClassification,
 } from "../src/db/repo";
+import { inboxOriginalRelativePath } from "../src/pipeline/originals";
 import { processInboxFile, startWatcher } from "../src/pipeline/watcher";
 import { atomicWritePrivate } from "../src/util/atomic-file";
+import { withSourceFileFrontmatter } from "../src/util/compiled-note-archive";
 import { config } from "../src/util/config";
 import { expectSqlReject, resetDb, testSql } from "./helpers";
 
@@ -365,7 +367,18 @@ describe("inbox byte identity (classifier mocked by the test preload)", () => {
         select id from events
         where verb = 'inbox:filed' and entity_id = ${failedItem!.id}`,
     ).toHaveLength(1);
-    expect(await readFile(projectionPath, "utf8")).toBe(`# rollback probe reference\n\n${text}`);
+    const [filedItem] = await testSql`
+      select raw_path, content_hash, received_at from inbox_items where id = ${failedItem!.id}`;
+    const sourceFile = inboxOriginalRelativePath({
+      id: String(failedItem!.id),
+      raw_path: String(filedItem!.raw_path),
+      content_hash: String(filedItem!.content_hash),
+      received_at: filedItem!.received_at as Date,
+    });
+    if (!sourceFile) throw new Error("expected originals path");
+    expect(await readFile(projectionPath, "utf8")).toBe(
+      withSourceFileFrontmatter(`# rollback probe reference\n\n${text}`, sourceFile),
+    );
   });
 
   test("a stale processing claim is reclaimable", async () => {
