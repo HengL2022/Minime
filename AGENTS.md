@@ -289,14 +289,19 @@ name is compatibility wording, not a WAL/PITR claim). Promotion stays a delibera
 ## Cursor Cloud specific instructions
 
 The Cloud Agent VM snapshot already has Bun (pinned `1.3.13`, symlinked to `/usr/local/bin/bun`),
-a native PostgreSQL 16 + pgvector cluster, `node_modules`, and a generated `.env`. The startup
-update script only refreshes dependencies (`bun install --frozen-lockfile`); it does **not** start
-any service. Notes below are the non-obvious bits — standard commands are in `## After install`
-and `CLAUDE.md`.
+a native PostgreSQL 16 + pgvector cluster, `node_modules`, a generated `.env`, and Ollama with both
+models (`nomic-embed-text` + `llama3.1:8b`) for full non-degraded mode. The startup update script
+only refreshes dependencies (`bun install --frozen-lockfile`); it does **not** start any service.
+Notes below are the non-obvious bits — standard commands are in `## After install` and `CLAUDE.md`.
 
-- **Start Postgres first, every session.** The cluster does not auto-start on boot; run `make up`
-  before `bun test`, `make verify-offline`, or `serve`. The test suite creates scratch DBs on the
-  running server via `scripts/with-test-database.ts`, so a stopped cluster fails most of the suite.
+- **Start services first, every session.** Neither the update script nor `make up` starts services,
+  and this container has no running `systemd`, so nothing auto-starts on boot. Before `bun test`,
+  `make verify-offline`, or `serve`:
+  - Postgres: `make up` (creates scratch DBs via `scripts/with-test-database.ts`; a stopped cluster
+    fails most of the suite).
+  - Ollama (only for full-mode semantic search / inbox auto-classification): start it detached, e.g.
+    `OLLAMA_HOST=127.0.0.1:11434 ollama serve &` (or in a tmux session). Everything except those two
+    features works without it, and the whole test suite mocks Ollama regardless.
 - **Postgres runs on port `55432`, not the default 5432 — this is deliberate and must stay that
   way.** `.env` pins this (mirrors the CI convention in `.github/workflows/install.yml`). The
   installer-fixture tests in `test/h2.ollama-shell.test.ts` spawn `scripts/install.sh` on the
@@ -307,11 +312,12 @@ and `CLAUDE.md`.
   `git rev-list --objects -z` emitting NUL-delimited output, which Ubuntu 24.04's stock git 2.43
   does not do. The snapshot ships an upgraded git (2.55 via the `git-core` PPA); the 3 privacy
   scanner tests fail on older git.
-- **Degraded mode (no Ollama) is the standing dev config here.** Semantic search falls back to
-  full-text, and inbox captures queue for manual review instead of auto-filing. This does not
-  affect tests (they mock Ollama via `MINIME_MOCK_OLLAMA=1`) or non-LLM MCP tools (tasks, agenda,
-  state, people, decisions, expenses). To exercise full semantic/classify behavior, install Ollama
-  and pull `nomic-embed-text` + `llama3.1:8b`, then `make embed`.
+- **Full mode is available (Ollama installed), but only when `ollama serve` is running.** With it
+  up, semantic search uses real embeddings and inbox captures auto-classify+file via `llama3.1:8b`;
+  with it down the app degrades gracefully (search → full-text, captures → manual review queue).
+  Tests are unaffected either way (they mock Ollama via `MINIME_MOCK_OLLAMA=1`), as are non-LLM MCP
+  tools (tasks, agenda, state, people, decisions, expenses). Installing Ollama on Ubuntu 24.04 also
+  required `zstd` (`apt-get install zstd`) for the release tarball — already in the snapshot.
 - **Running the app / MCP door.** `serve` is a stdio MCP server: `bun run src/cli.ts serve`. Drive
   it end-to-end with any `@modelcontextprotocol/sdk` `StdioClientTransport` client (it inherits
   `.env`), e.g. create a task with `minime_upsert_task` and read it back with `minime_agenda` /
