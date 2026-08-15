@@ -14,6 +14,36 @@ pass. The public MCP surface is **22 functions**. The original door is stronger,
 now correct, refile, read a date range, and write a few more life objects without a raw SQL
 session.
 
+### Livability (W5–W9, 2026-08-15)
+
+- **Inbox files more of a dump.** A short narrative capture that mixes 2–4 intents can
+  split into companion rows without `todo:` / `met` / `note:` prefixes (fail-open if the
+  classifier is unsure). `org:` / `person:` lines file resolvable identities. Capture-filed
+  notes keep `source_file: files/<yyyy>/<hash>.<ext>` pointing at the immutable original.
+- **Images in the inbox.** PNG/JPEG drops parse as a filename stub, or a local caption when
+  `VLM_MODEL` is set. Receipt-like images raise a flag-only `receipt_candidate` — they never
+  become transactions. Cloud vision routes are rejected. Caption-based `retrieval-img` is a
+  ninth MinimeBench area (mock hit@3 = 1.0). Live bake-off on labeled fictional cards:
+  moondream mean Jaccard 0.000 (empty captions); llava:7b 0.140 (reads some scene text, does
+  not match gold prose). No default `VLM_MODEL` was adopted; CLIP/SigLIP stays deferred.
+  `make eval-vlm-bakeoff`.
+- **Section-sized search snippets.** Heading sections become `chunk_spans`; children stay
+  the embed/FTS unit at 350/400/40 tokens. The August live battery (local nomic-embed-text,
+  reranker off) did not justify a 120–200 child-size change: PrecisionMemBench stayed at
+  11/77 and 6.5% precision, the same no-rerank shape as 2026-06-12. `rechunk` is owner CLI.
+- **Isolated fictional demo.** `make demo` starts Postgres on `127.0.0.1:5433`, migrates,
+  seeds, and prints an MCP serve line. It never reads or writes `.env` or the live volume.
+  Ollama stays on the host. `make demo-down` stops the stack and keeps the volume.
+
+August 15 live scorecards (nomic, no reranker):
+[MinimeBench N=3](docs/benchmarks/2026-08-15-live-w8-2026-08-15-minimebench.md)
+(retrieval-en hit@3 99%, retrieval-img 12/12; retrieval-zh sits below the mock-embedding
+floors), [PrecisionMemBench](docs/benchmarks/2026-08-15-live-w8-2026-08-15-precisionmembench.md)
+(6.5% precision), [VLM bake-off](docs/benchmarks/2026-08-15-live-vlm-bakeoff.md).
+LongMemEval-s was not re-run (dataset absent; the 2026-06-12 card remains the reference).
+
+### Trust, durability, and time
+
 - **Owner-approved private reads.** `minime_unlock` creates a pending request that must be
   approved locally, expires quickly, is bound to one MCP connection, and never opens tier 0.
   The owner can list or revoke approvals with `unlock:status` / `unlock:revoke`.
@@ -280,10 +310,14 @@ move it from 6.5% to 52.3%, and we publish the bad default because optimizing fo
 would hurt the common case (recall). `make eval-longmemeval`, `make eval-pmb`.
 
 **MinimeBench** — nine in-house areas with committed bars, run live before search releases
-([latest](docs/benchmarks/2026-06-12-live-qwen3-minimebench.md)): retrieval-en 97% hit@3,
-retrieval-zh 100% (bilingual zh/en/mixed), retrieval-img 100% hit@3 (caption-based, 10
-fictional images), graph/identity/time 100% hit@3, provenance 100%,
-robustness 100% (22 adversarial inputs, no crash, no tier leak). `make eval-search-live`.
+([full-engine latest](docs/benchmarks/2026-06-12-live-qwen3-minimebench.md)): retrieval-en
+97% hit@3, retrieval-zh 100% (bilingual zh/en/mixed), retrieval-img 100% hit@3
+(caption-based, 10 fictional images), graph/identity/time 100% hit@3, provenance 100%,
+robustness 100% (22 adversarial inputs, no crash, no tier leak). The 2026-08-15
+[nomic / no-rerank battery](docs/benchmarks/2026-08-15-live-w8-2026-08-15-minimebench.md)
+held retrieval-img 12/12 and retrieval-en hit@3 99%; retrieval-zh dropped vs the mock
+floors, as expected without the June embed+rerank stack. `make eval-search-live`,
+`make eval-vlm-bakeoff`.
 
 **Skills layer** — the `agents/skills/*.md` playbooks are eval'd too, not just the engine:
 [SkillEval](docs/benchmarks/2026-06-12-live-r1-skilleval.md) drives them through the audited
