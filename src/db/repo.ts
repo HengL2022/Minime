@@ -823,8 +823,8 @@ async function writeChunkSpans(
   for (let spanOrd = 0; spanOrd < spans.length; spanOrd++) {
     const span = spans[spanOrd]!;
     const [row] = await tx`
-      insert into chunk_spans (parent_type, parent_id, ord, text)
-      values (${parentType}, ${parentId}, ${spanOrd}, ${span.text})
+      insert into chunk_spans (parent_type, parent_id, ord, text, tier)
+      values (${parentType}, ${parentId}, ${spanOrd}, ${span.text}, ${tier})
       returning id`;
     for (const child of span.children) {
       await tx`insert into chunks (parent_type, parent_id, ord, text, tier, span_id)

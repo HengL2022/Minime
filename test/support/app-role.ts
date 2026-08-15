@@ -135,6 +135,7 @@ const SELECT_TABLES = [
   "person_dates",
   "events",
   "chunks",
+  "chunk_spans",
   "edges",
   "metric_defs",
 ] as const;
@@ -162,6 +163,7 @@ const INSERT_TABLES = [
   "person_dates",
   "events",
   "chunks",
+  "chunk_spans",
   "edges",
   "transactions",
   "health_samples",
@@ -186,6 +188,7 @@ const TIER_TABLES = [
   "email_meta",
   "pages",
   "chunks",
+  "chunk_spans",
   "tasks",
   "goals",
   "values_items",
@@ -213,7 +216,7 @@ async function configureBoundary(target: postgres.Sql, roleName: string): Promis
   await target.unsafe(`grant select on ${names(SELECT_TABLES)} to ${role}`);
   await target.unsafe(`grant insert on ${names(INSERT_TABLES)} to ${role}`);
   await target.unsafe(`grant update on ${names(UPDATE_TABLES)} to ${role}`);
-  await target.unsafe(`grant delete on chunks, edges to ${role}`);
+  await target.unsafe(`grant delete on chunks, chunk_spans, edges to ${role}`);
   await target.unsafe(`grant usage, select on sequence events_id_seq to ${role}`);
   for (const fn of [
     "app_allowed_tier()",
@@ -254,7 +257,7 @@ async function configureBoundary(target: postgres.Sql, roleName: string): Promis
         `create policy ${quoteIdentifier(`test_${suffix}_update`)} on ${quoted} for update to ${role} using (tier >= 1 and tier <= app_allowed_tier())`,
       );
     }
-    if (table === "chunks" || table === "edges") {
+    if (table === "chunks" || table === "chunk_spans" || table === "edges") {
       await target.unsafe(
         `create policy ${quoteIdentifier(`test_${suffix}_delete`)} on ${quoted} for delete to ${role} using (tier >= 1 and tier <= app_allowed_tier())`,
       );

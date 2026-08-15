@@ -197,6 +197,15 @@ describe("minime_engineer_ro", () => {
     }
   });
 
+  test("chunk_spans is default-deny for engineer-ro even though app can write it", async () => {
+    await expectSqlReject(ro`select text from chunk_spans`, /permission denied/);
+    await expectSqlReject(
+      ro`insert into chunk_spans (parent_type, parent_id, ord, text, tier)
+         values ('page', gen_random_uuid(), 0, 'nope', 1)`,
+      /permission denied/,
+    );
+  });
+
   test("un-tiered content carriers stay outside the engineering read boundary", async () => {
     await expectSqlReject(ro`select payload from review_queue`, /permission denied/);
     await expectSqlReject(ro`select reason from edge_validations`, /permission denied/);
@@ -460,6 +469,7 @@ describe("minime_engineer_ro", () => {
   test("tier_read lower bounds preserve the exact shared roles and tier-zero table revokes", async () => {
     const expectedTables = [
       "calendar_events",
+      "chunk_spans",
       "chunks",
       "commitments",
       "decision_branches",

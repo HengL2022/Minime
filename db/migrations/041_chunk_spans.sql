@@ -6,7 +6,10 @@
 --
 -- W6 Phase B: receipt_candidate is flag-only. Payload is inbox_item_id + image_kind;
 -- nothing here inserts a transaction. chunk_spans is not granted to engineer-ro
--- (default deny).
+-- (default deny). The runtime app role needs select/insert/delete: indexParent
+-- writes spans before children exist and deletes them after children are gone,
+-- so the table carries its own tier column (same 1/2 prose bound as chunks)
+-- rather than joining to a parent row that is not visible at those moments.
 
 create table if not exists chunk_spans (
   id uuid primary key default gen_random_uuid(),
@@ -14,6 +17,7 @@ create table if not exists chunk_spans (
   parent_id uuid not null,
   ord int not null,
   text text not null,
+  tier smallint not null check (tier in (1, 2)),
   unique (parent_type, parent_id, ord)
 );
 
@@ -27,3 +31,14 @@ alter table review_queue
   check (kind in ('contradiction','stale','duplicate','decision_review','inbox_unfiled',
                   'phantom_person','extract_suspect','ops_failure','goal_review',
                   'entity_promotion','receipt_candidate'));
+
+-- Same grant + policy shape as chunks (021), minus engineer-ro SELECT. inbox_items
+-- is the precedent: named on tier_read so a later grant cannot silently hide
+-- rows, but no privilege is issued here.
+grant select, insert, delete on chunk_spans to minime_app;
+alter table chunk_spans enable row level security;
+create policy tier_read on chunk_spans for select to minime_app, minime_engineer_ro
+  using (tier >= 1 and tier <= app_allowed_tier());
+create policy tier_write on chunk_spans for insert to minime_app with check (true);
+create policy tier_delete on chunk_spans for delete to minime_app
+  using (tier >= 1 and tier <= app_allowed_tier());
