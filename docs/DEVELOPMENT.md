@@ -197,13 +197,23 @@ known candidates are:
 
 - W6 image capture path shipped 2026-08-15 (optional local `describe`, hash-keyed
   mock, default tier-2 routing, receipt_candidate flag-only). The 10-image VLM
-  bake-off harness and committed `retrieval-img` mock floors shipped 2026-08-15
-  (`make eval-vlm-bakeoff`; CLIP/SigLIP stays deferred);
-- W8 parent-child spans shipped 2026-08-15 (`chunk_spans` + `rechunk`; child
-  size unchanged, eval-calibration pending). Live MinimeBench/PMB battery and
-  any 120–200 child-size change stay owner-scheduled;
-- W9 isolated demo stack shipped 2026-08-15 (`make demo` on port 5433). Owner
-  screencast remains owner-recorded; Ollama is not bundled in the demo compose;
+  bake-off and `retrieval-img` mock floors shipped the same day (`make
+  eval-vlm-bakeoff`; CLIP/SigLIP stays deferred). Live bake-off on labeled
+  cards: moondream mean Jaccard 0.000 (empty captions); llava:7b 0.140 (reads
+  some scene text, does not match gold prose). No default `VLM_MODEL` was
+  adopted;
+- W8 parent-child spans shipped 2026-08-15 (`chunk_spans` + `rechunk`). Live
+  battery on this VM (nomic-embed-text, reranker off): MinimeBench N=3 in
+  `docs/benchmarks/2026-08-15-live-w8-2026-08-15-minimebench.md` (retrieval-img
+  12/12; retrieval-zh below mock floors as expected vs mock embeddings);
+  PrecisionMemBench 11/77 at 6.5% precision, matching the 2026-06-12 no-rerank
+  baseline. Child size stays 350/400/40 — no 120–200 change. LongMemEval-s was
+  not re-run: `~/datasets/longmemeval/longmemeval_s.json` is absent and the
+  ~49M-token ingest does not fit this session;
+- W9 isolated demo stack shipped 2026-08-15 (`make demo` on port 5433). A
+  walkthrough of that command is recorded at
+  `/opt/cursor/artifacts/w9-isolated-demo-walkthrough.mp4`. Ollama is not
+  bundled in the demo compose; an owner can still record their own machine;
 - W5 `source_file` frontmatter on capture-filed notes shipped 2026-08-15
   (relative `files/<yyyy>/<hash>.<ext>` only; compiled archives stay
   title+tier);

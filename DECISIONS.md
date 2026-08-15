@@ -4339,3 +4339,47 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   cannot fix.
 - **Approved by:** owner request to finish the W6 VLM bake-off, W8 live
   battery, and W9 screencast (2026-08-15).
+
+## 2026-08-15 — W6 live bake-off uses labeled cards; no default VLM
+
+- **Context:** The same-day W6 bake-off decision described 1×1 PNG fixtures.
+  Those pixels produced empty live captions, so the harness switched to
+  committed 256×160 labeled fictional cards. Live scores are now a published
+  eval record. This amends the bake-off fixture contract and the describe
+  request shape. Cloud VLM routes stay rejected. CLIP/SigLIP stays deferred.
+  No new MCP tool.
+- **Decision:** Bake-off images are the labeled cards under
+  `fixtures/parse/bakeoff/`. Publish writes
+  `docs/benchmarks/<date>-<mode>-vlm-bakeoff.md` so mock and live do not
+  overwrite each other. Live 2026-08-15: moondream mean Jaccard 0.000 (empty
+  captions); llava:7b 0.140. Empty captions score 0, not a harness abort.
+  Describe uses a 10-minute Ollama deadline and `num_predict=128`. No default
+  `VLM_MODEL` is adopted from this run.
+- **Why:** A 1×1 card cannot test vision. Unbounded llava decode rambled for
+  minutes. Token Jaccard vs gold prose is an honest miss even when the model
+  reads scene text; that is not a reason to invent a winner or enable CLIP.
+- **Approved by:** owner request to finish the W6 VLM bake-off, W8 live
+  battery, and W9 screencast (2026-08-15).
+
+## 2026-08-15 — W8 live battery keeps 350/400/40 children
+
+- **Context:** The same-day W8 span decision left child size at 350/400/40
+  pending a live MinimeBench/PMB battery. That battery ran on this checkout
+  with local nomic-embed-text and no reranker. This records the calibration
+  outcome. No ranking, schema, or MCP change.
+- **Decision:** Child bounds stay 350/400/40. Live MinimeBench N=3 is
+  `docs/benchmarks/2026-08-15-live-w8-2026-08-15-minimebench.md` (retrieval-img
+  held 12/12; retrieval-zh sat below mock floors, which is expected against
+  mock-embedding bars). PrecisionMemBench is
+  `docs/benchmarks/2026-08-15-live-w8-2026-08-15-precisionmembench.md`: 11/77
+  pass, 6.5% mean precision, 98.8% recall — the same no-rerank shape as
+  2026-06-12. LongMemEval-s was not re-run: the 278MB
+  `longmemeval_s.json` dataset was not present and the ~49M-token ingest is
+  out of scope for this session. A 120–200 child-size experiment stays
+  pending until PMB precision improves with recall in tolerance (reranker
+  still required for that lift).
+- **Why:** Changing child size without a precision lift would move sealed
+  mock floors for no measured gain. Publishing the no-rerank PMB number
+  keeps the battery honest.
+- **Approved by:** owner request to finish the W6 VLM bake-off, W8 live
+  battery, and W9 screencast (2026-08-15).
