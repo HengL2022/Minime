@@ -7,6 +7,8 @@ import type { FetchFn, LlmProvider } from "./types";
 
 // Local CPU VLMs regularly exceed the 30s embed/classify deadline.
 export const DESCRIBE_TIMEOUT_MS = 600_000;
+// Prompt asks for 2–4 sentences; unbounded decode rambles for minutes.
+export const DESCRIBE_NUM_PREDICT = 128;
 
 export function ollamaProvider(fetchFn?: FetchFn): LlmProvider {
   const endpoint = validateOllamaUrl(config.ollamaUrl);
@@ -69,7 +71,7 @@ export function ollamaProvider(fetchFn?: FetchFn): LlmProvider {
                 prompt,
                 images: [image.base64],
                 stream: false,
-                options: { temperature: 0 },
+                options: { temperature: 0, num_predict: DESCRIBE_NUM_PREDICT },
               }),
             },
             { timeoutMs: DESCRIBE_TIMEOUT_MS },

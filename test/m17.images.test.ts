@@ -10,7 +10,7 @@ import {
 import { describeRouteForTier } from "../src/llm";
 import { describeImage } from "../src/llm/describe";
 import { mockDescribe } from "../src/llm/mock-describe";
-import { DESCRIBE_TIMEOUT_MS } from "../src/llm/ollama";
+import { DESCRIBE_NUM_PREDICT, DESCRIBE_TIMEOUT_MS } from "../src/llm/ollama";
 import { ollamaProvider } from "../src/llm/ollama";
 import { parseInboxSource, parseInboxSourceAsync } from "../src/pipeline/parse";
 import { inferImageKind, looksLikeImage, suggestedImageTier } from "../src/pipeline/parse/image";
@@ -101,9 +101,15 @@ describe("VLM routing", () => {
       );
       expect(caption).toBe("a fictional pier");
       expect(calls[0]!.url).toContain("/api/generate");
-      const body = JSON.parse(calls[0]!.body) as { model: string; images: string[] };
+      const body = JSON.parse(calls[0]!.body) as {
+        model: string;
+        images: string[];
+        options: { num_predict: number };
+      };
       expect(body.model).toBe("llava");
       expect(body.images).toEqual([PHOTO_PNG.toString("base64")]);
+      expect(body.options.num_predict).toBe(DESCRIBE_NUM_PREDICT);
+      expect(DESCRIBE_NUM_PREDICT).toBeLessThanOrEqual(128);
     } finally {
       config.vlmModel = prev;
     }
