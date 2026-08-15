@@ -1,6 +1,9 @@
-// Fictional 1×1 PNG fixtures for W6 image-parse tests and the VLM bake-off.
-// Bytes only — never real photos. Captions are the sealed gold for mock describe
-// and for the retrieval-img corpus.
+// Fictional image fixtures for W6 parse tests and the VLM bake-off.
+// 1×1 PNGs stay for sniff/parse tests. Bake-off cards are labeled 256×160
+// PNG files (bytes only — never real photos). Captions are the sealed gold.
+
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 export const PHOTO_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
@@ -9,46 +12,6 @@ export const PHOTO_PNG = Buffer.from(
 
 export const RECEIPT_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
-  "base64",
-);
-
-export const WHITEBOARD_PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgCNgCAAFYAQVoJ2Z+AAAAAElFTkSuQmCC",
-  "base64",
-);
-
-export const WETLAB_PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPQWKABAAHkAPFD+bn3AAAAAElFTkSuQmCC",
-  "base64",
-);
-
-export const NYCKELHARPA_PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGPYUqEBAAM4AVUprF78AAAAAElFTkSuQmCC",
-  "base64",
-);
-
-export const BISCUIT_PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGM4sSAAAAPsAbnYxPzJAAAAAElFTkSuQmCC",
-  "base64",
-);
-
-export const NIDELVA_PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQsakAAAEwAMmb5zfxAAAAAElFTkSuQmCC",
-  "base64",
-);
-
-export const SILDRE_PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGOIiooCAAIgAQ/kH0CsAAAAAElFTkSuQmCC",
-  "base64",
-);
-
-export const BAKERY_PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGO4E6ABAANgAVVUIGmXAAAAAElFTkSuQmCC",
-  "base64",
-);
-
-export const PASSPORT_PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGOQkwsAAADqAI3fxsLYAAAAAElFTkSuQmCC",
   "base64",
 );
 
@@ -84,6 +47,12 @@ export interface BakeoffImage {
   caption: string;
 }
 
+const BAKEOFF_DIR = join(import.meta.dir, "bakeoff");
+
+function bakeoffCard(id: string): Buffer {
+  return readFileSync(join(BAKEOFF_DIR, `${id}.png`));
+}
+
 export const BAKEOFF_IMAGES: readonly BakeoffImage[] = [
   {
     id: "harbor-pier",
@@ -91,7 +60,7 @@ export const BAKEOFF_IMAGES: readonly BakeoffImage[] = [
     title: "Harbor pier at dusk",
     kind: "photo",
     suggestedTier: 2,
-    png: PHOTO_PNG,
+    png: bakeoffCard("harbor-pier"),
     caption: PHOTO_CAPTION,
   },
   {
@@ -100,7 +69,7 @@ export const BAKEOFF_IMAGES: readonly BakeoffImage[] = [
     title: "Cafe receipt",
     kind: "receipt",
     suggestedTier: 2,
-    png: RECEIPT_PNG,
+    png: bakeoffCard("cafe-receipt"),
     caption: RECEIPT_CAPTION,
   },
   {
@@ -109,7 +78,7 @@ export const BAKEOFF_IMAGES: readonly BakeoffImage[] = [
     title: "Whiteboard hydrophone array",
     kind: "whiteboard",
     suggestedTier: 1,
-    png: WHITEBOARD_PNG,
+    png: bakeoffCard("whiteboard-array"),
     caption: WHITEBOARD_CAPTION,
   },
   {
@@ -118,7 +87,7 @@ export const BAKEOFF_IMAGES: readonly BakeoffImage[] = [
     title: "Wet-lab tray labels",
     kind: "document",
     suggestedTier: 1,
-    png: WETLAB_PNG,
+    png: bakeoffCard("wetlab-tray"),
     caption: WETLAB_CAPTION,
   },
   {
@@ -127,7 +96,7 @@ export const BAKEOFF_IMAGES: readonly BakeoffImage[] = [
     title: "Nyckelharpa on a table",
     kind: "photo",
     suggestedTier: 2,
-    png: NYCKELHARPA_PNG,
+    png: bakeoffCard("nyckelharpa-table"),
     caption: NYCKELHARPA_CAPTION,
   },
   {
@@ -136,7 +105,7 @@ export const BAKEOFF_IMAGES: readonly BakeoffImage[] = [
     title: "Biscuit the whippet",
     kind: "photo",
     suggestedTier: 2,
-    png: BISCUIT_PNG,
+    png: bakeoffCard("biscuit-whippet"),
     caption: BISCUIT_CAPTION,
   },
   {
@@ -145,7 +114,7 @@ export const BAKEOFF_IMAGES: readonly BakeoffImage[] = [
     title: "Nidelva river run",
     kind: "photo",
     suggestedTier: 2,
-    png: NIDELVA_PNG,
+    png: bakeoffCard("nidelva-run"),
     caption: NIDELVA_CAPTION,
   },
   {
@@ -154,7 +123,7 @@ export const BAKEOFF_IMAGES: readonly BakeoffImage[] = [
     title: "SILDRE node crate",
     kind: "photo",
     suggestedTier: 2,
-    png: SILDRE_PNG,
+    png: bakeoffCard("sildre-crate"),
     caption: SILDRE_CAPTION,
   },
   {
@@ -163,7 +132,7 @@ export const BAKEOFF_IMAGES: readonly BakeoffImage[] = [
     title: "Cinnamon-bun bakery window",
     kind: "photo",
     suggestedTier: 2,
-    png: BAKERY_PNG,
+    png: bakeoffCard("bakery-window"),
     caption: BAKERY_CAPTION,
   },
   {
@@ -172,7 +141,7 @@ export const BAKEOFF_IMAGES: readonly BakeoffImage[] = [
     title: "Passport visa stamp",
     kind: "document",
     suggestedTier: 2,
-    png: PASSPORT_PNG,
+    png: bakeoffCard("passport-visa"),
     caption: PASSPORT_CAPTION,
   },
 ];

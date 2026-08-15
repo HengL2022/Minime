@@ -90,7 +90,7 @@ export function renderBakeoffScorecard(input: {
   const lines = [
     `# VLM bake-off — ${input.date}`,
     "",
-    `Mode: **${input.mode}**. Images: ${BAKEOFF_IMAGES.length} fictional 1×1 PNG fixtures (bytes only; never real photos).`,
+    `Mode: **${input.mode}**. Images: ${BAKEOFF_IMAGES.length} fictional labeled PNG cards (bytes only; never real photos).`,
     "Gold: committed captions in `fixtures/parse/images.ts`. Metric: token Jaccard vs gold (lowercase `\\W+` tokens).",
     `Models: ${input.models.map((name) => `\`${name}\``).join(", ")}.`,
     "Cloud VLM routes stay rejected. CLIP/SigLIP stays deferred.",
@@ -129,8 +129,8 @@ async function captionFor(
     sha256: sha256Hex(image.png),
     tier: image.suggestedTier,
   });
-  if (!caption) throw new Error(`vlm_caption_empty:${model}:${image.id}`);
-  return caption;
+  // Empty is a scored miss, not a harness abort — 1×1 fixtures often yield nothing.
+  return caption ?? "";
 }
 
 export async function scoreBakeoff(args: BakeoffArgs): Promise<ImageScore[]> {
