@@ -195,16 +195,21 @@ ratchet, evidence-hash hierarchy, or approval receipt is needed.
 After the release gate, resume product work as outcome-sized tasks under this workflow. Current
 known candidates are:
 
-- W6 image capture after an owner VLM bake-off of 10 fictional images (the parse
-  slot is now complete; CLIP/SigLIP stays deferred);
+- W6 image capture path shipped 2026-08-15 (optional local `describe`, hash-keyed
+  mock, default tier-2 routing, receipt_candidate flag-only). Owner VLM bake-off
+  of 10 fictional images still precedes committed `retrieval-img` floors;
+  CLIP/SigLIP stays deferred;
+- W8 parent-child spans shipped 2026-08-15 (`chunk_spans` + `rechunk`; child
+  size unchanged, eval-calibration pending). Live MinimeBench/PMB battery and
+  any 120–200 child-size change stay owner-scheduled;
+- W9 isolated demo stack shipped 2026-08-15 (`make demo` on port 5433). Owner
+  screencast remains owner-recorded; Ollama is not bundled in the demo compose;
 - optional `source_file` frontmatter on capture-filed notes pointing at the
   originals-store path (deferred from this W5 slice — recovery-sensitive);
 - a model-driven 1..N split of narrative mixed-intent dumps (the 2026-08-15
   heuristic companions cover prefixed `todo:`/`met`/`note:` dumps; inbox
   cardinality is still one primary — see
-  `docs/known-issues/classifier-multi-entity-captures.md`);
-- W7 topic-page clustering and path-only wikilinks (shipped 2026-08-15;
-  org compiled notes and goal digests already existed); and
+  `docs/known-issues/classifier-multi-entity-captures.md`); and
 - close remaining known-issue documents once their behavioral regressions pass
   (extractor-phantom-orgs Fix C / high-edge watchdog shipped 2026-08-14; Fix D
   owner-run `sweep-extract-person-orgs` flags leftover person-named extract

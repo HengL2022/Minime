@@ -14,6 +14,7 @@ export function ollamaProvider(fetchFn?: FetchFn): LlmProvider {
   return {
     name: "ollama",
     model: `${config.embedModel}+${config.classifyModel}`,
+    vlmModel: config.vlmModel || undefined,
     isCloud: false,
 
     async embed(texts: string[]): Promise<number[][]> {
@@ -48,5 +49,24 @@ export function ollamaProvider(fetchFn?: FetchFn): LlmProvider {
       const json = (await res.json()) as { response: string };
       return json.response;
     },
+
+    describe: config.vlmModel
+      ? async (image, prompt) => {
+          const res = await request("/api/generate", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              model: config.vlmModel,
+              prompt,
+              images: [image.base64],
+              stream: false,
+              options: { temperature: 0 },
+            }),
+          });
+          if (!res.ok) throw new Error(`ollama describe failed: ${res.status}`);
+          const json = (await res.json()) as { response: string };
+          return json.response;
+        }
+      : undefined,
   };
 }

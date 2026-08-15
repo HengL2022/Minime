@@ -59,7 +59,8 @@ import {
 import { findDuplicate } from "./dedup";
 import { type IntentPlan, planMixedIntents } from "./intents";
 import { storeInboxOriginal } from "./originals";
-import { InboxParseError, type InboxParseResult, parseInboxSource } from "./parse";
+import { InboxParseError, type InboxParseResult, parseInboxSourceAsync } from "./parse";
+import { IMAGE_HINT_RE } from "./parse/image";
 import { type EntityPlan, planCaptureEntities, resolveEntityPlan } from "./segment";
 
 const ACTOR = "agent:classifier";
@@ -199,7 +200,7 @@ export async function readArchivedCapture(item: InboxItem): Promise<string | nul
   // Classify/review text is parsed markdown. Raw UTF-8 would mojibake a PDF archive.
   // Parse failure is fail-closed (null), never a binary snapshot across MCP.
   try {
-    return parseInboxSource(item.raw_path, bytes).markdown;
+    return (await parseInboxSourceAsync(item.raw_path, bytes)).markdown;
   } catch {
     return null;
   }
@@ -212,7 +213,14 @@ const AGENT_SESSION_HINT_RE = /<!-- hint: agent work session -->/;
 // defaults to tier 1. Exported so minime_refile (W2-3) can reuse the same signal when it
 // floors an owner-requested note tier override against the capture's own evidence.
 export function noteHintTier(text: string): 1 | 2 {
-  return AGENT_SESSION_HINT_RE.test(text) ? 2 : 1;
+  if (AGENT_SESSION_HINT_RE.test(text)) return 2;
+  const image = text.match(IMAGE_HINT_RE);
+  if (image?.[2] === "2") return 2;
+  return 1;
+}
+
+export function receiptCandidateHint(text: string): boolean {
+  return IMAGE_HINT_RE.test(text) && text.includes("receipt_candidate");
 }
 
 function firstLineOf(text: string): string {
@@ -691,16 +699,16 @@ async function reconcileFiledProjection(item: InboxItem, bytes: Uint8Array): Pro
   if (item.status !== "filed" || item.filed_table !== "pages") return;
   const c = storedClassification(item.classifier_output);
   if (!c || c.type !== "note") return;
-  const parsed = tryParseInbox(item.raw_path, bytes);
+  const parsed = await tryParseInbox(item.raw_path, bytes);
   if (!parsed.ok) return;
   await publishNoteProjection(noteProjection(c, parsed.result.markdown, item.id));
 }
 
 type ParsedInbox = { ok: true; result: InboxParseResult } | { ok: false; error: InboxParseError };
 
-function tryParseInbox(filePath: string, bytes: Uint8Array): ParsedInbox {
+async function tryParseInbox(filePath: string, bytes: Uint8Array): Promise<ParsedInbox> {
   try {
-    return { ok: true, result: parseInboxSource(filePath, bytes) };
+    return { ok: true, result: await parseInboxSourceAsync(filePath, bytes) };
   } catch (error) {
     if (error instanceof InboxParseError) return { ok: false, error };
     throw error;
@@ -813,6 +821,12 @@ async function classifyAndFileInbox(
   if (outcome.filed) {
     if (outcome.projection) await publishNoteProjection(outcome.projection);
     for (const extra of outcome.extraProjections ?? []) await publishNoteProjection(extra);
+    if (receiptCandidateHint(text)) {
+      await insertReviewItem("receipt_candidate", {
+        inbox_item_id: item.id,
+        image_kind: "receipt",
+      });
+    }
     await drainEmbedBacklog(64).catch(() => {});
   }
   return { inboxId: item.id, filed: outcome.filed };
@@ -823,7 +837,7 @@ async function finalizeClaimedInbox(
   bytes: Uint8Array,
   parsed?: ParsedInbox,
 ): Promise<{ inboxId: string; filed: boolean }> {
-  const outcome = parsed ?? tryParseInbox(claim.item.raw_path, bytes);
+  const outcome = parsed ?? (await tryParseInbox(claim.item.raw_path, bytes));
   const mime = outcome.ok ? outcome.result.mime : outcome.error.mime;
   if (mime !== claim.item.mime) await setInboxMime(claim.item.id, claim.token, mime);
   if (!outcome.ok) {
@@ -874,7 +888,7 @@ async function processInboxSourceSnapshot(snapshot: {
   bytes: Buffer;
 }): Promise<{ inboxId: string; filed: boolean }> {
   const contentHash = sha256(snapshot.bytes);
-  const parsed = tryParseInbox(snapshot.path, snapshot.bytes);
+  const parsed = await tryParseInbox(snapshot.path, snapshot.bytes);
   const mime = parsed.ok ? parsed.result.mime : parsed.error.mime;
   const item = await ensureInboxItemIdentity({
     rawPath: snapshot.path,

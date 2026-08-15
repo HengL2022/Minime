@@ -342,7 +342,7 @@ async function runHybridSearch(opts: Parameters<typeof hybridSearch>[0]): Promis
       type: s.c.parent_type,
       id: s.c.parent_id,
       title: s.m.title,
-      snippet: snippet(s.c.text, query),
+      snippet: snippet(s.c.span_text ?? s.c.text, query),
       score: Number(s.score.toFixed(4)),
       updated_at: s.m.updated_at,
       derived: s.derived,

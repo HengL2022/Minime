@@ -351,6 +351,26 @@ describe("audit payload boundary", () => {
     expect(JSON.stringify(payload)).not.toContain(SENTINEL);
   });
 
+  test("LLM describe egress keeps routing metadata without image or caption content", async () => {
+    const { auditPayload } = (await import("../src/util/audit-payload")) as any;
+    const payload = auditPayload.llmEgress({
+      kind: "describe",
+      provider: "openai",
+      model: "gpt-4o-mini",
+      items: 1,
+      routeTier: 2,
+      caption: SENTINEL,
+      image: SENTINEL,
+    });
+    expect(payload).toEqual({
+      provider: "openai",
+      model: "gpt-4o-mini",
+      items: 1,
+      route_tier: 2,
+    });
+    expect(JSON.stringify(payload)).not.toContain(SENTINEL);
+  });
+
   test("LLM egress schemas reject impossible verbs, providers, counts, and intent pairing", async () => {
     const { auditPayload } = (await import("../src/util/audit-payload")) as any;
     for (const input of [

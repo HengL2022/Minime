@@ -190,6 +190,10 @@ function fuzzCases(): { tool: string; params: any }[] {
   cases.push({ tool: "minime_unlock", params: { minutes: 10080 } });
   cases.push({ tool: "minime_review_queue", params: { action: "list" } });
   cases.push({ tool: "minime_review_queue", params: { action: "list", kind: "entity_promotion" } });
+  cases.push({
+    tool: "minime_review_queue",
+    params: { action: "list", kind: "receipt_candidate" },
+  });
   while (cases.length < 200) {
     cases.push({ tool: "minime_state", params: {} });
   }

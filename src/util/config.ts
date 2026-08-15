@@ -138,6 +138,8 @@ export interface ProviderEnvironment {
   classifyProvider: ProviderName;
   providerRouteTier1?: ProviderName;
   providerRouteTier2?: ProviderName;
+  vlmRouteTier1?: ProviderName;
+  vlmRouteTier2?: ProviderName;
 }
 
 /** Parse the provider-routing subset of an arbitrary environment with the same exact semantics. */
@@ -146,11 +148,17 @@ export function parseProviderEnvironment(source: NodeJS.ProcessEnv): ProviderEnv
     const value = source[setting];
     return value === undefined ? undefined : parseProviderName(value, setting);
   };
+  const optionalVlm = (setting: "VLM_ROUTE_TIER1" | "VLM_ROUTE_TIER2") => {
+    const value = source[setting];
+    return value === undefined ? undefined : parseProviderName(value, setting);
+  };
   return {
     embedProvider: parseEmbedProviderName(source.EMBED_PROVIDER ?? "ollama"),
     classifyProvider: parseProviderName(source.CLASSIFY_PROVIDER ?? "ollama", "CLASSIFY_PROVIDER"),
     providerRouteTier1: optional("PROVIDER_ROUTE_TIER1"),
     providerRouteTier2: optional("PROVIDER_ROUTE_TIER2"),
+    vlmRouteTier1: optionalVlm("VLM_ROUTE_TIER1"),
+    vlmRouteTier2: optionalVlm("VLM_ROUTE_TIER2"),
   };
 }
 
@@ -378,6 +386,11 @@ export const config = {
   // CLASSIFY_PROVIDER per content tier. Tier 0 is never classified and has no route.
   providerRouteTier1: providerEnvironment.providerRouteTier1,
   providerRouteTier2: providerEnvironment.providerRouteTier2,
+  // Local VLM for inbox image captions (W6). Empty = describe degrades to a filename stub.
+  // Cloud vision is not implemented; an explicit cloud VLM_ROUTE_* fails at startup.
+  vlmModel: env("VLM_MODEL", ""),
+  vlmRouteTier1: providerEnvironment.vlmRouteTier1,
+  vlmRouteTier2: providerEnvironment.vlmRouteTier2,
   anthropicApiKey: process.env.ANTHROPIC_API_KEY,
   anthropicModel: env("ANTHROPIC_MODEL", "claude-opus-4-8"),
   openaiApiKey: process.env.OPENAI_API_KEY,

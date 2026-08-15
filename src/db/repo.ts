@@ -581,7 +581,7 @@ export async function logEvent(e: {
   return row.id;
 }
 
-type EgressKind = "embed" | "classify";
+type EgressKind = "embed" | "classify" | "describe";
 
 async function insertDurableEgressEvent(
   verb: `egress:${EgressKind}` | `egress:${EgressKind}:outcome`,
@@ -797,25 +797,59 @@ export async function parentHasChunks(parentType: ParentType, parentId: string):
   return (row?.n ?? 0) > 0;
 }
 
+export interface ChunkSpanWrite {
+  text: string;
+  children: string[];
+}
+
+function asChunkSpans(input: string[] | ChunkSpanWrite[]): ChunkSpanWrite[] {
+  if (input.length === 0) return [];
+  if (typeof input[0] === "string") {
+    return (input as string[]).map((text) => ({ text, children: [text] }));
+  }
+  return input as ChunkSpanWrite[];
+}
+
+async function writeChunkSpans(
+  tx: DbTransaction,
+  parentType: ParentType,
+  parentId: string,
+  spans: ChunkSpanWrite[],
+  tier: number,
+): Promise<number> {
+  await tx`delete from chunks where parent_type = ${parentType} and parent_id = ${parentId}`;
+  await tx`delete from chunk_spans where parent_type = ${parentType} and parent_id = ${parentId}`;
+  let ord = 0;
+  for (let spanOrd = 0; spanOrd < spans.length; spanOrd++) {
+    const span = spans[spanOrd]!;
+    const [row] = await tx`
+      insert into chunk_spans (parent_type, parent_id, ord, text)
+      values (${parentType}, ${parentId}, ${spanOrd}, ${span.text})
+      returning id`;
+    for (const child of span.children) {
+      await tx`insert into chunks (parent_type, parent_id, ord, text, tier, span_id)
+               values (${parentType}, ${parentId}, ${ord}, ${child}, ${tier}, ${row!.id})`;
+      ord += 1;
+    }
+  }
+  return ord;
+}
+
 export async function replaceChunks(
   parentType: ParentType,
   parentId: string,
-  texts: string[],
+  texts: string[] | ChunkSpanWrite[],
   tier: number,
 ): Promise<void> {
   assertProseTier(tier);
   await withDbTransaction(async (tx) => {
-    await tx`delete from chunks where parent_type = ${parentType} and parent_id = ${parentId}`;
-    for (let ord = 0; ord < texts.length; ord++) {
-      await tx`insert into chunks (parent_type, parent_id, ord, text, tier)
-               values (${parentType}, ${parentId}, ${ord}, ${texts[ord]!}, ${tier})`;
-    }
+    await writeChunkSpans(tx, parentType, parentId, asChunkSpans(texts), tier);
   });
 }
 
 export async function replacePageChunksMonotonic(
   pageId: string,
-  texts: string[],
+  texts: string[] | ChunkSpanWrite[],
   requestedTier: 1 | 2,
 ): Promise<{ count: number; effectiveTier: 1 | 2 }> {
   assertProseTier(requestedTier);
@@ -836,13 +870,135 @@ export async function replacePageChunksMonotonic(
     ];
     for (const tier of evidence) assertProseTier(tier);
     const effectiveTier = Math.max(requestedTier, ...evidence) as 1 | 2;
-    await tx`delete from chunks where parent_type = 'page' and parent_id = ${pageId}`;
-    for (let ord = 0; ord < texts.length; ord++) {
-      await tx`insert into chunks (parent_type, parent_id, ord, text, tier)
-               values ('page', ${pageId}, ${ord}, ${texts[ord]!}, ${effectiveTier})`;
-    }
-    return { count: texts.length, effectiveTier };
+    const count = await writeChunkSpans(tx, "page", pageId, asChunkSpans(texts), effectiveTier);
+    return { count, effectiveTier };
   });
+}
+
+export async function listChunkParents(): Promise<{ parentType: ParentType; parentId: string }[]> {
+  const rows = (await db()`select parent_type, parent_id from chunks group by 1, 2`) as {
+    parent_type: string;
+    parent_id: string;
+  }[];
+  return rows
+    .filter((row) => row.parent_type in PARENTS)
+    .map((row) => ({
+      parentType: row.parent_type as ParentType,
+      parentId: row.parent_id,
+    }));
+}
+
+function rechunkTier(value: unknown): 1 | 2 | null {
+  return value === 1 || value === 2 ? value : null;
+}
+
+function joinedProse(parts: Array<string | null | undefined>): string {
+  return parts.filter((part) => typeof part === "string" && part.trim()).join("\n\n");
+}
+
+export async function parentRechunkSource(
+  parentType: ParentType,
+  parentId: string,
+): Promise<{ text: string; title?: string; tier: 1 | 2 } | null> {
+  const source = await loadRechunkRow(parentType, parentId);
+  if (!source) return null;
+  const tier = rechunkTier(Number(source.tier));
+  if (!tier) return null;
+  const text = source.text.trim();
+  if (!text) return null;
+  return { text, title: source.title, tier };
+}
+
+async function loadRechunkRow(
+  parentType: ParentType,
+  parentId: string,
+): Promise<{ text: string; title?: string; tier: number } | null> {
+  switch (parentType) {
+    case "page": {
+      const [row] = await db()`select title, body_md, tier from pages where id = ${parentId}`;
+      return row ? { text: String(row.body_md ?? ""), title: row.title, tier: row.tier } : null;
+    }
+    case "journal": {
+      const [row] =
+        await db()`select entry_md, at, tier from journal_entries where id = ${parentId}`;
+      return row
+        ? {
+            text: String(row.entry_md ?? ""),
+            title: `Journal ${localDateStr(row.at)}`,
+            tier: row.tier,
+          }
+        : null;
+    }
+    case "interaction": {
+      const [row] = await db()`select summary, tier from interactions where id = ${parentId}`;
+      return row ? { text: String(row.summary ?? ""), tier: row.tier } : null;
+    }
+    case "decision": {
+      const [row] =
+        await db()`select question, reasoning, tier from decisions where id = ${parentId}`;
+      return row
+        ? { text: joinedProse([row.question, row.reasoning]), title: row.question, tier: row.tier }
+        : null;
+    }
+    case "decision_branch": {
+      const [row] = await db()`
+        select b.label, b.status, b.note, b.would_be_right_if, b.tier, d.question
+        from decision_branches b join decisions d on d.id = b.decision_id
+        where b.id = ${parentId}`;
+      return row
+        ? {
+            text: joinedProse([
+              `# Decision branch: ${row.label}`,
+              `Decision: ${row.question}`,
+              `Status: ${row.status}`,
+              row.note ? `Note: ${row.note}` : "",
+              row.would_be_right_if ? `Would be right if: ${row.would_be_right_if}` : "",
+            ]),
+            title: row.label,
+            tier: row.tier,
+          }
+        : null;
+    }
+    case "task": {
+      const [row] = await db()`select title, body, tier from tasks where id = ${parentId}`;
+      return row
+        ? { text: joinedProse([row.title, row.body]), title: row.title, tier: row.tier }
+        : null;
+    }
+    case "goal": {
+      const [row] = await db()`select statement, why, tier from goals where id = ${parentId}`;
+      return row
+        ? { text: joinedProse([row.statement, row.why]), title: row.statement, tier: row.tier }
+        : null;
+    }
+    case "value": {
+      const [row] =
+        await db()`select statement, notes, tier from values_items where id = ${parentId}`;
+      return row
+        ? { text: joinedProse([row.statement, row.notes]), title: row.statement, tier: row.tier }
+        : null;
+    }
+    case "principle": {
+      const [row] = await db()`select rule, tier from principles where id = ${parentId}`;
+      return row ? { text: String(row.rule ?? ""), title: row.rule, tier: row.tier } : null;
+    }
+    case "person": {
+      const [row] = await db()`select canonical_name, tier from people where id = ${parentId}`;
+      return row
+        ? { text: String(row.canonical_name ?? ""), title: row.canonical_name, tier: row.tier }
+        : null;
+    }
+    case "org": {
+      const [row] = await db()`select canonical_name, tier from orgs where id = ${parentId}`;
+      return row
+        ? { text: String(row.canonical_name ?? ""), title: row.canonical_name, tier: row.tier }
+        : null;
+    }
+    case "commitment": {
+      const [row] = await db()`select what, tier from commitments where id = ${parentId}`;
+      return row ? { text: String(row.what ?? ""), title: row.what, tier: row.tier } : null;
+    }
+  }
 }
 
 export async function chunksMissingEmbedding(
@@ -888,6 +1044,8 @@ export interface Candidate {
   parent_id: string;
   ord: number;
   text: string;
+  /** Envelope text: the span when one exists, else the child. Ranking still uses `text`. */
+  span_text?: string;
   cosine: number;
   fts: number;
 }
@@ -919,9 +1077,11 @@ export async function ftsCandidates(
   const orQuery = ftsOrQuery(query);
   return db()`
     select c.id, c.parent_type, c.parent_id, c.ord, c.text,
+           coalesce(sp.text, c.text) as span_text,
            0::float as cosine,
            ts_rank_cd(c.tsv, websearch_to_tsquery('english', ${orQuery}))::float as fts
     from chunks c
+    left join chunk_spans sp on sp.id = c.span_id
     where c.tier >= 1 and c.tier <= ${allowed}
       and c.tsv @@ websearch_to_tsquery('english', ${orQuery})
       and (${types === null} or c.parent_type = any(${types ?? []}))
@@ -940,9 +1100,11 @@ export async function vectorCandidates(
   const vec = JSON.stringify(embedding);
   return db()`
     select c.id, c.parent_type, c.parent_id, c.ord, c.text,
+           coalesce(sp.text, c.text) as span_text,
            (1 - (c.embedding <=> ${vec}::vector))::float as cosine,
            0::float as fts
     from chunks c
+    left join chunk_spans sp on sp.id = c.span_id
     where c.tier >= 1 and c.tier <= ${allowed} and c.embedding is not null
       and (${types === null} or c.parent_type = any(${types ?? []}))
       and (${parentIds === null} or c.parent_id = any(${parentIds ?? []}))

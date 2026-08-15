@@ -28,6 +28,8 @@ type AuditPayloadKind =
   | "inboxUnfiled"
   | "llmClassifyEgress"
   | "llmClassifyOutcome"
+  | "llmDescribeEgress"
+  | "llmDescribeOutcome"
   | "llmEmbedEgress"
   | "llmEmbedOutcome"
   | "onboardComplete"
@@ -45,7 +47,7 @@ const payloadKinds = new WeakMap<object, AuditPayloadKind>();
 type AuditDelivery = "transport" | "direct";
 type AuditImporter = "calendar" | "email_meta" | "health" | "transactions";
 type AuditProvider = "ollama" | "anthropic" | "openai" | "openrouter" | "bedrock";
-type AuditEgressKind = "embed" | "classify";
+type AuditEgressKind = "embed" | "classify" | "describe";
 type ClassifierKind =
   | "task"
   | "journal"
@@ -327,7 +329,7 @@ type LlmEgressInput = {
 };
 
 function llmEgress(input: LlmEgressInput): AuditPayload {
-  const kind = fixed(input.kind, ["embed", "classify"]);
+  const kind = fixed(input.kind, ["embed", "classify", "describe"]);
   if (kind === "embed") {
     if ("routeTier" in input && input.routeTier !== undefined) invalidPayload();
     return construct("llmEmbedEgress", {
@@ -337,12 +339,13 @@ function llmEgress(input: LlmEgressInput): AuditPayload {
     });
   }
   if (input.items !== 1) invalidPayload();
-  return construct("llmClassifyEgress", {
+  const routed = {
     provider: fixed(input.provider, ["anthropic", "openai", "openrouter", "bedrock"]),
     model: modelIdentifier(input.model),
-    items: 1,
+    items: 1 as const,
     ...(input.routeTier === undefined ? {} : { route_tier: routeTier(input.routeTier) }),
-  });
+  };
+  return construct(kind === "describe" ? "llmDescribeEgress" : "llmClassifyEgress", routed);
 }
 
 function llmEgressOutcome(input: {
@@ -350,8 +353,14 @@ function llmEgressOutcome(input: {
   intentEventId: string;
   status: "succeeded" | "failed";
 }): AuditPayload {
-  const kind = fixed(input.kind, ["embed", "classify"]);
-  return construct(kind === "embed" ? "llmEmbedOutcome" : "llmClassifyOutcome", {
+  const kind = fixed(input.kind, ["embed", "classify", "describe"]);
+  const payloadKind =
+    kind === "embed"
+      ? "llmEmbedOutcome"
+      : kind === "describe"
+        ? "llmDescribeOutcome"
+        : "llmClassifyOutcome";
+  return construct(payloadKind, {
     intent_event_id: eventId(input.intentEventId),
     status: fixed(input.status, ["succeeded", "failed"]),
   });
@@ -971,6 +980,8 @@ function expectedPayloadKind(verb: string, payload: AuditPayload): AuditPayloadK
     "dream:summary": "dreamSummary",
     "egress:classify": "llmClassifyEgress",
     "egress:classify:outcome": "llmClassifyOutcome",
+    "egress:describe": "llmDescribeEgress",
+    "egress:describe:outcome": "llmDescribeOutcome",
     "egress:embed": "llmEmbedEgress",
     "egress:embed:outcome": "llmEmbedOutcome",
     "entity:tier:restored": "entityTierRestored",

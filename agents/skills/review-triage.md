@@ -116,6 +116,11 @@ auto-resolve).
      card to tier 1 (aliases/edges genuinely derived from tier-2 content stay tier 2 — the CLI
      says so in its own output). The CLI resolves the queue item automatically on success, so you
      never call `resolve` for this kind yourself.
+   - **receipt_candidate** — a filed inbox image looked like a receipt (payload:
+     `inbox_item_id` + `image_kind` only — never the caption or bytes). Flag-only: nothing
+     inserts a transaction. Read it back to the owner and ask whether to log an expense
+     with `minime_log_expense` (they supply amount/merchant; you never invent totals from
+     a caption) or dismiss. Resolving the flag does not write a transaction.
 3. Resolve each handled item: `minime_review_queue` action `resolve`, status `resolved`
    (handled) or `dismissed` (owner says ignore) — skip this when `minime_refile` or a person
    merge already resolved it for you. Confirm with IDs, one line each.
@@ -124,7 +129,8 @@ auto-resolve).
 
 - Triage order: ops_failure (the pipeline producing every other flag may itself be broken) →
   unfiled (quick wins) → decision reviews (time-sensitive) → contradictions →
-  extract_suspect / phantom_person (graph quality) → stale → goal reviews → entity promotions
+  extract_suspect / phantom_person (graph quality) → stale → goal reviews → receipt
+  candidates (flag-only; never auto-log an expense) → entity promotions
   (lowest urgency of all — no data is at risk either way, this is purely a visibility fix the
   owner runs in their own terminal). Offer to stop after 5 minutes; report what remains.
 - Resolving a flag (`minime_review_queue` action `resolve`) never by itself touches the flagged

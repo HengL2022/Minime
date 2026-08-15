@@ -64,6 +64,7 @@ const USAGE = `minime <command>
   sync                             sync data/brain/**/*.md into pages + chunks
   embed                            drain the embedding backlog
   reembed                          wipe + re-embed all chunks (after switching embed provider/model)
+  rechunk                          rebuild spans + children, then re-embed (after W8 or chunker changes)
   onboard                          first-run interview: seed your values, goals, people, projects
   dream                            run the nightly maintenance job once
   doctor                           print a content-free maintenance/ops health checklist
@@ -915,6 +916,16 @@ async function main(): Promise<number> {
       console.log(`wiped ${wiped} embeddings (was: ${old.join(", ") || "none"})`);
       const n = await drainEmbedBacklog();
       console.log(`re-embedded ${n} chunks with ${embedModelName()}`);
+      return 0;
+    }
+    case "rechunk": {
+      const { rechunkAll } = await import("./search/rechunk");
+      const result = await rechunkAll();
+      console.log(
+        `rechunked ${result.parents} parents → ${result.chunks} children${
+          result.skipped ? ` (skipped ${result.skipped})` : ""
+        }`,
+      );
       return 0;
     }
     case "dream": {

@@ -4183,3 +4183,51 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   Keeping it off the nightly dream job avoids surprising the live graph.
 - **Approved by:** owner request to continue the current-state plan through the
   ordinary backlog (2026-08-15).
+
+## 2026-08-15 — W6 optional local image describe
+
+- **Context:** Inbox parse already classified markdown, not raw bytes. Images
+  were `unsupported_type`. The 2026-07 program asked for an optional
+  `describe?` capability, hash-keyed mock captions, default tier-2-like
+  routing, and flag-only receipt handling. Owner VLM bake-off still precedes
+  committed `retrieval-img` floors. This amends `LlmProvider`, the
+  `egress:describe` audit vocabulary, review_queue kind `receipt_candidate`
+  (migration 041), and the runtime-child setting allowlist (`VLM_MODEL`,
+  `VLM_ROUTE_TIER1`/`TIER2`). No new MCP tool. CLIP/SigLIP stays deferred.
+- **Decision:** `parseInboxSourceAsync` captions JPEG/PNG/GIF/WEBP via local
+  Ollama `/api/generate` `images:[base64]` when `VLM_MODEL` is set, or via
+  hash-keyed mock captions when `MINIME_MOCK_OLLAMA=1`. Missing VLM degrades
+  to a filename stub. Images default photo/receipt→tier 2; document /
+  screenshot / whiteboard→tier 1 unless personal/financial. An explicit cloud
+  `VLM_ROUTE_*` fails at startup — cloud vision is not implemented. Receipt-like
+  images file normally and insert a flag-only `receipt_candidate` review item
+  (`inbox_item_id` + `image_kind`); nothing inserts a transaction. Audit
+  payloads for `egress:describe` are counts and routing metadata only — never
+  bytes or captions.
+- **Why:** The parse slot was ready; a local optional seam unblocks image
+  capture without a new network dependency or a floor claim. Flag-only
+  receipts keep Phase B off the tier-0 write path until the owner confirms.
+- **Approved by:** owner request to finish the remaining improve waves
+  (2026-08-15).
+
+## 2026-08-15 — W8 chunk spans and rechunk
+
+- **Context:** `chunks.parent_type`/`parent_id` already mean the parent row, so
+  the new grouping level is a **span**. The 2026-07 program asked for
+  `chunk_spans` + `chunks.span_id`, children as the embed/FTS/rerank unit,
+  envelope text from the span, and a `rechunk` CLI. Tightening children to
+  120–200 tokens would move sealed mock floors. Live MinimeBench/PMB remains
+  owner-scheduled. This amends the chunk write path, hybrid snippet text, and
+  adds owner CLI `rechunk`. No new MCP tool. `chunk_spans` is default-deny for
+  engineer-ro.
+- **Decision:** Heading sections become spans; children keep the current
+  350/400/40 bounds (**eval-calibration pending**). `indexParent` writes spans
+  then children. Search ranking still uses child text and still dedupes best
+  child per parent; the envelope snippet uses `coalesce(span.text, child.text)`.
+  `reembed` still only wipes vectors. `rechunk` reloads each parent row and
+  re-runs `indexParent` (then embeds). No PMB or floor lift is claimed.
+- **Why:** The schema and write path have to exist before a live battery can
+  change child size. Keeping current child bounds avoids a mock-eval
+  regression while still returning section-sized envelope text.
+- **Approved by:** owner request to finish the remaining improve waves
+  (2026-08-15).

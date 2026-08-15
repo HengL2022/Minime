@@ -103,13 +103,15 @@ to local Ollama but can route to cloud providers — set in `.env` and skip Olla
 **Switching the embedding provider/model invalidates existing vectors** (different models =
 different vector spaces). After changing `EMBED_PROVIDER`/`*_EMBED_MODEL`, run
 `bun run src/cli.ts reembed` (wipes and re-embeds every chunk; wrong-dimension responses are
-rejected loudly, never stored).
+rejected loudly, never stored). After a chunker or span-schema change, `bun run src/cli.ts rechunk`
+rebuilds children from each parent row (and re-embeds). Live rechunk stays owner-scheduled.
 
 Privacy contract: cloud providers receive content up to `CLOUD_MAX_TIER` (default 1; tier-0
 financial/health content **never** leaves the box on any path). Every cloud call first commits an
-audited intent row (`egress:embed` / `egress:classify`), then appends a fixed success/failure
-outcome; both contain counts and routing metadata, never contents, and the intent survives a later
-handler rollback. They are visible via `bun run src/cli.ts audit`. Mixed setups work (e.g.
+audited intent row (`egress:embed` / `egress:classify` / `egress:describe`), then appends a fixed
+success/failure outcome; both contain counts and routing metadata, never contents, and the intent
+survives a later handler rollback. Image describe is local-only (Ollama `VLM_MODEL`); a cloud
+`VLM_ROUTE_*` is rejected at startup. Default image routing is tier-2-like. They are visible via `bun run src/cli.ts audit`. Mixed setups work (e.g.
 classify via Anthropic, embed via local Ollama). Embeddings are pinned to 768 dims by the schema,
 hence the embed column above.
 

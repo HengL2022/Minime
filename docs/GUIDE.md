@@ -24,10 +24,13 @@ very first "give me a morning brief" already knows what matters to you.
 
 ### 1. The inbox — for anything, anytime (lowest friction)
 
-Drop a text or markdown file into `data/inbox/`. That's it. The watcher picks it up,
-classifies it with the local model, and files it as a task, journal entry, interaction,
-decision note, or reference note. Anything it isn't ≥70% sure about waits in the review
-queue instead of being filed wrong.
+Drop a text, markdown, PDF, office, mail, or image file into `data/inbox/`. That's it.
+The watcher picks it up, classifies the parsed markdown with the local model, and files
+it as a task, journal entry, interaction, decision note, or reference note. Anything it
+isn't ≥70% sure about waits in the review queue instead of being filed wrong. Images
+are captioned locally when `VLM_MODEL` is set (or via the offline mock in tests);
+otherwise they file as a filename stub. Receipt-like images raise a `receipt_candidate`
+flag — they never become transactions automatically.
 
 Ways to feed the inbox:
 

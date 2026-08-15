@@ -163,9 +163,10 @@ bun run src/cli.ts import:health export.xml
 bun run src/cli.ts import:email-meta ~/Maildir
 ```
 
-Capture: drop text/markdown files into `data/inbox/` (iOS Shortcut + Syncthing, share sheet,
-or `minime_capture` from an agent). The watcher classifies and files them; anything it isn't
-sure about waits for the evening review.
+Capture: drop text, markdown, PDF, office, mail, or image files into `data/inbox/`
+(iOS Shortcut + Syncthing, share sheet, or `minime_capture` from an agent). The watcher
+parses, classifies, and files them; anything it isn't sure about waits for the evening
+review. Images caption locally when `VLM_MODEL` is set.
 
 Session capture (optional): `make install-hooks` adds a Claude Code `SessionEnd` hook that
 summarizes every agent work session — first request, outcome, files touched — into
