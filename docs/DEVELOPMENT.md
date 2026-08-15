@@ -176,16 +176,15 @@ ratchet, evidence-hash hierarchy, or approval receipt is needed.
   and reads Make recipes without nested `--print-directory` banners.
   `make eval-search` held every committed mock floor. Lint, typecheck, typecheck-ops, and
   `check-subsystems` pass. Focused suites for the 22-tool contract, multi-entity companion
-  split, and single inbox-watcher lock pass. A cloud-VM `make verify-offline` was 1860
-  pass / 1 skip / 9 fail; the three nested-Make contract dry-run failures are gone.
+  split, and single inbox-watcher lock pass. A later Cloud Agent snapshot (2026-08-15)
+  reran the installer as `MINIME_PG_PORT=55432 --native` with Ollama + both models and
+  git 2.55: `status: ok`, `verify: pass` (full offline gate green, including the three
+  privacy-scanner outgoing-blob cases that fail on stock Ubuntu git 2.43). Port 5432 is
+  deliberately left free so `test/h2.ollama-shell.test.ts` installer fixtures can still
+  probe a clean default port. See `AGENTS.md` `## Cursor Cloud specific instructions`.
 - Remaining owner-only gates (do not start these from an agent session without an explicit
-  ask): a full `make verify` on the owner's machine. This cloud VM already binds native
-  Postgres on 5432 and skipped Ollama, so installer/launch suites cannot prove a clean
-  first-install path here. Its Git 2.43 `rev-list --objects -z` also does not emit the
-  NUL/`path=` records the privacy scanner parses, so three outgoing-blob fixture cases
-  report `outgoing_blobs=0` and cannot stand in for the owner scan. One inbox-identity
-  watcher case timed out (known flake). Then: a real-snapshot `make restore-drill`, the
-  outgoing privacy scan with the owner's private terms, live migrate through 040 after
+  ask): a full `make verify` on the owner's machine, a real-snapshot `make restore-drill`,
+  the outgoing privacy scan with the owner's private terms, live migrate through 040 after
   backup, and the release handoff. Merging to `main` and any history rewrite remain the
   owner's explicit action. Do not create another release train unless the owner asks
   for one.

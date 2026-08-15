@@ -290,18 +290,16 @@ name is compatibility wording, not a WAL/PITR claim). Promotion stays a delibera
 
 The Cloud Agent VM snapshot already has Bun (pinned `1.3.13`, symlinked to `/usr/local/bin/bun`),
 a native PostgreSQL 16 + pgvector cluster, `node_modules`, a generated `.env`, and Ollama with both
-models (`nomic-embed-text` + `llama3.1:8b`) for full non-degraded mode. The startup update script
-only refreshes dependencies (`bun install --frozen-lockfile`); it does **not** start any service.
-Notes below are the non-obvious bits — standard commands are in `## After install` and `CLAUDE.md`.
+models (`nomic-embed-text` + `llama3.1:8b`) for full non-degraded mode. Notes below are the
+non-obvious bits — standard commands are in `## After install` and `CLAUDE.md`.
 
-- **Start services first, every session.** Neither the update script nor `make up` starts services,
-  and this container has no running `systemd`, so nothing auto-starts on boot. Before `bun test`,
-  `make verify-offline`, or `serve`:
-  - Postgres: `make up` (creates scratch DBs via `scripts/with-test-database.ts`; a stopped cluster
-    fails most of the suite).
-  - Ollama (only for full-mode semantic search / inbox auto-classification): start it detached, e.g.
-    `OLLAMA_HOST=127.0.0.1:11434 ollama serve &` (or in a tmux session). Everything except those two
-    features works without it, and the whole test suite mocks Ollama regardless.
+Proposed Cloud environment commands (also recorded via the environment proposal):
+
+- **install** (must terminate; deps only): `bun install --frozen-lockfile`
+- **start** (every boot; this container has no `systemd`): `make up` then
+  `OLLAMA_HOST=127.0.0.1:11434 ollama serve` (stays attached). `make up` starts the persisted
+  native Postgres on `55432` and checks the two Ollama models. If `start` has not run yet in a
+  session, do the same by hand before `bun test`, `make verify-offline`, or `serve`.
 - **Postgres runs on port `55432`, not the default 5432 — this is deliberate and must stay that
   way.** `.env` pins this (mirrors the CI convention in `.github/workflows/install.yml`). The
   installer-fixture tests in `test/h2.ollama-shell.test.ts` spawn `scripts/install.sh` on the
