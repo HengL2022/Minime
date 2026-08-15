@@ -7,8 +7,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildTextPdf, corruptPdfBytes } from "../fixtures/parse/text-pdf";
 import { retryableInboxItems } from "../src/db/repo";
-import { type OriginalsSource, storeInboxOriginal } from "../src/pipeline/originals";
+import {
+  type OriginalsSource,
+  inboxOriginalRelativePath,
+  storeInboxOriginal,
+} from "../src/pipeline/originals";
 import { processInboxFile } from "../src/pipeline/watcher";
+import { parseFrontmatterDocument } from "../src/util/compiled-note-archive";
 import { config } from "../src/util/config";
 import { resetDb, testSql } from "./helpers";
 
@@ -247,6 +252,31 @@ describe("originals store (inbox pipeline)", () => {
       expect(surface).not.toContain("fictional tidepool sample trays");
       expect(surface).not.toContain(extracted);
     }
+  });
+
+  test("a filed note carries source_file frontmatter pointing at the originals path", async () => {
+    const body =
+      "Notes on the fictional kelp-lab tray labels around the harbor, including why the wet-lab wants a written redline.";
+    const path = join(inboxDir, "source-file-note.md");
+    await Bun.write(path, body);
+    const result = await processInboxFile(path);
+    expect(result.filed).toBe(true);
+    const [item] = await testSql`
+      select content_hash, received_at, raw_path, filed_table from inbox_items
+      where id = ${result.inboxId}`;
+    expect(item!.filed_table).toBe("pages");
+    const expected = inboxOriginalRelativePath({
+      id: result.inboxId,
+      raw_path: String(item!.raw_path),
+      content_hash: String(item!.content_hash),
+      received_at: item!.received_at as Date,
+    });
+    if (!expected) throw new Error("expected originals path");
+    const [page] = await testSql`select body_md from pages where derived_from = ${result.inboxId}`;
+    const fm = parseFrontmatterDocument(String(page!.body_md));
+    expect(fm.source_file).toBe(expected);
+    expect(fm.body).toContain("kelp-lab tray labels");
+    expect(JSON.stringify(page!.body_md)).not.toContain("/etc/");
   });
 
   test("a store collision after archive stays retryable and does not skip", async () => {

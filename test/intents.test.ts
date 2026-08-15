@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { heuristicClassify } from "../src/pipeline/classify";
-import { classifyStrongIntentLine, planMixedIntents } from "../src/pipeline/intents";
+import {
+  classifyStrongIntentLine,
+  heuristicNarrativeIntents,
+  llmIntentCue,
+  planMixedIntents,
+} from "../src/pipeline/intents";
 
 const SUPPLIER = `I emailed three fictional suppliers about calibration gel for Project SILDRE:
 Northstar Reagents AS (Bergen), Bluefin Labs AS (Oslo), and Aster Bio AS (Trondheim).
@@ -68,8 +73,27 @@ todo: book the wet-lab bench`).kind,
     ).toBe("none");
   });
 
+  test("a narrative dump without prefixes plans task + meeting + note", () => {
+    const narrative = `Need to send the SILDRE contract by Friday.
+
+Had coffee with Nadia Rossi about the Q3 quote.
+
+They want a written redline before the wet-lab booking.`;
+    expect(llmIntentCue(narrative)).toBe(true);
+    const plan = heuristicNarrativeIntents(narrative);
+    expect(plan.kind).toBe("items");
+    if (plan.kind !== "items") return;
+    expect(plan.items.map((item) => item.classification.type)).toEqual([
+      "task",
+      "interaction",
+      "note",
+    ]);
+  });
+
   test("the supplier repro and suffix-less meetings stay unsplit", () => {
     expect(planMixedIntents(SUPPLIER).kind).toBe("none");
+    expect(llmIntentCue(SUPPLIER)).toBe(false);
+    expect(heuristicNarrativeIntents(SUPPLIER).kind).toBe("none");
     expect(planMixedIntents("met Alice and Bob about the calibration rig").kind).toBe("none");
     expect(planMixedIntents("todo: renew passport by 2026-08-01").kind).toBe("none");
   });

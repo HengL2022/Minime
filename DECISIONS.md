@@ -4231,3 +4231,41 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   regression while still returning section-sized envelope text.
 - **Approved by:** owner request to finish the remaining improve waves
   (2026-08-15).
+
+## 2026-08-15 — Capture-filed notes carry source_file frontmatter
+
+- **Context:** W5 stored originals at `data/files/<yyyy>/<hash>.<ext>` but
+  filed notes did not point at that path. The 2026-07 program asked for
+  `source_file` frontmatter on the parsed page. This amends the capture-filed
+  page body contract and extends the 3-key frontmatter parser with an optional
+  fourth key. Compiled-note archives stay title+tier only. No new MCP tool,
+  migration, or SQL column.
+- **Decision:** When a note is filed from inbox (automatic or `minime_refile`),
+  its body may begin with `source_file: files/<yyyy>/<hash>.<ext>`. The path is
+  relative to `data/`, content-addressed, and rejected unless it matches that
+  exact shape (no absolute paths, no `..`). Missing originals do not fail the
+  page. Brain-sync and H1 recovery ignore the key for identity. Audit and
+  manifest lines stay counts/ids/hash only.
+- **Why:** A pointer next to the existing originals store is reversible and
+  does not invent a recovery root. Compiled notes must not grow a fourth
+  identity key.
+- **Approved by:** owner request to finish the remaining improve waves
+  (2026-08-15).
+
+## 2026-08-15 — Narrative mixed-intent companions
+
+- **Context:** Prefixed `todo:`/`met`/`note:` dumps already split leftover
+  typed rows. A narrative dump without prefixes still filed one primary type.
+  This amends the automatic inbox split contract only — `minime_refile` still
+  does not auto-split. Inbox cardinality stays one `filed_id`. No new MCP
+  tool, review kind, or migration.
+- **Decision:** After the prefix heuristic is silent, a dump with 2–4
+  blocks/sentences and at least two intent classes may ask the classify
+  provider (assumed tier 2; mock uses a narrative heuristic). The first item
+  is the inbox primary; leftovers are companions (`inbox:split-intents`).
+  Failure, junk, one type, or a supplier-style entity dump fails open onto
+  the single-classify path and does not unfile.
+- **Why:** The entity-plan fallback already used this fail-open shape.
+  Requiring mixed classes avoids splitting a long single-intent note.
+- **Approved by:** owner request to finish the remaining improve waves
+  (2026-08-15).

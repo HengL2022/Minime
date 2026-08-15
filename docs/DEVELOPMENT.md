@@ -204,12 +204,12 @@ known candidates are:
   any 120–200 child-size change stay owner-scheduled;
 - W9 isolated demo stack shipped 2026-08-15 (`make demo` on port 5433). Owner
   screencast remains owner-recorded; Ollama is not bundled in the demo compose;
-- optional `source_file` frontmatter on capture-filed notes pointing at the
-  originals-store path (deferred from this W5 slice — recovery-sensitive);
-- a model-driven 1..N split of narrative mixed-intent dumps (the 2026-08-15
-  heuristic companions cover prefixed `todo:`/`met`/`note:` dumps; inbox
-  cardinality is still one primary — see
-  `docs/known-issues/classifier-multi-entity-captures.md`); and
+- W5 `source_file` frontmatter on capture-filed notes shipped 2026-08-15
+  (relative `files/<yyyy>/<hash>.<ext>` only; compiled archives stay
+  title+tier);
+- narrative mixed-intent companions shipped 2026-08-15 (fail-open classify
+  provider / mock heuristic when a dump mixes 2–4 intent classes without
+  line prefixes; inbox cardinality is still one primary); and
 - close remaining known-issue documents once their behavioral regressions pass
   (extractor-phantom-orgs Fix C / high-edge watchdog shipped 2026-08-14; Fix D
   owner-run `sweep-extract-person-orgs` flags leftover person-named extract
