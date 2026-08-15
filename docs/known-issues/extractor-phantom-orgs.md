@@ -131,9 +131,10 @@ lexicon already loaded by `allOrgsWithAliases()` — no new SQL.
 TDD: `test/extract-fix-b.test.ts`. Fix A / org-poisoning guards in `test/m7.graph.test.ts`
 are unchanged; two extractAndLink write assertions now expect the 0.7 floor.
 
-**Still open after Fix B:** mixed-intent 1..N classify-and-file (sibling known-issue) and a local watchdog
-for `system:extract` orgs with an unusually high edge count and no human confirmation.
-Existing pre-Fix-B phantom/duplicate rows are not swept.
+**Still open after Fix B:** a local watchdog for `system:extract` orgs with an
+unusually high edge count (shipped as Fix C below). Existing pre-Fix-B
+phantom/duplicate rows are not swept. Prefixed mixed-intent companions shipped
+2026-08-15 (sibling known-issue).
 
 ## STATUS — Fix C shipped (2026-08-14)
 
@@ -151,5 +152,6 @@ Periodic audit landed as dream step `3d_high_edge_orgs` (`highEdgeExtractOrgScan
 
 TDD: `test/extract-org-watchdog.test.ts`.
 
-**Still open:** mixed-intent 1..N classify-and-file (sibling known-issue). Existing
-pre-Fix-B phantom/duplicate rows are not swept.
+**Still open:** existing pre-Fix-B phantom/duplicate rows are not swept (owner
+live-data). Prefixed mixed-intent companions shipped 2026-08-15; a model-driven
+split of narrative dumps remains on the sibling known-issue.

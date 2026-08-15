@@ -246,7 +246,10 @@ function dedupeSourceChunks(chunks: SourceChunk[]): SourceChunk[] {
   });
 }
 
-async function sourceChunksForCandidate(kind: "person", id: string): Promise<SourceChunk[]> {
+async function sourceChunksForCandidate(
+  kind: "person" | "org",
+  id: string,
+): Promise<SourceChunk[]> {
   return dedupeSourceChunks((await noteSourceChunks(kind, id)) as SourceChunk[]);
 }
 
@@ -1209,7 +1212,7 @@ async function reconcileAllowedLocked(
     };
   }
 
-  if (item.recovery && item.kind === "person" && item.entityId) {
+  if (item.recovery && item.entityId) {
     let chunks: SourceChunk[];
     let beforeIds: string[];
     let beforeFreshness: Date | null;

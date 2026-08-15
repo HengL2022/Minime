@@ -4071,3 +4071,23 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   junk rows from narrative prose.
 - **Approved by:** owner request to continue the current-state plan through the
   ordinary backlog (2026-08-15).
+
+## 2026-08-15 — Compiled notes include orgs
+
+- **Context:** The compiled-note archive, path regex, and recovery already
+  accepted `derived/notes/org/…`. `noteCandidates` / `noteSourceChunks` still
+  queried only people, so an org with many mention edges never distilled.
+  This amends the dream compile source set. No new MCP tool, review kind,
+  migration, or search multiplier — org notes inherit `dream:notes` / the
+  existing ×1.5 compiled-source boost. Topic notes and wikilinks stay deferred.
+- **Decision:** `noteCandidates` unions person and org mention clusters
+  (same ≥3-chunk floor, parent-anchored `mentions` edges, compiled-note pages
+  excluded). `noteSourceChunks` resolves org names through `orgs` +
+  `org_aliases` the same way people use `person_aliases`. Retired orgs are
+  not candidates. Note tier is still max(source/edge/entity). Recovery
+  refresh is no longer person-only.
+- **Why:** The three person-hardcoded sites were the documented W7 gap.
+  Reusing the existing org path and alias tables avoids a new kind or
+  table. Retired orgs must not grow a living card.
+- **Approved by:** owner request to continue the current-state plan through the
+  ordinary backlog (2026-08-15).

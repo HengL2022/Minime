@@ -202,7 +202,10 @@ known candidates are:
 - a model-driven 1..N split of narrative mixed-intent dumps (the 2026-08-15
   heuristic companions cover prefixed `todo:`/`met`/`note:` dumps; inbox
   cardinality is still one primary — see
-  `docs/known-issues/classifier-multi-entity-captures.md`); and
+  `docs/known-issues/classifier-multi-entity-captures.md`);
+- W7 topic notes (page-clusters seeded from decisions+goals) and wikilinks
+  (org compiled notes shipped 2026-08-15 — `noteCandidates` /
+  `noteSourceChunks` are no longer person-only); and
 - close remaining known-issue documents once their behavioral regressions pass
   (extractor-phantom-orgs Fix C / high-edge watchdog shipped 2026-08-14; the
   live pre-Fix-B sweep remains).

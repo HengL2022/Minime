@@ -1,12 +1,12 @@
 // Phase-2 compiled-notes layer (search-uplift; spec §15 early adoption, owner-approved
-// 2026-06-12). A dream step distills a ≤300-word factual note page per person with ≥3
-// mentioning chunks: source='dream:notes', created_by='system:dream', derived_from = a
-// representative source row, tier = max(source-chunk tier). Recompiled only on new mentions;
-// idempotent otherwise. Fully offline — MINIME_MOCK_OLLAMA=1 uses a deterministic heuristic.
-// Fixtures are fictional (not the owner's data).
+// 2026-06-12). A dream step distills a ≤300-word factual note page per person or org
+// with ≥3 mentioning chunks: source='dream:notes', created_by='system:dream',
+// derived_from = a representative source row, tier = max(source-chunk tier).
+// Recompiled only on new mentions; idempotent otherwise. Fully offline —
+// MINIME_MOCK_OLLAMA=1 uses a deterministic heuristic. Fixtures are fictional.
 
 import { beforeEach, describe, expect, test } from "bun:test";
-import { ensurePerson, upsertPage } from "../src/db/repo";
+import { ensureOrg, ensurePerson, upsertPage } from "../src/db/repo";
 import { entityLinkPass } from "../src/pipeline/dream";
 import { compileNotes, heuristicDistill } from "../src/pipeline/notes";
 import { indexParent } from "../src/search/index-parent";
@@ -186,5 +186,72 @@ describe("staleness", () => {
     const res = await compileNotes();
     expect(res.candidates).toBe(0);
     expect(await notePage("person", "Lone Source", loneId)).toBeNull();
+  });
+});
+
+describe("compileNotes org candidates", () => {
+  test("creates an org note with the same provenance contract as a person note", async () => {
+    const { id: orgId } = await ensureOrg("Fjordsonics AS", "test", "capture", { tier: 1 });
+    const first = await pageMentioning(
+      "journal/2026-04-quote.md",
+      "Gel quote",
+      "Fjordsonics AS quoted the calibration gel this week.",
+    );
+    await pageMentioning(
+      "journal/2026-05-delivery.md",
+      "Delivery",
+      "The wet-lab order from Fjordsonics AS arrived late.",
+    );
+    await pageMentioning(
+      "journal/2026-06-redline.md",
+      "Redline",
+      "Fjordsonics AS asked for a written redline on the Q3 quote.",
+    );
+    await entityLinkPass();
+    const [edges] = await sql`
+      select count(*)::int as n from edges
+      where rel = 'mentions' and dst_type = 'org' and dst_id = ${orgId}`;
+    expect(edges!.n).toBeGreaterThanOrEqual(3);
+
+    const res = await compileNotes();
+    expect(res.created + res.updated).toBe(1);
+    const note = await notePage("org", "Fjordsonics AS", orgId);
+    expect(note).not.toBeNull();
+    expect(note.source).toBe("dream:notes");
+    expect(note.created_by).toBe("system:dream");
+    expect(note.tier).toBe(1);
+    expect(note.derived_from).toBe(first);
+    expect(note.body_md).toContain("# Fjordsonics AS");
+    expect(note.body_md).toContain("## Sources");
+    expect(await notePage("person", "Fjordsonics AS", orgId)).toBeNull();
+  });
+
+  test("tier-2 org sources never produce a tier-1 note", async () => {
+    const { id: orgId } = await ensureOrg("Bluefin Labs AS", "test", "capture", { tier: 1 });
+    await pageMentioning(
+      "journal/oa.md",
+      "A",
+      "Bluefin Labs AS shipped the wet-mate connectors.",
+      1,
+    );
+    await pageMentioning("journal/ob.md", "B", "Bluefin Labs AS called about the audit sample.", 2);
+    await pageMentioning("journal/oc.md", "C", "Bluefin Labs AS is quoting a spare crate.", 2);
+    await entityLinkPass();
+    const res = await compileNotes();
+    expect(res.created + res.updated).toBe(1);
+    const note = await notePage("org", "Bluefin Labs AS", orgId);
+    expect(note.tier).toBe(2);
+  });
+
+  test("a retired org is not a compile candidate", async () => {
+    const { id: orgId } = await ensureOrg("Aster Bio AS", "test", "capture", { tier: 1 });
+    await pageMentioning("journal/ra.md", "A", "Aster Bio AS sent the Trondheim quote.", 1);
+    await pageMentioning("journal/rb.md", "B", "Aster Bio AS delayed the gel batch.", 1);
+    await pageMentioning("journal/rc.md", "C", "Aster Bio AS asked for a site visit.", 1);
+    await entityLinkPass();
+    await sql`update orgs set retired_at = now(), retired_reason = 'test' where id = ${orgId}`;
+    const res = await compileNotes();
+    expect(res.candidates).toBe(0);
+    expect(await notePage("org", "Aster Bio AS", orgId)).toBeNull();
   });
 });

@@ -5508,8 +5508,10 @@ export async function staleRecentlyFlagged(id: string): Promise<boolean> {
 // edges are parent-anchored at (src_type, src_id); noteSourceChunks() resolves the chunks
 // through that typed parent and ignores historical source_table/source_id metadata.
 
+export type NoteEntityKind = "person" | "org";
+
 export interface NoteCandidate {
-  kind: "person";
+  kind: NoteEntityKind;
   id: string;
   name: string;
   chunk_count: number;
@@ -5519,32 +5521,53 @@ export interface NoteCandidate {
   latest_mention_at: Date;
 }
 
-// People with at least `minChunks` chunks that mention them. `max_tier` drives the note tier;
-// `latest_mention_at` is the cheap staleness signal (vs. the note page's updated_at). Mention
-// edges are PARENT-anchored (src = the mentioning row, M7 extraction shape), so the chunks
-// are joined via the edge's src parent. Note pages themselves are excluded so a note never
-// feeds itself.
+// People and orgs with at least `minChunks` chunks that mention them. `max_tier`
+// drives the note tier; `latest_mention_at` is the cheap staleness signal.
+// Mention edges are PARENT-anchored (src = the mentioning row), so chunks join
+// via the edge's src parent. Note pages themselves are excluded so a note never
+// feeds itself. Retired orgs are skipped.
 export async function noteCandidates(minChunks: number): Promise<NoteCandidate[]> {
   const excluded = await excludedDerivedPageIdsForCompiledNoteSources();
   const rows = (await db()`
-    select 'person'::text as kind, e.dst_id as id, p.canonical_name as name,
-           count(distinct c.id)::int as chunk_count,
-           min(least(c.tier, e.tier, p.tier, ${COMPILED_PARENT_TIER(db())}))::int as min_tier,
-           max(greatest(c.tier, e.tier, p.tier, ${COMPILED_PARENT_TIER(db())}))::int as max_tier,
-           bool_or(${COMPILED_PARENT_TIER(db())} is null) as evidence_unresolved,
-           max(e.created_at) as latest_mention_at
-    from edges e
-    join chunks c on c.parent_type = e.src_type and c.parent_id = e.src_id
-    join people p on p.id = e.dst_id
-    where e.rel = 'mentions' and e.dst_type = 'person'
-      and e.tier in (1,2) and c.tier in (1,2) and p.tier in (1,2)
-      and ${COMPILED_PARENT_TIER(db())} in (1,2)
-      and not (e.src_type = 'page' and e.src_id = any(${excluded}::uuid[]))
-      and (c.parent_type <> 'page' or exists (
-        select 1 from pages pg where pg.id = c.parent_id and pg.status = 'active'))
-    group by e.dst_id, p.canonical_name
-    having count(distinct c.id) >= ${minChunks}
-    order by chunk_count desc`) as any;
+    select kind, id, name, chunk_count, min_tier, max_tier, evidence_unresolved, latest_mention_at
+    from (
+      select 'person'::text as kind, e.dst_id as id, p.canonical_name as name,
+             count(distinct c.id)::int as chunk_count,
+             min(least(c.tier, e.tier, p.tier, ${COMPILED_PARENT_TIER(db())}))::int as min_tier,
+             max(greatest(c.tier, e.tier, p.tier, ${COMPILED_PARENT_TIER(db())}))::int as max_tier,
+             bool_or(${COMPILED_PARENT_TIER(db())} is null) as evidence_unresolved,
+             max(e.created_at) as latest_mention_at
+      from edges e
+      join chunks c on c.parent_type = e.src_type and c.parent_id = e.src_id
+      join people p on p.id = e.dst_id
+      where e.rel = 'mentions' and e.dst_type = 'person'
+        and e.tier in (1,2) and c.tier in (1,2) and p.tier in (1,2)
+        and ${COMPILED_PARENT_TIER(db())} in (1,2)
+        and not (e.src_type = 'page' and e.src_id = any(${excluded}::uuid[]))
+        and (c.parent_type <> 'page' or exists (
+          select 1 from pages pg where pg.id = c.parent_id and pg.status = 'active'))
+      group by e.dst_id, p.canonical_name
+      union all
+      select 'org'::text as kind, e.dst_id as id, o.canonical_name as name,
+             count(distinct c.id)::int as chunk_count,
+             min(least(c.tier, e.tier, o.tier, ${COMPILED_PARENT_TIER(db())}))::int as min_tier,
+             max(greatest(c.tier, e.tier, o.tier, ${COMPILED_PARENT_TIER(db())}))::int as max_tier,
+             bool_or(${COMPILED_PARENT_TIER(db())} is null) as evidence_unresolved,
+             max(e.created_at) as latest_mention_at
+      from edges e
+      join chunks c on c.parent_type = e.src_type and c.parent_id = e.src_id
+      join orgs o on o.id = e.dst_id
+      where e.rel = 'mentions' and e.dst_type = 'org'
+        and e.tier in (1,2) and c.tier in (1,2) and o.tier in (1,2)
+        and o.retired_at is null
+        and ${COMPILED_PARENT_TIER(db())} in (1,2)
+        and not (e.src_type = 'page' and e.src_id = any(${excluded}::uuid[]))
+        and (c.parent_type <> 'page' or exists (
+          select 1 from pages pg where pg.id = c.parent_id and pg.status = 'active'))
+      group by e.dst_id, o.canonical_name
+    ) candidates
+    where chunk_count >= ${minChunks}
+    order by chunk_count desc, name`) as any;
   return rows as NoteCandidate[];
 }
 
@@ -5552,8 +5575,44 @@ export async function noteCandidates(minChunks: number): Promise<NoteCandidate[]
 // derived_from — is the earliest mentioning row). Parent-anchored edges as above; only
 // chunks that literally contain one of the person's names are distilled, so the note
 // quotes mentioning text rather than every chunk of a long mentioning page.
+async function compiledNoteEntityNames(
+  kind: NoteEntityKind,
+  id: string,
+): Promise<{ name: string; tier: number }[]> {
+  const rows =
+    kind === "person"
+      ? await db()`
+          select p.canonical_name as name, p.tier::int as tier
+          from people p where p.id = ${id} and p.tier in (1,2)
+          union all
+          select a.alias as name, a.tier::int as tier
+          from person_aliases a
+          join people p on p.id = a.person_id
+          where a.person_id = ${id} and p.tier in (1,2) and a.tier in (1,2)`
+      : await db()`
+          select o.canonical_name as name, o.tier::int as tier
+          from orgs o
+          where o.id = ${id} and o.tier in (1,2) and o.retired_at is null
+          union all
+          select a.alias as name, a.tier::int as tier
+          from org_aliases a
+          join orgs o on o.id = a.org_id
+          where a.org_id = ${id} and o.tier in (1,2) and a.tier in (1,2)
+            and o.retired_at is null`;
+  return rows
+    .filter(
+      (row): row is { name: string; tier: number } =>
+        typeof row.name === "string" &&
+        row.name.length > 0 &&
+        (Number(row.tier) === 1 || Number(row.tier) === 2),
+    )
+    .map((row) => ({ name: row.name, tier: Number(row.tier) }));
+}
+
+// Mentioning chunks for one person or org, oldest first. Only chunks that
+// literally contain a canonical name or alias are distilled.
 export async function noteSourceChunks(
-  _kind: "person",
+  kind: NoteEntityKind,
   id: string,
 ): Promise<
   {
@@ -5569,34 +5628,20 @@ export async function noteSourceChunks(
   }[]
 > {
   const excluded = await excludedDerivedPageIdsForCompiledNoteSources();
-  const names = (
-    await db()`
-    select p.canonical_name as name, p.tier::int as tier
-    from people p where p.id = ${id} and p.tier in (1,2)
-    union all
-    select a.alias as name, a.tier::int as tier
-    from person_aliases a
-    join people p on p.id = a.person_id
-    where a.person_id = ${id} and p.tier in (1,2) and a.tier in (1,2)`
-  )
-    .filter(
-      (row): row is { name: string; tier: number } =>
-        typeof row.name === "string" &&
-        row.name.length > 0 &&
-        (Number(row.tier) === 1 || Number(row.tier) === 2),
-    )
-    .map((row) => ({ name: row.name, tier: Number(row.tier) }));
+  const names = await compiledNoteEntityNames(kind, id);
   const rows = (await db()`
     select distinct c.id, c.parent_type, c.parent_id, c.text, c.tier, e.tier as edge_tier,
-      least(c.tier, e.tier, p.tier, ${COMPILED_PARENT_TIER(db())})::int as min_tier,
-      greatest(c.tier, e.tier, p.tier, ${COMPILED_PARENT_TIER(db())})::int as max_tier,
+      least(c.tier, e.tier, coalesce(p.tier, o.tier), ${COMPILED_PARENT_TIER(db())})::int as min_tier,
+      greatest(c.tier, e.tier, coalesce(p.tier, o.tier), ${COMPILED_PARENT_TIER(db())})::int as max_tier,
       (${COMPILED_PARENT_TIER(db())} is null) as evidence_unresolved,
       c.updated_at, c.ord
     from edges e
     join chunks c on c.parent_type = e.src_type and c.parent_id = e.src_id
-    join people p on p.id = e.dst_id
-    where e.rel = 'mentions' and e.dst_type = 'person' and e.dst_id = ${id}
-      and e.tier in (1,2) and c.tier in (1,2) and p.tier in (1,2)
+    left join people p on e.dst_type = 'person' and p.id = e.dst_id
+    left join orgs o on e.dst_type = 'org' and o.id = e.dst_id
+    where e.rel = 'mentions' and e.dst_type = ${kind} and e.dst_id = ${id}
+      and e.tier in (1,2) and c.tier in (1,2) and coalesce(p.tier, o.tier) in (1,2)
+      and (o.id is null or o.retired_at is null)
       and ${COMPILED_PARENT_TIER(db())} in (1,2)
       and not (e.src_type = 'page' and e.src_id = any(${excluded}::uuid[]))
       and (c.parent_type <> 'page' or exists (
