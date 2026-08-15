@@ -4044,3 +4044,190 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   that exists only for the strong deterministic cue.
 - **Approved by:** owner request to continue the current-state plan through the
   ordinary backlog (2026-08-14).
+
+## 2026-08-15 — Mixed-intent inbox companions
+
+- **Context:** The 2026-08-14 entity-plan decisions left mixed-intent dumps
+  (a task *and* an interaction *and* a note) filing one primary type. Guessing
+  extra typed primary rows, or changing `inbox_items` to N `filed_id`s, was
+  called out as a larger contract. This amends the filing contract and the
+  closed audit allowlist with `inbox:split-intents`. No new MCP tool, review
+  kind, or migration. Inbox cardinality stays one primary.
+- **Decision:** A heuristic pre-pass (`planMixedIntents`) splits only 2–4
+  strong mixed line-prefix or blank-line-block items (`todo:`/`task:`,
+  `met`/`called`/`talked to`/`coffee with`/`lunch with`, `note:`/`journal:`,
+  `decision:`/`decided`, `org:`/`company:`/`person:`). The first item is the
+  inbox primary (its text and classification, not the full dump). Leftovers
+  file through `filePrimaryRow` as companions with `derived_from` the inbox
+  id. Same-type lines, more than four mixed lines, leading prose, and
+  `minime_refile` do not split and do not unfile. No LLM on this path. Entity
+  planning still runs on the full text; a confident intent split does not
+  unfile for an uncertain entity plan. The audit payload is types/tables/ids
+  and a count — never text.
+- **Why:** Prefixed dumps are owner- or agent-structured enough to file
+  without a model. Keeping one inbox row matches the existing
+  decision/done-task/entity companion pattern. Skipping refile preserves the
+  owner's chosen type. Failing open (no split) on weak dumps avoids minting
+  junk rows from narrative prose.
+- **Approved by:** owner request to continue the current-state plan through the
+  ordinary backlog (2026-08-15).
+
+## 2026-08-15 — Compiled notes include orgs
+
+- **Context:** The compiled-note archive, path regex, and recovery already
+  accepted `derived/notes/org/…`. `noteCandidates` / `noteSourceChunks` still
+  queried only people, so an org with many mention edges never distilled.
+  This amends the dream compile source set. No new MCP tool, review kind,
+  migration, or search multiplier — org notes inherit `dream:notes` / the
+  existing ×1.5 compiled-source boost. Topic notes and wikilinks stay deferred.
+- **Decision:** `noteCandidates` unions person and org mention clusters
+  (same ≥3-chunk floor, parent-anchored `mentions` edges, compiled-note pages
+  excluded). `noteSourceChunks` resolves org names through `orgs` +
+  `org_aliases` the same way people use `person_aliases`. Retired orgs are
+  not candidates. Note tier is still max(source/edge/entity). Recovery
+  refresh is no longer person-only.
+- **Why:** The three person-hardcoded sites were the documented W7 gap.
+  Reusing the existing org path and alias tables avoids a new kind or
+  table. Retired orgs must not grow a living card.
+- **Approved by:** owner request to continue the current-state plan through the
+  ordinary backlog (2026-08-15).
+
+## 2026-08-15 — Goal digest pages
+
+- **Context:** Decision digests already exist as retrieval read-models
+  (`dream:decision-digest`). Goals had review + backlog index but no compiled
+  page, so "what am I driving toward?" fell back to raw goal rows. This amends
+  the dream-step vocabulary (`2e_compile_goal_digests`), the `dream:summary`
+  audit allowlist, and `COMPILED_SOURCES` (the ×1.5 compiled boost). No new
+  MCP tool, review kind, or migration. Topic-page clustering and wikilinks
+  stay deferred.
+- **Decision:** Dream compiles `derived/goals/<id>.md` for each non-superseded
+  goal that is missing a digest or whose goal/linked-task `updated_at` is
+  newer. Body is statement, horizon, why, and open/done task **counts** —
+  never task titles or bodies. Digest tier is max(goal, linked tasks). Source
+  is `dream:goal-digest`; contradiction and compiled-note evidence exclude
+  those pages like decision digests. Audit payload is candidate/compiled/
+  skipped counts only.
+- **Why:** Q4 seeded topic work from decisions+goals; decisions already had
+  a digest. Counts-only progress keeps a tier-2 task from leaking onto a
+  readable card. Reusing the decision-digest pattern avoids a new compiled-note
+  kind and the H1 recovery machine.
+- **Approved by:** owner request to continue the current-state plan through the
+  ordinary backlog (2026-08-15).
+
+## 2026-08-15 — Topic cluster pages and path-only wikilinks
+
+- **Context:** Q4 seeded topic work from decisions+goals. Org notes and
+  goal/decision digests already exist; clustering those compiled pages into
+  hubs, and resolving `[[wikilinks]]`, were the remaining W7 product slice.
+  Adding `topic` to `CompiledNoteKind` would expand the H1 recovery machine.
+  This amends the dream-step vocabulary (`2f_compile_topic_clusters`), the
+  `dream:summary` audit allowlist, and `COMPILED_SOURCES`. No new MCP tool,
+  review kind, or migration. Pages still have no alias table.
+- **Decision:** Dream compiles `derived/topics/<kind>--<id>.md` for each
+  non-superseded decision or goal that has at least two related compiled
+  pages (its own digest plus person/org notes for entities named or
+  mentioned by the seed). Body is a capped seed blurb and `[[path]]`
+  wikilinks — never task titles or member bodies. Tier is max(seed,
+  members). Source is `dream:topic-cluster`; contradiction and compiled-note
+  evidence exclude those pages like other digests. Wikilink resolution is
+  exact path or compiled-note `slug--uuid` via `pagesByPaths` /
+  `pagesByEntityUuidSuffix`; title-shaped targets do not resolve. Compiled
+  note archives are not rewritten with wikilinks.
+- **Why:** A hub page makes "what belongs with this decision/goal?"
+  retrievable without copying private member prose. Reusing the digest
+  pattern keeps topic pages off H1. Path-only resolution matches the
+  documented slug convention and cannot silently retarget when a title
+  changes.
+- **Approved by:** owner request to continue the current-state plan through the
+  ordinary backlog (2026-08-15).
+
+## 2026-08-15 — Isolated fictional demo stack
+
+- **Context:** Install already has `--with-demo` against the live persisted
+  Postgres identity. A second compose file that reused that volume or wrote
+  `.env` would violate the install lifecycle contract. W9 asked for an
+  experience-first demo path; the owner-recorded screencast stays owner-only.
+- **Decision:** `docker-compose.demo.yml` + `make demo` / `make demo-down`
+  start a separate Compose project (`minime-demo`) on loopback port 5433 with
+  its own volume. The script migrates and seeds with an explicit
+  `DATABASE_URL` and `bun --no-env-file`. It never reads or writes `.env`,
+  `data/`, or the live compose volume. Ollama is not bundled; host Ollama or
+  `--no-ollama` remains the inference path. `--with-demo` still seeds the
+  live database.
+- **Why:** Trying the fictional dataset should be possible without adopting
+  another local database or touching owner settings. A second Ollama in
+  Compose would duplicate the installer without adding isolation value.
+- **Approved by:** owner request to continue the current-state plan through the
+  ordinary backlog (2026-08-15).
+
+## 2026-08-15 — Flag leftover person-named extract orgs
+
+- **Context:** Extractor Fix A/B/C stop new person-named / fuzzy / high-edge
+  phantom orgs. Pre-Fix-B rows already in a live database were still
+  unswept. Auto-retype or delete on those rows is identity-level and
+  owner-live-data. This amends the closed repair-script allowlist
+  (`sweep-extract-person-orgs`), the `repair:*` audit verb/count
+  (`orgs_flagged`), and the `extract_suspect` reason vocabulary
+  (`person_name_extract_org`). No new MCP tool, review kind, or migration.
+- **Decision:** The owner-run repair flags non-retired `system:extract` orgs
+  whose name (possessive `'s` stripped) case-folds to a live person's
+  canonical name, alias, or first token (length ≥ 3). Human-confirmed orgs
+  are skipped. Payload is `flag_key`, `match_kind`, and `{type,id,name}`
+  endpoints — no source text. An open flag is not duplicated.
+  `retype-org-to-person` resolves the flag. The repair never retypes,
+  merges, or deletes. Running it against live data remains an explicit
+  owner action (committed script + mandatory pre-image).
+- **Why:** The leftover phantoms needed a sanctioned find-and-flag door
+  that matches Fix C's flag-only posture. Auto-retype would guess identity.
+  Keeping it off the nightly dream job avoids surprising the live graph.
+- **Approved by:** owner request to continue the current-state plan through the
+  ordinary backlog (2026-08-15).
+
+## 2026-08-15 — W6 optional local image describe
+
+- **Context:** Inbox parse already classified markdown, not raw bytes. Images
+  were `unsupported_type`. The 2026-07 program asked for an optional
+  `describe?` capability, hash-keyed mock captions, default tier-2-like
+  routing, and flag-only receipt handling. Owner VLM bake-off still precedes
+  committed `retrieval-img` floors. This amends `LlmProvider`, the
+  `egress:describe` audit vocabulary, review_queue kind `receipt_candidate`
+  (migration 041), and the runtime-child setting allowlist (`VLM_MODEL`,
+  `VLM_ROUTE_TIER1`/`TIER2`). No new MCP tool. CLIP/SigLIP stays deferred.
+- **Decision:** `parseInboxSourceAsync` captions JPEG/PNG/GIF/WEBP via local
+  Ollama `/api/generate` `images:[base64]` when `VLM_MODEL` is set, or via
+  hash-keyed mock captions when `MINIME_MOCK_OLLAMA=1`. Missing VLM degrades
+  to a filename stub. Images default photo/receipt→tier 2; document /
+  screenshot / whiteboard→tier 1 unless personal/financial. An explicit cloud
+  `VLM_ROUTE_*` fails at startup — cloud vision is not implemented. Receipt-like
+  images file normally and insert a flag-only `receipt_candidate` review item
+  (`inbox_item_id` + `image_kind`); nothing inserts a transaction. Audit
+  payloads for `egress:describe` are counts and routing metadata only — never
+  bytes or captions.
+- **Why:** The parse slot was ready; a local optional seam unblocks image
+  capture without a new network dependency or a floor claim. Flag-only
+  receipts keep Phase B off the tier-0 write path until the owner confirms.
+- **Approved by:** owner request to finish the remaining improve waves
+  (2026-08-15).
+
+## 2026-08-15 — W8 chunk spans and rechunk
+
+- **Context:** `chunks.parent_type`/`parent_id` already mean the parent row, so
+  the new grouping level is a **span**. The 2026-07 program asked for
+  `chunk_spans` + `chunks.span_id`, children as the embed/FTS/rerank unit,
+  envelope text from the span, and a `rechunk` CLI. Tightening children to
+  120–200 tokens would move sealed mock floors. Live MinimeBench/PMB remains
+  owner-scheduled. This amends the chunk write path, hybrid snippet text, and
+  adds owner CLI `rechunk`. No new MCP tool. `chunk_spans` is default-deny for
+  engineer-ro.
+- **Decision:** Heading sections become spans; children keep the current
+  350/400/40 bounds (**eval-calibration pending**). `indexParent` writes spans
+  then children. Search ranking still uses child text and still dedupes best
+  child per parent; the envelope snippet uses `coalesce(span.text, child.text)`.
+  `reembed` still only wipes vectors. `rechunk` reloads each parent row and
+  re-runs `indexParent` (then embeds). No PMB or floor lift is claimed.
+- **Why:** The schema and write path have to exist before a live battery can
+  change child size. Keeping current child bounds avoids a mock-eval
+  regression while still returning section-sized envelope text.
+- **Approved by:** owner request to finish the remaining improve waves
+  (2026-08-15).

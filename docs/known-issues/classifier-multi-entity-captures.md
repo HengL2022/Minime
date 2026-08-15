@@ -4,8 +4,9 @@
 **Severity:** medium (silent data-shape loss — no error, no review-queue flag)
 **Status:** mitigated 2026-08-14 — deterministic companion split for confident
 legal-suffix / enumerated-company captures; first-class org/person capture types;
-LLM entity-plan fallback for suffix-less multi-name captures. A 1..N
-classify-and-file split of mixed intents remains out of scope.
+LLM entity-plan fallback for suffix-less multi-name captures. Mixed-intent
+companions for strong line-prefix dumps shipped 2026-08-15. A model-driven
+1..N split of narrative dumps without prefixes remains out of scope.
 
 ## Symptom
 
@@ -84,10 +85,10 @@ Tests: `test/segment.test.ts`, `test/multi-entity-capture.test.ts`.
 
 ## Still open
 
-1. **1..N classify-and-file split.** A mixed dump that is a task *and* an
-   interaction *and* a note still files one primary type. The entity-plan
-   fallback only mints leftover orgs/people. Splitting into several primary
-   rows would change inbox cardinality and stays deferred.
+1. **Model-driven mixed-intent split.** A narrative dump without line prefixes
+   (`todo:` / `met` / `note:` / …) still files one primary type. The 2026-08-15
+   heuristic only splits 2–4 strong mixed lines (or blank-line blocks). Changing
+   `inbox_items` to N `filed_id`s stays deferred.
 
 ## Shipped after the companion split
 
@@ -108,9 +109,15 @@ Tests: `test/segment.test.ts`, `test/multi-entity-capture.test.ts`.
 3. **`minime_search` withheld-hit signal.** Already shipped as
    `suppressedTier2Count` / a gaps line on locked sessions (`hybridSearchDetailed`,
    migration 039). Not required for the companion split.
+4. **Mixed-intent companions (2026-08-15).** A dump whose lines start with
+   strong type prefixes (`todo:` / `task:`, `met`/`called`/…, `note:` /
+   `journal:`, `decision:`/`decided`, `org:`/`person:`) files the first item as
+   the inbox primary and leftover typed rows as companions (`derived_from` the
+   inbox id, `inbox:split-intents`). Same-type lines, more than four mixed
+   lines, leading prose, and `minime_refile` do not auto-split. No LLM.
 
 ## Workaround (still useful)
 
 Capture **one entity per call** with an unambiguous first line when neither the
-legal-suffix cue nor the weaker multi-name cue will fire. Mixed-intent dumps
-(task + interaction + note) still need a split at the door.
+legal-suffix cue nor the weaker multi-name cue will fire. Narrative mixed-intent
+dumps without line prefixes still need a split at the door.

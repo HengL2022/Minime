@@ -76,7 +76,15 @@ git clone https://github.com/HengL2022/Minime minime && cd minime && bash script
 
 Non-interactive, safe to re-run, installs everything missing (bun, Postgres+pgvector via
 Docker/brew/apt, Ollama + models), migrates, verifies, and prints how to register the MCP
-server. Add `--with-demo` for a fictional dataset to explore. Full contract — flags,
+server. Add `--with-demo` to seed the **live** database with the fictional dataset. To
+try that dataset on an isolated stack that cannot touch the live volume or `.env`:
+
+```
+make demo        # Postgres on 127.0.0.1:5433 + migrate + seed
+make demo-down   # stop the demo stack (volume kept)
+```
+
+Register MCP against the demo URL printed by `make demo`. Full contract — flags,
 degraded modes, machine-parsable output for coding agents — in [AGENTS.md](AGENTS.md).
 
 **Agent orientation after install:** before using Minime MCP tools, an AI harness should read
@@ -155,9 +163,10 @@ bun run src/cli.ts import:health export.xml
 bun run src/cli.ts import:email-meta ~/Maildir
 ```
 
-Capture: drop text/markdown files into `data/inbox/` (iOS Shortcut + Syncthing, share sheet,
-or `minime_capture` from an agent). The watcher classifies and files them; anything it isn't
-sure about waits for the evening review.
+Capture: drop text, markdown, PDF, office, mail, or image files into `data/inbox/`
+(iOS Shortcut + Syncthing, share sheet, or `minime_capture` from an agent). The watcher
+parses, classifies, and files them; anything it isn't sure about waits for the evening
+review. Images caption locally when `VLM_MODEL` is set.
 
 Session capture (optional): `make install-hooks` adds a Claude Code `SessionEnd` hook that
 summarizes every agent work session — first request, outcome, files touched — into

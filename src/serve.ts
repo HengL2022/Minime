@@ -54,6 +54,9 @@ const RUNTIME_SETTING_ENV = new Set([
   "RERANK_TOP_IN",
   "RERANK_URL",
   "TIER2_UNLOCK_MAX_MINUTES",
+  "VLM_MODEL",
+  "VLM_ROUTE_TIER1",
+  "VLM_ROUTE_TIER2",
 ]);
 const RUNTIME_OS_ENV = new Set(["LANG", "LC_ALL", "PATH", "TMPDIR", "TZ"]);
 const PROVIDER_CREDENTIAL_ENV: Record<string, readonly string[]> = {

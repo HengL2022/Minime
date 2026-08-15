@@ -10,7 +10,7 @@ import {
   setChunkEmbedding,
 } from "../db/repo";
 import { config } from "../util/config";
-import { chunkMarkdown } from "./chunker";
+import { chunkMarkdownSpans } from "./chunker";
 import { embedTexts } from "./embed";
 
 export interface IndexParentOptions {
@@ -30,12 +30,12 @@ export async function indexParent(
 ): Promise<number> {
   if (tier === 0) throw new Error("TIER0_PROSE_BLOCKED");
   if (tier !== 1 && tier !== 2) throw new Error("INVALID_CONTENT_TIER");
-  const chunks = chunkMarkdown(md, title);
+  const spans = chunkMarkdownSpans(md, title);
   if (options.tierMode === "promote-page-floor") {
     if (parentType !== "page") throw new Error("promote-page-floor requires page parent");
-    await replacePageChunksMonotonic(parentId, chunks, tier);
+    await replacePageChunksMonotonic(parentId, spans, tier);
   } else {
-    await replaceChunks(parentType, parentId, chunks, tier);
+    await replaceChunks(parentType, parentId, spans, tier);
   }
   // typed-edge extraction is per-write (self-wiring graph); best-effort like embeddings —
   // the dream backlog pass catches anything missed here
@@ -57,7 +57,7 @@ export async function indexParent(
   // Inbox finalization keeps its database transaction short and deterministic: chunks and
   // graph edges commit with the parent, while network-backed embeddings drain after commit.
   if (!options.deferEmbeddings) await drainEmbedBacklog(64).catch(() => {});
-  return chunks.length;
+  return spans.reduce((n, span) => n + span.children.length, 0);
 }
 
 // Companion identities minted after extract-edges may already exist (created=false)

@@ -92,12 +92,38 @@ export function classifyIsCloudForTier(tier: ClassifyTier): boolean {
 export function validateProviderRoutes(): void {
   classifyRouteForTier(1);
   classifyRouteForTier(2);
+  describeRouteForTier(1);
+  describeRouteForTier(2);
+}
+
+/** W6: images default to the content tier of the capture (photo/receipt→2).
+ * VLM_ROUTE_TIER* may only name ollama — cloud vision is not implemented. */
+export function describeRouteForTier(tier: ClassifyTier): ProviderName {
+  if (!Number.isInteger(config.cloudMaxTier) || config.cloudMaxTier < 0 || config.cloudMaxTier > 2)
+    throw new Error(
+      `CLOUD_MAX_TIER must be an integer 0, 1, or 2 — parsed '${config.cloudMaxTier}' from the environment`,
+    );
+  const route = tier === 2 ? config.vlmRouteTier2 : config.vlmRouteTier1;
+  if (route && !PROVIDER_NAMES.includes(route))
+    throw new Error(
+      `VLM_ROUTE_TIER${tier}='${route}' unknown (ollama|anthropic|openai|openrouter|bedrock)`,
+    );
+  if (route && providerIsCloud(route))
+    throw new Error(
+      `VLM_ROUTE_TIER${tier}=${route} is not supported: describe is local-only (ollama)`,
+    );
+  return route ?? "ollama";
+}
+
+export function describeProviderForTier(tier: ClassifyTier, fetchFn?: FetchFn): LlmProvider {
+  const providerName = describeRouteForTier(tier);
+  return withEgressAudit(build(providerName, fetchFn), tier);
 }
 
 function withEgressAudit(p: LlmProvider, routeTier?: number): LlmProvider {
   if (!p.isCloud) return p;
   const auditedCall = async <T>(
-    kind: "embed" | "classify",
+    kind: "embed" | "classify" | "describe",
     model: string,
     items: number,
     work: () => Promise<T>,
@@ -135,6 +161,10 @@ function withEgressAudit(p: LlmProvider, routeTier?: number): LlmProvider {
       : undefined,
     completeJson: async (prompt) =>
       auditedCall("classify", p.model, 1, () => p.completeJson(prompt)),
+    describe: p.describe
+      ? async (image, prompt) =>
+          auditedCall("describe", p.vlmModel ?? p.model, 1, () => p.describe!(image, prompt))
+      : undefined,
   };
 }
 

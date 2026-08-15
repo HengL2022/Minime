@@ -24,9 +24,12 @@ type AuditPayloadKind =
   | "inboxSplitDecision"
   | "inboxSplitDoneTask"
   | "inboxSplitEntities"
+  | "inboxSplitIntents"
   | "inboxUnfiled"
   | "llmClassifyEgress"
   | "llmClassifyOutcome"
+  | "llmDescribeEgress"
+  | "llmDescribeOutcome"
   | "llmEmbedEgress"
   | "llmEmbedOutcome"
   | "onboardComplete"
@@ -44,7 +47,7 @@ const payloadKinds = new WeakMap<object, AuditPayloadKind>();
 type AuditDelivery = "transport" | "direct";
 type AuditImporter = "calendar" | "email_meta" | "health" | "transactions";
 type AuditProvider = "ollama" | "anthropic" | "openai" | "openrouter" | "bedrock";
-type AuditEgressKind = "embed" | "classify";
+type AuditEgressKind = "embed" | "classify" | "describe";
 type ClassifierKind =
   | "task"
   | "journal"
@@ -80,6 +83,7 @@ type RepairScript =
   | "retype-org-to-person"
   | "merge-person"
   | "recategorize-transactions"
+  | "sweep-extract-person-orgs"
   | "unknown";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -325,7 +329,7 @@ type LlmEgressInput = {
 };
 
 function llmEgress(input: LlmEgressInput): AuditPayload {
-  const kind = fixed(input.kind, ["embed", "classify"]);
+  const kind = fixed(input.kind, ["embed", "classify", "describe"]);
   if (kind === "embed") {
     if ("routeTier" in input && input.routeTier !== undefined) invalidPayload();
     return construct("llmEmbedEgress", {
@@ -335,12 +339,13 @@ function llmEgress(input: LlmEgressInput): AuditPayload {
     });
   }
   if (input.items !== 1) invalidPayload();
-  return construct("llmClassifyEgress", {
+  const routed = {
     provider: fixed(input.provider, ["anthropic", "openai", "openrouter", "bedrock"]),
     model: modelIdentifier(input.model),
-    items: 1,
+    items: 1 as const,
     ...(input.routeTier === undefined ? {} : { route_tier: routeTier(input.routeTier) }),
-  });
+  };
+  return construct(kind === "describe" ? "llmDescribeEgress" : "llmClassifyEgress", routed);
 }
 
 function llmEgressOutcome(input: {
@@ -348,8 +353,14 @@ function llmEgressOutcome(input: {
   intentEventId: string;
   status: "succeeded" | "failed";
 }): AuditPayload {
-  const kind = fixed(input.kind, ["embed", "classify"]);
-  return construct(kind === "embed" ? "llmEmbedOutcome" : "llmClassifyOutcome", {
+  const kind = fixed(input.kind, ["embed", "classify", "describe"]);
+  const payloadKind =
+    kind === "embed"
+      ? "llmEmbedOutcome"
+      : kind === "describe"
+        ? "llmDescribeOutcome"
+        : "llmClassifyOutcome";
+  return construct(payloadKind, {
     intent_event_id: eventId(input.intentEventId),
     status: fixed(input.status, ["succeeded", "failed"]),
   });
@@ -434,6 +445,8 @@ const DREAM_STEPS = [
   "2b_compile_notes",
   "2c_compile_decision_digests",
   "2d_goal_backlog_index",
+  "2e_compile_goal_digests",
+  "2f_compile_topic_clusters",
   "3_contradictions",
   "3b_phantom_persons",
   "3c_validate_edges",
@@ -480,6 +493,12 @@ function dreamSummary(input: Record<string, unknown>): AuditPayload {
     decision_digest_compiled_count: nestedCount(input["2c_compile_decision_digests"], "compiled"),
     decision_digest_skipped_count: nestedCount(input["2c_compile_decision_digests"], "skipped"),
     goal_backlog_indexed_count: summaryCount(input["2d_goal_backlog_index"]),
+    goal_digest_candidate_count: nestedCount(input["2e_compile_goal_digests"], "candidates"),
+    goal_digest_compiled_count: nestedCount(input["2e_compile_goal_digests"], "compiled"),
+    goal_digest_skipped_count: nestedCount(input["2e_compile_goal_digests"], "skipped"),
+    topic_cluster_candidate_count: nestedCount(input["2f_compile_topic_clusters"], "candidates"),
+    topic_cluster_compiled_count: nestedCount(input["2f_compile_topic_clusters"], "compiled"),
+    topic_cluster_skipped_count: nestedCount(input["2f_compile_topic_clusters"], "skipped"),
     contradiction_count: summaryCount(input["3_contradictions"]),
     phantom_person_count: summaryCount(input["3b_phantom_persons"]),
     high_edge_org_count: summaryCount(input["3d_high_edge_orgs"]),
@@ -506,11 +525,16 @@ type RepairCompleteCounts = {
   aliases_moved?: number;
   interactions_repointed?: number;
   transactions_recategorized?: number;
+  orgs_flagged?: number;
 };
 
 type RepairInput =
   | {
-      script: "retype-org-to-person" | "merge-person" | "recategorize-transactions";
+      script:
+        | "retype-org-to-person"
+        | "merge-person"
+        | "recategorize-transactions"
+        | "sweep-extract-person-orgs";
       phase: "complete";
       code: "repair_complete";
       counts?: RepairCompleteCounts;
@@ -530,6 +554,7 @@ function repair(input: RepairInput): AuditPayload {
     "retype-org-to-person",
     "merge-person",
     "recategorize-transactions",
+    "sweep-extract-person-orgs",
     "unknown",
   ]);
   const code =
@@ -547,7 +572,8 @@ function repair(input: RepairInput): AuditPayload {
     phase === "complete" &&
     script !== "retype-org-to-person" &&
     script !== "merge-person" &&
-    script !== "recategorize-transactions"
+    script !== "recategorize-transactions" &&
+    script !== "sweep-extract-person-orgs"
   ) {
     invalidPayload();
   }
@@ -569,6 +595,9 @@ function repair(input: RepairInput): AuditPayload {
       counts.transactions_recategorized = nonNegativeInteger(
         input.counts.transactions_recategorized,
       );
+    }
+    if (input.counts?.orgs_flagged !== undefined) {
+      counts.orgs_flagged = nonNegativeInteger(input.counts.orgs_flagged);
     }
   }
   return construct("repair", {
@@ -796,6 +825,34 @@ function inboxSplitEntities(input: { orgIds: string[]; personIds: string[] }): A
   });
 }
 
+const FILED_TABLES = [
+  "tasks",
+  "journal_entries",
+  "interactions",
+  "pages",
+  "decisions",
+  "orgs",
+  "people",
+] as const;
+
+function inboxSplitIntents(input: {
+  extraTypes: ClassifierKind[];
+  extraTables: FiledTable[];
+  extraIds: string[];
+}): AuditPayload {
+  if (
+    input.extraTypes.length !== input.extraTables.length ||
+    input.extraTypes.length !== input.extraIds.length
+  )
+    invalidPayload();
+  return construct("inboxSplitIntents", {
+    extra_count: positiveInteger(input.extraIds.length),
+    extra_types: input.extraTypes.map((type) => classifierKind(type)),
+    extra_tables: input.extraTables.map((table) => fixed(table, FILED_TABLES)),
+    extra_ids: uuids(input.extraIds),
+  });
+}
+
 function inboxFiled(input: {
   kind: ClassifierKind;
   confidence: number;
@@ -805,15 +862,7 @@ function inboxFiled(input: {
   return construct("inboxFiled", {
     type: classifierKind(input.kind),
     confidence: ratio(input.confidence),
-    filed_table: fixed(input.filedTable, [
-      "tasks",
-      "journal_entries",
-      "interactions",
-      "pages",
-      "decisions",
-      "orgs",
-      "people",
-    ]),
+    filed_table: fixed(input.filedTable, FILED_TABLES),
     filed_id: uuid(input.filedId),
   });
 }
@@ -828,15 +877,7 @@ function inboxRefiled(input: {
 }): AuditPayload {
   return construct("inboxRefiled", {
     type: classifierKind(input.type),
-    filed_table: fixed(input.filedTable, [
-      "tasks",
-      "journal_entries",
-      "interactions",
-      "pages",
-      "decisions",
-      "orgs",
-      "people",
-    ]),
+    filed_table: fixed(input.filedTable, FILED_TABLES),
     filed_id: uuid(input.filedId),
   });
 }
@@ -876,6 +917,7 @@ export const auditPayload = Object.freeze({
   inboxSplitDecision,
   inboxSplitDoneTask,
   inboxSplitEntities,
+  inboxSplitIntents,
   inboxUnfiled,
   llmEgress,
   llmEgressOutcome,
@@ -938,6 +980,8 @@ function expectedPayloadKind(verb: string, payload: AuditPayload): AuditPayloadK
     "dream:summary": "dreamSummary",
     "egress:classify": "llmClassifyEgress",
     "egress:classify:outcome": "llmClassifyOutcome",
+    "egress:describe": "llmDescribeEgress",
+    "egress:describe:outcome": "llmDescribeOutcome",
     "egress:embed": "llmEmbedEgress",
     "egress:embed:outcome": "llmEmbedOutcome",
     "entity:tier:restored": "entityTierRestored",
@@ -952,6 +996,7 @@ function expectedPayloadKind(verb: string, payload: AuditPayload): AuditPayloadK
     "inbox:split-decision": "inboxSplitDecision",
     "inbox:split-done-task": "inboxSplitDoneTask",
     "inbox:split-entities": "inboxSplitEntities",
+    "inbox:split-intents": "inboxSplitIntents",
     "inbox:unfiled": "inboxUnfiled",
     "onboard:complete": "onboardComplete",
     "person:upsert": "personUpsert",
@@ -979,6 +1024,7 @@ function expectedPayloadKind(verb: string, payload: AuditPayload): AuditPayloadK
     "repair:retype-org-to-person": "retype-org-to-person",
     "repair:merge-person": "merge-person",
     "repair:recategorize-transactions": "recategorize-transactions",
+    "repair:sweep-extract-person-orgs": "sweep-extract-person-orgs",
     "repair:unknown": "unknown",
   };
   const script = repairScriptByVerb[verb];

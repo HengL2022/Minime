@@ -1,0 +1,24 @@
+# Isolated fictional-demo Postgres. Separate project, volume, container, and
+# host port from docker-compose.yml so `make demo` cannot adopt or clobber the
+# owner's persisted live database identity. Ollama stays on the host (or
+# `--no-ollama`); this file does not pull models.
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: minime-demo-db
+    environment:
+      POSTGRES_USER: minime
+      POSTGRES_PASSWORD: minime
+      POSTGRES_DB: minime
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - minime-demo-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U minime"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  minime-demo-pgdata:

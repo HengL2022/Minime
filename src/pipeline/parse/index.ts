@@ -2,10 +2,20 @@
 // Hash, identity, and archive stay on the original bytes. Originals live at
 // data/files/<yyyy>/<hash>.<ext> with append-only data/files/manifest.ndjson.
 
+import { describeImage } from "../../llm/describe";
+import { sha256Hex } from "../../util/hash";
 import { extractCsvMarkdown } from "./csv";
 import { extractDocxMarkdown, looksLikeDocx } from "./docx";
 import { extractEmlMarkdown, looksLikeRfc822 } from "./eml";
 import { InboxParseError } from "./error";
+import {
+  imageMarkdown,
+  imageMimeFor,
+  imageParseMeta,
+  inferImageKind,
+  looksLikeImage,
+  suggestedImageTier,
+} from "./image";
 import { extractPdfMarkdown } from "./pdf";
 import { hasPdfMagic, inboxExtension, isValidUtf8Text, textMimeForExt } from "./sniff";
 import { extractXlsxMarkdown, looksLikeXlsx } from "./xlsx";
@@ -32,8 +42,23 @@ function runParser(
   }
 }
 
+function parseImageStub(
+  filePath: string,
+  bytes: Uint8Array,
+  caption: string | null,
+): InboxParseResult {
+  const kind = inferImageKind(filePath, caption ?? "");
+  const suggestedTier = suggestedImageTier(kind, filePath, caption ?? "");
+  return {
+    markdown: imageMarkdown({ filePath, kind, suggestedTier, caption }),
+    mime: imageMimeFor(filePath, bytes),
+    meta: imageParseMeta({ kind, suggestedTier, described: caption !== null, bytes }),
+  };
+}
+
 export function parseInboxSource(filePath: string, bytes: Uint8Array): InboxParseResult {
   if (bytes.length === 0) return { markdown: "", mime: "text/plain", meta: { parser: "text" } };
+  if (looksLikeImage(filePath, bytes)) return parseImageStub(filePath, bytes, null);
   const ext = inboxExtension(filePath);
   if (hasPdfMagic(bytes) || ext === ".pdf") {
     return runParser("application/pdf", "pdf", extractPdfMarkdown, bytes);
@@ -66,4 +91,28 @@ export function parseInboxSource(filePath: string, bytes: Uint8Array): InboxPars
     };
   }
   throw new InboxParseError("unsupported_type", "application/octet-stream");
+}
+
+export async function parseInboxSourceAsync(
+  filePath: string,
+  bytes: Uint8Array,
+): Promise<InboxParseResult> {
+  if (bytes.length === 0 || !looksLikeImage(filePath, bytes)) {
+    return parseInboxSource(filePath, bytes);
+  }
+  const mime = imageMimeFor(filePath, bytes);
+  const kindGuess = inferImageKind(filePath);
+  const tier = suggestedImageTier(kindGuess, filePath);
+  let caption: string | null = null;
+  try {
+    caption = await describeImage({
+      mime,
+      base64: Buffer.from(bytes).toString("base64"),
+      sha256: sha256Hex(bytes),
+      tier,
+    });
+  } catch {
+    caption = null;
+  }
+  return parseImageStub(filePath, bytes, caption);
 }

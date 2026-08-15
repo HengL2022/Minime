@@ -74,12 +74,16 @@ describe("provider configuration", () => {
       classifyProvider: "anthropic",
       providerRouteTier1: "bedrock",
       providerRouteTier2: "ollama",
+      vlmRouteTier1: undefined,
+      vlmRouteTier2: undefined,
     });
     expect(parseProviderEnvironment({})).toEqual({
       embedProvider: "ollama",
       classifyProvider: "ollama",
       providerRouteTier1: undefined,
       providerRouteTier2: undefined,
+      vlmRouteTier1: undefined,
+      vlmRouteTier2: undefined,
     });
   });
 

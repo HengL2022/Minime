@@ -581,7 +581,7 @@ export async function logEvent(e: {
   return row.id;
 }
 
-type EgressKind = "embed" | "classify";
+type EgressKind = "embed" | "classify" | "describe";
 
 async function insertDurableEgressEvent(
   verb: `egress:${EgressKind}` | `egress:${EgressKind}:outcome`,
@@ -797,25 +797,61 @@ export async function parentHasChunks(parentType: ParentType, parentId: string):
   return (row?.n ?? 0) > 0;
 }
 
+export interface ChunkSpanWrite {
+  text: string;
+  children: string[];
+}
+
+function asChunkSpans(input: string[] | ChunkSpanWrite[]): ChunkSpanWrite[] {
+  if (input.length === 0) return [];
+  if (typeof input[0] === "string") {
+    return (input as string[]).map((text) => ({ text, children: [text] }));
+  }
+  return input as ChunkSpanWrite[];
+}
+
+async function writeChunkSpans(
+  tx: DbTransaction,
+  parentType: ParentType,
+  parentId: string,
+  spans: ChunkSpanWrite[],
+  tier: number,
+): Promise<number> {
+  await tx`delete from chunks where parent_type = ${parentType} and parent_id = ${parentId}`;
+  await tx`delete from chunk_spans where parent_type = ${parentType} and parent_id = ${parentId}`;
+  let ord = 0;
+  for (let spanOrd = 0; spanOrd < spans.length; spanOrd++) {
+    const span = spans[spanOrd]!;
+    // Client-generated id: INSERT … RETURNING is also checked against tier_read, so a
+    // locked app writing a tier-2 span would fail the same way it cannot SELECT it back.
+    const spanId = crypto.randomUUID();
+    await tx`
+      insert into chunk_spans (id, parent_type, parent_id, ord, text, tier)
+      values (${spanId}, ${parentType}, ${parentId}, ${spanOrd}, ${span.text}, ${tier})`;
+    for (const child of span.children) {
+      await tx`insert into chunks (parent_type, parent_id, ord, text, tier, span_id)
+               values (${parentType}, ${parentId}, ${ord}, ${child}, ${tier}, ${spanId})`;
+      ord += 1;
+    }
+  }
+  return ord;
+}
+
 export async function replaceChunks(
   parentType: ParentType,
   parentId: string,
-  texts: string[],
+  texts: string[] | ChunkSpanWrite[],
   tier: number,
 ): Promise<void> {
   assertProseTier(tier);
   await withDbTransaction(async (tx) => {
-    await tx`delete from chunks where parent_type = ${parentType} and parent_id = ${parentId}`;
-    for (let ord = 0; ord < texts.length; ord++) {
-      await tx`insert into chunks (parent_type, parent_id, ord, text, tier)
-               values (${parentType}, ${parentId}, ${ord}, ${texts[ord]!}, ${tier})`;
-    }
+    await writeChunkSpans(tx, parentType, parentId, asChunkSpans(texts), tier);
   });
 }
 
 export async function replacePageChunksMonotonic(
   pageId: string,
-  texts: string[],
+  texts: string[] | ChunkSpanWrite[],
   requestedTier: 1 | 2,
 ): Promise<{ count: number; effectiveTier: 1 | 2 }> {
   assertProseTier(requestedTier);
@@ -836,13 +872,135 @@ export async function replacePageChunksMonotonic(
     ];
     for (const tier of evidence) assertProseTier(tier);
     const effectiveTier = Math.max(requestedTier, ...evidence) as 1 | 2;
-    await tx`delete from chunks where parent_type = 'page' and parent_id = ${pageId}`;
-    for (let ord = 0; ord < texts.length; ord++) {
-      await tx`insert into chunks (parent_type, parent_id, ord, text, tier)
-               values ('page', ${pageId}, ${ord}, ${texts[ord]!}, ${effectiveTier})`;
-    }
-    return { count: texts.length, effectiveTier };
+    const count = await writeChunkSpans(tx, "page", pageId, asChunkSpans(texts), effectiveTier);
+    return { count, effectiveTier };
   });
+}
+
+export async function listChunkParents(): Promise<{ parentType: ParentType; parentId: string }[]> {
+  const rows = (await db()`select parent_type, parent_id from chunks group by 1, 2`) as {
+    parent_type: string;
+    parent_id: string;
+  }[];
+  return rows
+    .filter((row) => row.parent_type in PARENTS)
+    .map((row) => ({
+      parentType: row.parent_type as ParentType,
+      parentId: row.parent_id,
+    }));
+}
+
+function rechunkTier(value: unknown): 1 | 2 | null {
+  return value === 1 || value === 2 ? value : null;
+}
+
+function joinedProse(parts: Array<string | null | undefined>): string {
+  return parts.filter((part) => typeof part === "string" && part.trim()).join("\n\n");
+}
+
+export async function parentRechunkSource(
+  parentType: ParentType,
+  parentId: string,
+): Promise<{ text: string; title?: string; tier: 1 | 2 } | null> {
+  const source = await loadRechunkRow(parentType, parentId);
+  if (!source) return null;
+  const tier = rechunkTier(Number(source.tier));
+  if (!tier) return null;
+  const text = source.text.trim();
+  if (!text) return null;
+  return { text, title: source.title, tier };
+}
+
+async function loadRechunkRow(
+  parentType: ParentType,
+  parentId: string,
+): Promise<{ text: string; title?: string; tier: number } | null> {
+  switch (parentType) {
+    case "page": {
+      const [row] = await db()`select title, body_md, tier from pages where id = ${parentId}`;
+      return row ? { text: String(row.body_md ?? ""), title: row.title, tier: row.tier } : null;
+    }
+    case "journal": {
+      const [row] =
+        await db()`select entry_md, at, tier from journal_entries where id = ${parentId}`;
+      return row
+        ? {
+            text: String(row.entry_md ?? ""),
+            title: `Journal ${localDateStr(row.at)}`,
+            tier: row.tier,
+          }
+        : null;
+    }
+    case "interaction": {
+      const [row] = await db()`select summary, tier from interactions where id = ${parentId}`;
+      return row ? { text: String(row.summary ?? ""), tier: row.tier } : null;
+    }
+    case "decision": {
+      const [row] =
+        await db()`select question, reasoning, tier from decisions where id = ${parentId}`;
+      return row
+        ? { text: joinedProse([row.question, row.reasoning]), title: row.question, tier: row.tier }
+        : null;
+    }
+    case "decision_branch": {
+      const [row] = await db()`
+        select b.label, b.status, b.note, b.would_be_right_if, b.tier, d.question
+        from decision_branches b join decisions d on d.id = b.decision_id
+        where b.id = ${parentId}`;
+      return row
+        ? {
+            text: joinedProse([
+              `# Decision branch: ${row.label}`,
+              `Decision: ${row.question}`,
+              `Status: ${row.status}`,
+              row.note ? `Note: ${row.note}` : "",
+              row.would_be_right_if ? `Would be right if: ${row.would_be_right_if}` : "",
+            ]),
+            title: row.label,
+            tier: row.tier,
+          }
+        : null;
+    }
+    case "task": {
+      const [row] = await db()`select title, body, tier from tasks where id = ${parentId}`;
+      return row
+        ? { text: joinedProse([row.title, row.body]), title: row.title, tier: row.tier }
+        : null;
+    }
+    case "goal": {
+      const [row] = await db()`select statement, why, tier from goals where id = ${parentId}`;
+      return row
+        ? { text: joinedProse([row.statement, row.why]), title: row.statement, tier: row.tier }
+        : null;
+    }
+    case "value": {
+      const [row] =
+        await db()`select statement, notes, tier from values_items where id = ${parentId}`;
+      return row
+        ? { text: joinedProse([row.statement, row.notes]), title: row.statement, tier: row.tier }
+        : null;
+    }
+    case "principle": {
+      const [row] = await db()`select rule, tier from principles where id = ${parentId}`;
+      return row ? { text: String(row.rule ?? ""), title: row.rule, tier: row.tier } : null;
+    }
+    case "person": {
+      const [row] = await db()`select canonical_name, tier from people where id = ${parentId}`;
+      return row
+        ? { text: String(row.canonical_name ?? ""), title: row.canonical_name, tier: row.tier }
+        : null;
+    }
+    case "org": {
+      const [row] = await db()`select canonical_name, tier from orgs where id = ${parentId}`;
+      return row
+        ? { text: String(row.canonical_name ?? ""), title: row.canonical_name, tier: row.tier }
+        : null;
+    }
+    case "commitment": {
+      const [row] = await db()`select what, tier from commitments where id = ${parentId}`;
+      return row ? { text: String(row.what ?? ""), title: row.what, tier: row.tier } : null;
+    }
+  }
 }
 
 export async function chunksMissingEmbedding(
@@ -888,6 +1046,8 @@ export interface Candidate {
   parent_id: string;
   ord: number;
   text: string;
+  /** Envelope text: the span when one exists, else the child. Ranking still uses `text`. */
+  span_text?: string;
   cosine: number;
   fts: number;
 }
@@ -919,9 +1079,11 @@ export async function ftsCandidates(
   const orQuery = ftsOrQuery(query);
   return db()`
     select c.id, c.parent_type, c.parent_id, c.ord, c.text,
+           coalesce(sp.text, c.text) as span_text,
            0::float as cosine,
            ts_rank_cd(c.tsv, websearch_to_tsquery('english', ${orQuery}))::float as fts
     from chunks c
+    left join chunk_spans sp on sp.id = c.span_id
     where c.tier >= 1 and c.tier <= ${allowed}
       and c.tsv @@ websearch_to_tsquery('english', ${orQuery})
       and (${types === null} or c.parent_type = any(${types ?? []}))
@@ -940,9 +1102,11 @@ export async function vectorCandidates(
   const vec = JSON.stringify(embedding);
   return db()`
     select c.id, c.parent_type, c.parent_id, c.ord, c.text,
+           coalesce(sp.text, c.text) as span_text,
            (1 - (c.embedding <=> ${vec}::vector))::float as cosine,
            0::float as fts
     from chunks c
+    left join chunk_spans sp on sp.id = c.span_id
     where c.tier >= 1 and c.tier <= ${allowed} and c.embedding is not null
       and (${types === null} or c.parent_type = any(${types ?? []}))
       and (${parentIds === null} or c.parent_id = any(${parentIds ?? []}))
@@ -1483,6 +1647,10 @@ export function highEdgeExtractOrgFlagKey(orgId: string): string {
   return `high_edge_extract_org:${orgId}`;
 }
 
+export function extractPersonNamedOrgFlagKey(orgId: string): string {
+  return `person_name_extract_org:${orgId}`;
+}
+
 export async function retypeOrgToPerson(
   orgId: string,
   opts: { relation?: string | null; reason?: string } = {},
@@ -1635,7 +1803,10 @@ export async function retypeOrgToPerson(
       update review_queue
       set status = 'resolved', resolved_at = ${now()}
       where status = 'open' and kind = 'extract_suspect'
-        and payload ->> 'flag_key' = ${highEdgeExtractOrgFlagKey(orgId)}`;
+        and payload ->> 'flag_key' in (
+          ${highEdgeExtractOrgFlagKey(orgId)},
+          ${extractPersonNamedOrgFlagKey(orgId)}
+        )`;
 
     return { personId, orgId, created, edgesRepointed: edgesRepointed as number };
   });
@@ -3141,6 +3312,8 @@ async function excludedDerivedPageIdsForCompiledNoteSources(): Promise<string[]>
     .filter(
       (page) =>
         page.source === "dream:decision-digest" ||
+        page.source === "dream:goal-digest" ||
+        page.source === "dream:topic-cluster" ||
         recognizeCompiledNote({ path: page.path, source: page.source, bodyMd: page.body_md })
           .recognized,
     )
@@ -5173,6 +5346,112 @@ export async function highEdgeExtractOrgRecentlyFlagged(orgId: string): Promise<
   return rows.length > 0;
 }
 
+export type PersonNameOrgMatchKind = "exact" | "first_token" | "possessive";
+
+export interface ExtractPersonNamedOrgCandidate {
+  org_id: string;
+  org_name: string;
+  match_kind: PersonNameOrgMatchKind;
+  people: { id: string; name: string }[];
+}
+
+function personNameOrgMatchKind(
+  rawKey: string,
+  strippedKey: string,
+  keyKind: string,
+): PersonNameOrgMatchKind {
+  if (rawKey !== strippedKey) return "possessive";
+  if (keyKind === "first_token") return "first_token";
+  return "exact";
+}
+
+export async function extractPersonNamedOrgCandidates(): Promise<ExtractPersonNamedOrgCandidate[]> {
+  const rows = (await db()`
+    with person_keys as (
+      select p.id as person_id, p.canonical_name as person_name,
+             lower(btrim(p.canonical_name)) as key, 'full'::text as key_kind
+      from people p
+      where p.superseded_at is null and p.tier in (1, 2) and btrim(p.canonical_name) <> ''
+      union
+      select p.id, p.canonical_name,
+             lower(split_part(btrim(p.canonical_name), ' ', 1)), 'first_token'
+      from people p
+      where p.superseded_at is null and p.tier in (1, 2)
+        and btrim(p.canonical_name) like '% %'
+        and length(split_part(btrim(p.canonical_name), ' ', 1)) >= 3
+      union
+      select p.id, p.canonical_name, lower(btrim(a.alias)), 'alias'
+      from person_aliases a
+      join people p on p.id = a.person_id
+      where p.superseded_at is null and a.tier in (1, 2) and p.tier in (1, 2)
+        and btrim(a.alias) <> ''
+    ),
+    orgs_norm as (
+      select o.id, o.canonical_name,
+             lower(btrim(o.canonical_name)) as raw_key,
+             lower(btrim(regexp_replace(o.canonical_name, '[''’]s$', '', 'i'))) as stripped_key
+      from orgs o
+      where o.created_by = 'system:extract'
+        and o.retired_at is null and o.superseded_at is null
+        and o.tier in (1, 2) and btrim(o.canonical_name) <> ''
+    )
+    select o.id as org_id, o.canonical_name as org_name, o.raw_key, o.stripped_key,
+           pk.person_id, pk.person_name, pk.key_kind
+    from orgs_norm o
+    join person_keys pk on pk.key = o.stripped_key and length(pk.key) >= 3
+    order by o.id, pk.person_id`) as any[];
+  return groupPersonNamedOrgRows(rows);
+}
+
+function groupPersonNamedOrgRows(rows: any[]): ExtractPersonNamedOrgCandidate[] {
+  const byOrg = new Map<string, ExtractPersonNamedOrgCandidate>();
+  for (const row of rows) {
+    const existing = byOrg.get(row.org_id);
+    const person = { id: String(row.person_id), name: String(row.person_name) };
+    const matchKind = personNameOrgMatchKind(
+      String(row.raw_key),
+      String(row.stripped_key),
+      String(row.key_kind),
+    );
+    if (!existing) {
+      byOrg.set(row.org_id, {
+        org_id: String(row.org_id),
+        org_name: String(row.org_name),
+        match_kind: matchKind,
+        people: [person],
+      });
+      continue;
+    }
+    if (!existing.people.some((p) => p.id === person.id)) existing.people.push(person);
+    if (matchKind === "possessive") existing.match_kind = "possessive";
+    else if (matchKind === "exact" && existing.match_kind === "first_token") {
+      existing.match_kind = "exact";
+    }
+  }
+  return [...byOrg.values()];
+}
+
+export async function flagExtractPersonNamedOrgs(): Promise<{ flagged: number; ids: string[] }> {
+  const ids: string[] = [];
+  for (const candidate of await extractPersonNamedOrgCandidates()) {
+    const flagKey = extractPersonNamedOrgFlagKey(candidate.org_id);
+    if (await reviewItemExists("extract_suspect", "flag_key", flagKey)) continue;
+    await insertReviewItem("extract_suspect", {
+      reason: "person_name_extract_org",
+      flag_key: flagKey,
+      match_kind: candidate.match_kind,
+      org: { type: "org", id: candidate.org_id, name: candidate.org_name },
+      matches: candidate.people.map((person) => ({
+        type: "person",
+        id: person.id,
+        name: person.name,
+      })),
+    });
+    ids.push(candidate.org_id);
+  }
+  return { flagged: ids.length, ids };
+}
+
 // -- W1 extractor re-validation (system-internal; NOT tier-gated — see personById precedent:
 // the dream job reads locally, egress is gated by per-tier routing at the provider layer) ----
 
@@ -5388,7 +5667,7 @@ export async function chunkPairsSharingPerson(limit: number): Promise<Contradict
     excluded_page_parents as (
       select ps.id
       from page_shape_parts ps
-      where ps.source in ('dream:notes', 'dream:decision-digest')
+      where ps.source in ('dream:notes', 'dream:decision-digest', 'dream:goal-digest', 'dream:topic-cluster')
          or ps.path ~ ${COMPILED_NOTE_UUID_PATH_SQL_RE}
          or (
            ${COMPILED_NOTE_MARKER} =
@@ -5508,8 +5787,10 @@ export async function staleRecentlyFlagged(id: string): Promise<boolean> {
 // edges are parent-anchored at (src_type, src_id); noteSourceChunks() resolves the chunks
 // through that typed parent and ignores historical source_table/source_id metadata.
 
+export type NoteEntityKind = "person" | "org";
+
 export interface NoteCandidate {
-  kind: "person";
+  kind: NoteEntityKind;
   id: string;
   name: string;
   chunk_count: number;
@@ -5519,32 +5800,53 @@ export interface NoteCandidate {
   latest_mention_at: Date;
 }
 
-// People with at least `minChunks` chunks that mention them. `max_tier` drives the note tier;
-// `latest_mention_at` is the cheap staleness signal (vs. the note page's updated_at). Mention
-// edges are PARENT-anchored (src = the mentioning row, M7 extraction shape), so the chunks
-// are joined via the edge's src parent. Note pages themselves are excluded so a note never
-// feeds itself.
+// People and orgs with at least `minChunks` chunks that mention them. `max_tier`
+// drives the note tier; `latest_mention_at` is the cheap staleness signal.
+// Mention edges are PARENT-anchored (src = the mentioning row), so chunks join
+// via the edge's src parent. Note pages themselves are excluded so a note never
+// feeds itself. Retired orgs are skipped.
 export async function noteCandidates(minChunks: number): Promise<NoteCandidate[]> {
   const excluded = await excludedDerivedPageIdsForCompiledNoteSources();
   const rows = (await db()`
-    select 'person'::text as kind, e.dst_id as id, p.canonical_name as name,
-           count(distinct c.id)::int as chunk_count,
-           min(least(c.tier, e.tier, p.tier, ${COMPILED_PARENT_TIER(db())}))::int as min_tier,
-           max(greatest(c.tier, e.tier, p.tier, ${COMPILED_PARENT_TIER(db())}))::int as max_tier,
-           bool_or(${COMPILED_PARENT_TIER(db())} is null) as evidence_unresolved,
-           max(e.created_at) as latest_mention_at
-    from edges e
-    join chunks c on c.parent_type = e.src_type and c.parent_id = e.src_id
-    join people p on p.id = e.dst_id
-    where e.rel = 'mentions' and e.dst_type = 'person'
-      and e.tier in (1,2) and c.tier in (1,2) and p.tier in (1,2)
-      and ${COMPILED_PARENT_TIER(db())} in (1,2)
-      and not (e.src_type = 'page' and e.src_id = any(${excluded}::uuid[]))
-      and (c.parent_type <> 'page' or exists (
-        select 1 from pages pg where pg.id = c.parent_id and pg.status = 'active'))
-    group by e.dst_id, p.canonical_name
-    having count(distinct c.id) >= ${minChunks}
-    order by chunk_count desc`) as any;
+    select kind, id, name, chunk_count, min_tier, max_tier, evidence_unresolved, latest_mention_at
+    from (
+      select 'person'::text as kind, e.dst_id as id, p.canonical_name as name,
+             count(distinct c.id)::int as chunk_count,
+             min(least(c.tier, e.tier, p.tier, ${COMPILED_PARENT_TIER(db())}))::int as min_tier,
+             max(greatest(c.tier, e.tier, p.tier, ${COMPILED_PARENT_TIER(db())}))::int as max_tier,
+             bool_or(${COMPILED_PARENT_TIER(db())} is null) as evidence_unresolved,
+             max(e.created_at) as latest_mention_at
+      from edges e
+      join chunks c on c.parent_type = e.src_type and c.parent_id = e.src_id
+      join people p on p.id = e.dst_id
+      where e.rel = 'mentions' and e.dst_type = 'person'
+        and e.tier in (1,2) and c.tier in (1,2) and p.tier in (1,2)
+        and ${COMPILED_PARENT_TIER(db())} in (1,2)
+        and not (e.src_type = 'page' and e.src_id = any(${excluded}::uuid[]))
+        and (c.parent_type <> 'page' or exists (
+          select 1 from pages pg where pg.id = c.parent_id and pg.status = 'active'))
+      group by e.dst_id, p.canonical_name
+      union all
+      select 'org'::text as kind, e.dst_id as id, o.canonical_name as name,
+             count(distinct c.id)::int as chunk_count,
+             min(least(c.tier, e.tier, o.tier, ${COMPILED_PARENT_TIER(db())}))::int as min_tier,
+             max(greatest(c.tier, e.tier, o.tier, ${COMPILED_PARENT_TIER(db())}))::int as max_tier,
+             bool_or(${COMPILED_PARENT_TIER(db())} is null) as evidence_unresolved,
+             max(e.created_at) as latest_mention_at
+      from edges e
+      join chunks c on c.parent_type = e.src_type and c.parent_id = e.src_id
+      join orgs o on o.id = e.dst_id
+      where e.rel = 'mentions' and e.dst_type = 'org'
+        and e.tier in (1,2) and c.tier in (1,2) and o.tier in (1,2)
+        and o.retired_at is null
+        and ${COMPILED_PARENT_TIER(db())} in (1,2)
+        and not (e.src_type = 'page' and e.src_id = any(${excluded}::uuid[]))
+        and (c.parent_type <> 'page' or exists (
+          select 1 from pages pg where pg.id = c.parent_id and pg.status = 'active'))
+      group by e.dst_id, o.canonical_name
+    ) candidates
+    where chunk_count >= ${minChunks}
+    order by chunk_count desc, name`) as any;
   return rows as NoteCandidate[];
 }
 
@@ -5552,8 +5854,44 @@ export async function noteCandidates(minChunks: number): Promise<NoteCandidate[]
 // derived_from — is the earliest mentioning row). Parent-anchored edges as above; only
 // chunks that literally contain one of the person's names are distilled, so the note
 // quotes mentioning text rather than every chunk of a long mentioning page.
+async function compiledNoteEntityNames(
+  kind: NoteEntityKind,
+  id: string,
+): Promise<{ name: string; tier: number }[]> {
+  const rows =
+    kind === "person"
+      ? await db()`
+          select p.canonical_name as name, p.tier::int as tier
+          from people p where p.id = ${id} and p.tier in (1,2)
+          union all
+          select a.alias as name, a.tier::int as tier
+          from person_aliases a
+          join people p on p.id = a.person_id
+          where a.person_id = ${id} and p.tier in (1,2) and a.tier in (1,2)`
+      : await db()`
+          select o.canonical_name as name, o.tier::int as tier
+          from orgs o
+          where o.id = ${id} and o.tier in (1,2) and o.retired_at is null
+          union all
+          select a.alias as name, a.tier::int as tier
+          from org_aliases a
+          join orgs o on o.id = a.org_id
+          where a.org_id = ${id} and o.tier in (1,2) and a.tier in (1,2)
+            and o.retired_at is null`;
+  return rows
+    .filter(
+      (row): row is { name: string; tier: number } =>
+        typeof row.name === "string" &&
+        row.name.length > 0 &&
+        (Number(row.tier) === 1 || Number(row.tier) === 2),
+    )
+    .map((row) => ({ name: row.name, tier: Number(row.tier) }));
+}
+
+// Mentioning chunks for one person or org, oldest first. Only chunks that
+// literally contain a canonical name or alias are distilled.
 export async function noteSourceChunks(
-  _kind: "person",
+  kind: NoteEntityKind,
   id: string,
 ): Promise<
   {
@@ -5569,34 +5907,20 @@ export async function noteSourceChunks(
   }[]
 > {
   const excluded = await excludedDerivedPageIdsForCompiledNoteSources();
-  const names = (
-    await db()`
-    select p.canonical_name as name, p.tier::int as tier
-    from people p where p.id = ${id} and p.tier in (1,2)
-    union all
-    select a.alias as name, a.tier::int as tier
-    from person_aliases a
-    join people p on p.id = a.person_id
-    where a.person_id = ${id} and p.tier in (1,2) and a.tier in (1,2)`
-  )
-    .filter(
-      (row): row is { name: string; tier: number } =>
-        typeof row.name === "string" &&
-        row.name.length > 0 &&
-        (Number(row.tier) === 1 || Number(row.tier) === 2),
-    )
-    .map((row) => ({ name: row.name, tier: Number(row.tier) }));
+  const names = await compiledNoteEntityNames(kind, id);
   const rows = (await db()`
     select distinct c.id, c.parent_type, c.parent_id, c.text, c.tier, e.tier as edge_tier,
-      least(c.tier, e.tier, p.tier, ${COMPILED_PARENT_TIER(db())})::int as min_tier,
-      greatest(c.tier, e.tier, p.tier, ${COMPILED_PARENT_TIER(db())})::int as max_tier,
+      least(c.tier, e.tier, coalesce(p.tier, o.tier), ${COMPILED_PARENT_TIER(db())})::int as min_tier,
+      greatest(c.tier, e.tier, coalesce(p.tier, o.tier), ${COMPILED_PARENT_TIER(db())})::int as max_tier,
       (${COMPILED_PARENT_TIER(db())} is null) as evidence_unresolved,
       c.updated_at, c.ord
     from edges e
     join chunks c on c.parent_type = e.src_type and c.parent_id = e.src_id
-    join people p on p.id = e.dst_id
-    where e.rel = 'mentions' and e.dst_type = 'person' and e.dst_id = ${id}
-      and e.tier in (1,2) and c.tier in (1,2) and p.tier in (1,2)
+    left join people p on e.dst_type = 'person' and p.id = e.dst_id
+    left join orgs o on e.dst_type = 'org' and o.id = e.dst_id
+    where e.rel = 'mentions' and e.dst_type = ${kind} and e.dst_id = ${id}
+      and e.tier in (1,2) and c.tier in (1,2) and coalesce(p.tier, o.tier) in (1,2)
+      and (o.id is null or o.retired_at is null)
       and ${COMPILED_PARENT_TIER(db())} in (1,2)
       and not (e.src_type = 'page' and e.src_id = any(${excluded}::uuid[]))
       and (c.parent_type <> 'page' or exists (
@@ -5702,6 +6026,240 @@ export async function decisionDigestCandidates(): Promise<DecisionDigestInput[]>
   for (const r of rows) {
     const input = await decisionDigestInput(r.id);
     if (input) out.push(input);
+  }
+  return out;
+}
+
+export interface GoalDigestInput {
+  id: string;
+  horizon: string;
+  statement: string;
+  why: string | null;
+  status: string;
+  tier: number;
+  open_task_count: number;
+  done_task_count: number;
+}
+
+export function goalDigestPath(id: string): string {
+  return `derived/goals/${id}.md`;
+}
+
+export async function goalDigestInput(id: string): Promise<GoalDigestInput | null> {
+  const [row] = (await db()`
+    select g.id, g.horizon, g.statement, g.why, g.status,
+           greatest(g.tier, coalesce(max(t.tier), g.tier))::int as tier,
+           count(t.id) filter (where t.status in ('inbox','active','waiting'))::int
+             as open_task_count,
+           count(t.id) filter (where t.status = 'done')::int as done_task_count
+    from goals g
+    left join tasks t on t.goal_id = g.id and t.tier in (1,2)
+    where g.id = ${id} and g.superseded_at is null and g.tier in (1,2)
+    group by g.id, g.horizon, g.statement, g.why, g.status, g.tier`) as any[];
+  return (row as GoalDigestInput | undefined) ?? null;
+}
+
+export async function goalDigestCandidates(): Promise<GoalDigestInput[]> {
+  const rows = (await db()`
+    select g.id
+    from goals g
+    left join pages pg on pg.path = ${"derived/goals/"} || g.id::text || '.md'
+    left join tasks t on t.goal_id = g.id
+    where g.superseded_at is null and g.tier in (1,2)
+    group by g.id, pg.id, pg.status, pg.body_md, pg.updated_at, g.updated_at
+    having pg.id is null
+       or pg.status <> 'active'
+       or pg.body_md not like '%compiler: dream%'
+       or pg.updated_at < g.updated_at
+       or pg.updated_at < coalesce(max(t.updated_at), g.updated_at)
+    order by g.updated_at desc`) as any[];
+  const out: GoalDigestInput[] = [];
+  for (const r of rows) {
+    const input = await goalDigestInput(r.id);
+    if (input) out.push(input);
+  }
+  return out;
+}
+
+export async function pagesByEntityUuidSuffix(
+  ids: string[],
+): Promise<{ id: string; path: string }[]> {
+  if (ids.length === 0) return [];
+  return db()`
+    select p.id, p.path from pages p
+    where p.status = 'active'
+      and exists (
+        select 1 from unnest(${ids}::uuid[]) as e(id)
+        where p.path like '%--' || e.id::text || '.md'
+      )` as any;
+}
+
+export type TopicSeedKind = "decision" | "goal";
+
+export interface TopicClusterMember {
+  path: string;
+  title: string;
+  source: string;
+  tier: number;
+  updated_at: Date;
+}
+
+export interface TopicClusterInput {
+  kind: TopicSeedKind;
+  id: string;
+  title: string;
+  blurb: string;
+  tier: number;
+  updated_at: Date;
+  members: TopicClusterMember[];
+}
+
+export function topicClusterPath(kind: TopicSeedKind, id: string): string {
+  if (kind !== "decision" && kind !== "goal") throw new Error("INVALID_TOPIC_SEED");
+  return `derived/topics/${kind}--${id}.md`;
+}
+
+function topicDigestPath(kind: TopicSeedKind, id: string): string {
+  return kind === "decision" ? decisionDigestPath(id) : goalDigestPath(id);
+}
+
+async function topicClusterSeed(
+  kind: TopicSeedKind,
+  id: string,
+): Promise<{ title: string; blurb: string; tier: number; updated_at: Date } | null> {
+  if (kind === "decision") {
+    const [row] = (await db()`
+      select question, stakes, tier, updated_at, superseded_at
+      from decisions where id = ${id} and tier in (1, 2)`) as any[];
+    if (!row || row.superseded_at) return null;
+    return {
+      title: String(row.question ?? ""),
+      blurb: [row.question, row.stakes].filter(Boolean).join(" "),
+      tier: Number(row.tier) === 2 ? 2 : 1,
+      updated_at: new Date(row.updated_at),
+    };
+  }
+  const [row] = (await db()`
+    select statement, why, tier, updated_at, superseded_at
+    from goals where id = ${id} and tier in (1, 2)`) as any[];
+  if (!row || row.superseded_at) return null;
+  return {
+    title: String(row.statement ?? ""),
+    blurb: [row.statement, row.why].filter(Boolean).join(" "),
+    tier: Number(row.tier) === 2 ? 2 : 1,
+    updated_at: new Date(row.updated_at),
+  };
+}
+
+async function topicClusterEntityIds(
+  kind: TopicSeedKind,
+  id: string,
+  seedText: string,
+): Promise<string[]> {
+  const mentioned = (await db()`
+    select distinct e.dst_id::text as id
+    from edges e
+    where e.rel = 'mentions' and e.dst_type in ('person', 'org')
+      and e.src_type = ${kind} and e.src_id = ${id}
+      and e.tier in (1, 2)`) as { id: string }[];
+  const named = (await db()`
+    select p.id::text as id
+    from people p
+    where p.superseded_at is null and p.tier in (1, 2)
+      and btrim(p.canonical_name) <> ''
+      and strpos(lower(${seedText}), lower(p.canonical_name)) > 0
+    union
+    select a.person_id::text
+    from person_aliases a
+    where a.tier in (1, 2) and btrim(a.alias) <> ''
+      and strpos(lower(${seedText}), lower(a.alias)) > 0
+    union
+    select o.id::text
+    from orgs o
+    where o.retired_at is null and o.superseded_at is null and o.tier in (1, 2)
+      and btrim(o.canonical_name) <> ''
+      and strpos(lower(${seedText}), lower(o.canonical_name)) > 0
+    union
+    select a.org_id::text
+    from org_aliases a
+    join orgs o on o.id = a.org_id
+    where o.retired_at is null and a.tier in (1, 2) and btrim(a.alias) <> ''
+      and strpos(lower(${seedText}), lower(a.alias)) > 0`) as { id: string }[];
+  return [...new Set([...mentioned, ...named].map((row) => row.id))];
+}
+
+async function topicClusterMemberRows(
+  digestPath: string,
+  entityIds: string[],
+): Promise<TopicClusterMember[]> {
+  const rows = (await db()`
+    select p.path, p.title, p.source, p.tier, p.updated_at
+    from pages p
+    where p.status = 'active'
+      and p.source in ('dream:notes', 'dream:decision-digest', 'dream:goal-digest')
+      and (
+        p.path = ${digestPath}
+        or (
+          ${entityIds.length} > 0
+          and p.source = 'dream:notes'
+          and exists (
+            select 1 from unnest(${entityIds}::uuid[]) as e(id)
+            where p.path like '%--' || e.id::text || '.md'
+          )
+        )
+      )
+    order by p.path`) as any[];
+  return rows.map((row) => ({
+    path: String(row.path),
+    title: String(row.title ?? ""),
+    source: String(row.source),
+    tier: Number(row.tier) === 2 ? 2 : 1,
+    updated_at: new Date(row.updated_at),
+  }));
+}
+
+export async function topicClusterInput(
+  kind: TopicSeedKind,
+  id: string,
+): Promise<TopicClusterInput | null> {
+  const seed = await topicClusterSeed(kind, id);
+  if (!seed) return null;
+  const entities = await topicClusterEntityIds(kind, id, `${seed.title} ${seed.blurb}`);
+  const members = await topicClusterMemberRows(topicDigestPath(kind, id), entities);
+  if (members.length < 2) return null;
+  const tier = Math.max(seed.tier, ...members.map((member) => member.tier)) === 2 ? 2 : 1;
+  return { kind, id, ...seed, tier, members };
+}
+
+async function topicClusterNeedsCompile(input: TopicClusterInput): Promise<boolean> {
+  const path = topicClusterPath(input.kind, input.id);
+  const [page] = (await db()`
+    select status, body_md, updated_at from pages where path = ${path}`) as any[];
+  if (
+    !page ||
+    page.status !== "active" ||
+    !String(page.body_md ?? "").includes("compiler: dream")
+  ) {
+    return true;
+  }
+  const newest = [input.updated_at, ...input.members.map((member) => member.updated_at)].reduce(
+    (max, at) => (at > max ? at : max),
+  );
+  return new Date(page.updated_at) < newest;
+}
+
+export async function topicClusterCandidates(): Promise<TopicClusterInput[]> {
+  const seeds = (await db()`
+    select 'decision'::text as kind, id from decisions
+    where superseded_at is null and tier in (1, 2)
+    union all
+    select 'goal', id from goals
+    where superseded_at is null and tier in (1, 2)
+    order by kind, id`) as { kind: TopicSeedKind; id: string }[];
+  const out: TopicClusterInput[] = [];
+  for (const seed of seeds) {
+    const input = await topicClusterInput(seed.kind, seed.id);
+    if (input && (await topicClusterNeedsCompile(input))) out.push(input);
   }
   return out;
 }

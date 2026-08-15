@@ -131,9 +131,10 @@ lexicon already loaded by `allOrgsWithAliases()` — no new SQL.
 TDD: `test/extract-fix-b.test.ts`. Fix A / org-poisoning guards in `test/m7.graph.test.ts`
 are unchanged; two extractAndLink write assertions now expect the 0.7 floor.
 
-**Still open after Fix B:** mixed-intent 1..N classify-and-file (sibling known-issue) and a local watchdog
-for `system:extract` orgs with an unusually high edge count and no human confirmation.
-Existing pre-Fix-B phantom/duplicate rows are not swept.
+**Still open after Fix B:** a local watchdog for `system:extract` orgs with an
+unusually high edge count (shipped as Fix C below). Existing pre-Fix-B
+phantom/duplicate rows are not swept. Prefixed mixed-intent companions shipped
+2026-08-15 (sibling known-issue).
 
 ## STATUS — Fix C shipped (2026-08-14)
 
@@ -151,5 +152,28 @@ Periodic audit landed as dream step `3d_high_edge_orgs` (`highEdgeExtractOrgScan
 
 TDD: `test/extract-org-watchdog.test.ts`.
 
-**Still open:** mixed-intent 1..N classify-and-file (sibling known-issue). Existing
-pre-Fix-B phantom/duplicate rows are not swept.
+**Still open after Fix C:** existing pre-Fix-B phantom/duplicate rows are not
+auto-swept on live data. A committed owner-run repair now *flags* leftover
+person-named extract orgs (see Fix D). Fuzzy near-duplicate orgs still need an
+explicit owner `retype-org-to-person` / merge decision. A model-driven split of
+narrative dumps remains on the sibling known-issue.
+
+## STATUS — Fix D shipped (2026-08-15)
+
+Owner-run flag-only sweep: `bun run scripts/repair.ts sweep-extract-person-orgs`.
+
+- **Candidates:** non-retired `orgs` with `created_by = 'system:extract'` whose
+  name (possessive `'s` stripped) case-folds to a live person's canonical name,
+  alias, or first token (length ≥ 3). Human-confirmed orgs stay out.
+- **Flag-only.** One open `extract_suspect` (`reason: person_name_extract_org`,
+  `flag_key`, `match_kind` exact/first_token/possessive, org + matching people
+  as `{type,id,name}`). No source text, no auto-retype/delete/merge.
+- **Dedup.** An already-open flag is skipped. `retypeOrgToPerson` auto-resolves
+  the open flag, same as the high-edge watchdog.
+- **Audit.** `repair:sweep-extract-person-orgs` carries `orgs_flagged` and org
+  ids only — never names.
+
+TDD: `test/sweep-extract-person-orgs.test.ts`. Running the repair against a live
+database remains an explicit owner action (mandatory pre-image, committed
+script). This does not replace the live pre-Fix-B review; it gives the owner a
+sanctioned way to surface the leftover person-named phantoms.

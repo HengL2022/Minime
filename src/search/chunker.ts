@@ -6,9 +6,17 @@
 
 import { CJK_CHAR, tokenCount } from "../util/cjk";
 
+// Child embed/FTS/rerank size. Program W8 asked 120–200; shipping that now would
+// move sealed mock floors. Keep current bounds until a live battery. // eval-calibration pending
 const TARGET = 350;
 const MAX = 400;
 const OVERLAP = 40;
+// const CHILD_TARGET = 160; // eval-calibration pending — not enabled
+
+export interface ChunkSpan {
+  text: string;
+  children: string[];
+}
 
 interface Section {
   heading: string; // breadcrumb of headings, e.g. "Title > Sub"
@@ -90,54 +98,62 @@ function splitParagraph(p: string): string[] {
   return parts.length > 0 ? parts : [p];
 }
 
-export function chunkMarkdown(md: string, title?: string): string[] {
+function sectionChildren(sec: Section, title?: string): string[] {
+  const prefix = [title, sec.heading].filter(Boolean).join(" > ");
+  const paragraphs = sec.text
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .flatMap(splitParagraph);
   const chunks: string[] = [];
+  let cur: string[] = [];
+  let curTokens = 0;
+  let overlapTokens = 0;
 
-  for (const sec of sections(md)) {
-    const prefix = [title, sec.heading].filter(Boolean).join(" > ");
-    const paragraphs = sec.text
-      .split(/\n{2,}/)
-      .map((p) => p.trim())
-      .filter(Boolean)
-      .flatMap(splitParagraph);
-
-    let cur: string[] = [];
-    let curTokens = 0;
-    let overlapTokens = 0; // how many tokens of `cur` are carried-over overlap
-
-    const emit = () => {
-      const body = cur.join("\n\n");
-      chunks.push(prefix ? `${prefix}\n\n${body}` : body);
-      // overlap tail: walk words from the end until the token budget is met; a single
-      // unspaced CJK "word" is trimmed to its last OVERLAP characters
-      const ws = words(body);
-      const tail: string[] = [];
-      let t = 0;
-      for (let i = ws.length - 1; i >= 0 && t < OVERLAP; i--) {
-        let w = ws[i]!;
-        const wTokens = Math.max(1, w.match(CJK_CHAR)?.length ?? 0);
-        if (tail.length === 0 && wTokens > OVERLAP) w = Array.from(w).slice(-OVERLAP).join("");
-        tail.unshift(w);
-        t += Math.min(wTokens, OVERLAP);
-      }
-      cur = tail.length > 0 ? [tail.join(" ")] : [];
-      curTokens = t;
-      overlapTokens = t;
-    };
-
-    for (const p of paragraphs) {
-      const t = tokenCount(p);
-      if (curTokens + t > MAX && curTokens > overlapTokens) emit();
-      cur.push(p);
-      curTokens += t;
-      if (curTokens >= TARGET) emit();
+  const emit = () => {
+    const body = cur.join("\n\n");
+    chunks.push(prefix ? `${prefix}\n\n${body}` : body);
+    const ws = words(body);
+    const tail: string[] = [];
+    let t = 0;
+    for (let i = ws.length - 1; i >= 0 && t < OVERLAP; i--) {
+      let w = ws[i]!;
+      const wTokens = Math.max(1, w.match(CJK_CHAR)?.length ?? 0);
+      if (tail.length === 0 && wTokens > OVERLAP) w = Array.from(w).slice(-OVERLAP).join("");
+      tail.unshift(w);
+      t += Math.min(wTokens, OVERLAP);
     }
-    // flush remainder unless it is nothing but the carried overlap tail
-    if (curTokens > overlapTokens) emit();
-  }
+    cur = tail.length > 0 ? [tail.join(" ")] : [];
+    curTokens = t;
+    overlapTokens = t;
+  };
 
-  if (chunks.length === 0 && md.trim()) {
-    chunks.push(title ? `${title}\n\n${md.trim()}` : md.trim());
+  for (const p of paragraphs) {
+    const t = tokenCount(p);
+    if (curTokens + t > MAX && curTokens > overlapTokens) emit();
+    cur.push(p);
+    curTokens += t;
+    if (curTokens >= TARGET) emit();
   }
+  if (curTokens > overlapTokens) emit();
   return chunks;
+}
+
+export function chunkMarkdownSpans(md: string, title?: string): ChunkSpan[] {
+  const spans: ChunkSpan[] = [];
+  for (const sec of sections(md)) {
+    const children = sectionChildren(sec, title);
+    if (children.length === 0) continue;
+    const prefix = [title, sec.heading].filter(Boolean).join(" > ");
+    spans.push({ text: prefix ? `${prefix}\n\n${sec.text}` : sec.text, children });
+  }
+  if (spans.length === 0 && md.trim()) {
+    const fallback = title ? `${title}\n\n${md.trim()}` : md.trim();
+    spans.push({ text: fallback, children: [fallback] });
+  }
+  return spans;
+}
+
+export function chunkMarkdown(md: string, title?: string): string[] {
+  return chunkMarkdownSpans(md, title).flatMap((span) => span.children);
 }

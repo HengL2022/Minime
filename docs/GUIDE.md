@@ -24,10 +24,13 @@ very first "give me a morning brief" already knows what matters to you.
 
 ### 1. The inbox — for anything, anytime (lowest friction)
 
-Drop a text or markdown file into `data/inbox/`. That's it. The watcher picks it up,
-classifies it with the local model, and files it as a task, journal entry, interaction,
-decision note, or reference note. Anything it isn't ≥70% sure about waits in the review
-queue instead of being filed wrong.
+Drop a text, markdown, PDF, office, mail, or image file into `data/inbox/`. That's it.
+The watcher picks it up, classifies the parsed markdown with the local model, and files
+it as a task, journal entry, interaction, decision note, or reference note. Anything it
+isn't ≥70% sure about waits in the review queue instead of being filed wrong. Images
+are captioned locally when `VLM_MODEL` is set (or via the offline mock in tests);
+otherwise they file as a filename stub. Receipt-like images raise a `receipt_candidate`
+flag — they never become transactions automatically.
 
 Ways to feed the inbox:
 
@@ -45,8 +48,11 @@ Phrasing nudges the classifier (all optional):
 |---|---|
 | `todo: book dentist by 2026-07-01` | a task with a due date |
 | `met Alice for coffee, she's leaving Acme` | an interaction (updates Alice's last-contact) |
+| `org: Fjordsonics AS` / `person: Nadia Rossi` | a resolvable company or person card |
 | `decided: staying with Postgres because…` | a decision note |
+| `note: they want a written redline` | a reference note → a brain page |
 | `Today felt scattered. Energy low…` | a journal entry (tier 2, private) |
+| a dump with those prefixes on their own lines | one primary plus leftover companion rows |
 | anything else substantial | a reference note → a brain page |
 
 **Recurring tasks**: ask your agent to make a task repeat — "make watering the plants a weekly
@@ -298,8 +304,11 @@ direct, suppressed, uncertain, and incomplete rows do not count. These records d
 local audit boundary only; they do not promise crash recovery
 or a distributed rollback across Postgres, files, model providers, or indexes.
 
-- **Nightly dream job** (3am): embeds backlogs, links entities, compiles per-person
-  notes, flags contradictions and staleness, rolls up metrics, backs up. `minime_state`'s
+- **Nightly dream job** (3am): embeds backlogs, links entities, compiles
+  per-person and per-org notes, decision/goal digests, and topic hub pages
+  that `[[wikilink]]` those compiled cards (path or `slug--uuid` only — a
+  title like `[[Ingrid Solberg]]` does not resolve), flags contradictions and
+  staleness, rolls up metrics, backs up. `minime_state`'s
   `ops_health` block always shows when it last ran and which steps (if any) failed on that run
   — content-free identifiers, same for every actor. Three consecutive nightly runs that each
   failed at least one step raise a single `ops_failure` review-queue item (it stays open until

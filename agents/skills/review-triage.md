@@ -90,14 +90,20 @@ auto-resolve).
      `fuzzy_org_ambiguous` (candidate matched two or more existing orgs — do not mint a third),
      `low_confidence_edge` (a `works_at` below the 0.7 write floor), `high_edge_extract_org`
      (an extractor-minted org with 20+ edges and no human confirmation — the nightly watchdog;
-     payload: org id, `edge_count`, `works_at_people`, no source text), or an edge-validation
-     item (`edge_id` / `rule_key` / `verdict`). Endpoint names are masked like any other title
-     if locked. Ask the owner which applies. A real organisation on a high-edge flag → dismiss
-     (quiet for 90 days). A phantom person minted as an org → they run
+     payload: org id, `edge_count`, `works_at_people`, no source text),
+     `person_name_extract_org` (an extractor-minted org whose name matches a known person —
+     exact, first token, or possessive; payload: org, `match_kind`, matching people; the
+     owner-run `sweep-extract-person-orgs` repair is how leftover pre-Fix-B rows get this
+     flag), or an edge-validation item (`edge_id` / `rule_key` / `verdict`). Endpoint names
+     are masked like any other title if locked. Ask the owner which applies. A real
+     organisation on a high-edge or person-name flag → dismiss. A phantom person minted as
+     an org → they run
      `bun run scripts/repair.ts retype-org-to-person --org-id=<this-org-id>` (owner-run only,
      surface the command, never execute it yourself; this also auto-resolves the high-edge
-     item). Ambiguous / low-confidence / denied-edge items stay flag-only: dismiss if the
-     graph is fine, or leave open until the owner chooses a repair. Never invent a merge.
+     and person-name flags). Ambiguous / low-confidence / denied-edge items stay flag-only:
+     dismiss if the graph is fine, or leave open until the owner chooses a repair. Never
+     invent a merge. Never run `sweep-extract-person-orgs` yourself — that is owner-terminal
+     only, same as every other repair.
    - **entity_promotion** — a person/org whose own identity card is still stuck at tier 2 even
      though it looks owner-known or is already independently tier-1-evidenced (payload:
      `entity_type`, `entity_id` only — no name, ever, in the payload itself; masked like any
@@ -110,6 +116,11 @@ auto-resolve).
      card to tier 1 (aliases/edges genuinely derived from tier-2 content stay tier 2 — the CLI
      says so in its own output). The CLI resolves the queue item automatically on success, so you
      never call `resolve` for this kind yourself.
+   - **receipt_candidate** — a filed inbox image looked like a receipt (payload:
+     `inbox_item_id` + `image_kind` only — never the caption or bytes). Flag-only: nothing
+     inserts a transaction. Read it back to the owner and ask whether to log an expense
+     with `minime_log_expense` (they supply amount/merchant; you never invent totals from
+     a caption) or dismiss. Resolving the flag does not write a transaction.
 3. Resolve each handled item: `minime_review_queue` action `resolve`, status `resolved`
    (handled) or `dismissed` (owner says ignore) — skip this when `minime_refile` or a person
    merge already resolved it for you. Confirm with IDs, one line each.
@@ -118,7 +129,8 @@ auto-resolve).
 
 - Triage order: ops_failure (the pipeline producing every other flag may itself be broken) →
   unfiled (quick wins) → decision reviews (time-sensitive) → contradictions →
-  extract_suspect / phantom_person (graph quality) → stale → goal reviews → entity promotions
+  extract_suspect / phantom_person (graph quality) → stale → goal reviews → receipt
+  candidates (flag-only; never auto-log an expense) → entity promotions
   (lowest urgency of all — no data is at risk either way, this is purely a visibility fix the
   owner runs in their own terminal). Offer to stop after 5 minutes; report what remains.
 - Resolving a flag (`minime_review_queue` action `resolve`) never by itself touches the flagged

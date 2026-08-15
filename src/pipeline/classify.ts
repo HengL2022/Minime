@@ -51,6 +51,7 @@ institution / supplier (e.g. "emailed Fjordsonics, an acoustic sensing company",
 and "person" when it is an individual human ("met Tomasz about the calibration rig"). When unsure, use "person".
 Use type org or person only for a dedicated identity capture (hint "org / company record" or
 "person record", or a first line "org: Name" / "person: Name"). A meeting/email/call is interaction.
+A first line "note: …" is note; "journal: …" is journal.
 journal -> {"mood": 1-5 | null}; decision_note -> {"question": string, "choice": string | null};
 note -> {"title": string}; org -> {"name": string}; person -> {"name": string}; unknown -> {}.
 
@@ -200,9 +201,26 @@ export function heuristicClassify(text: string): Classification {
       };
     }
   }
-  if (/^(met|call(ed)? with|talked to|coffee with|lunch with)\b/i.test(firstLine)) {
+  if (/^note\s*:/i.test(firstLine)) {
+    const title = firstLine.replace(/^note\s*:\s*/i, "").trim() || firstLine;
+    return {
+      type: "note",
+      confidence: 0.9,
+      fields: { title: title.slice(0, 80) },
+      reason: "explicit note: prefix",
+    };
+  }
+  if (/^journal\s*:/i.test(firstLine)) {
+    return {
+      type: "journal",
+      confidence: 0.9,
+      fields: { mood: null },
+      reason: "explicit journal: prefix",
+    };
+  }
+  if (/^(met|called|call(?:ed)? with|talked to|coffee with|lunch with)\b/i.test(firstLine)) {
     const m = firstLine.match(
-      /^(?:met|call(?:ed)? with|talked to|coffee with|lunch with)\s+([A-Z][\w'-]+(?:\s[A-Z][\w'-]+)?)/i,
+      /^(?:met|called|call(?:ed)? with|talked to|coffee with|lunch with)\s+([A-Z][\w'-]+(?:\s[A-Z][\w'-]+)?)/i,
     );
     const kind = /call/i.test(firstLine) ? "call" : "meeting";
     return {

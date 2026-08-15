@@ -159,6 +159,7 @@ describe("audit payload boundary", () => {
       "inboxSplitDecision",
       "inboxSplitDoneTask",
       "inboxSplitEntities",
+      "inboxSplitIntents",
       "inboxUnfiled",
       "llmEgress",
       "llmEgressOutcome",
@@ -216,6 +217,26 @@ describe("audit payload boundary", () => {
         recordNumber: 1,
       } as any),
     ).toThrow("invalid_audit_payload");
+    expect(() =>
+      auditPayload.inboxSplitIntents({
+        extraTypes: ["interaction"],
+        extraTables: ["interactions", "pages"],
+        extraIds: ["11111111-1111-4111-8111-111111111111"],
+      }),
+    ).toThrow("invalid_audit_payload");
+    const splitIntents = auditPayload.inboxSplitIntents({
+      extraTypes: ["interaction", "note"],
+      extraTables: ["interactions", "pages"],
+      extraIds: ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"],
+      prose: SENTINEL,
+    } as any);
+    expect(splitIntents).toEqual({
+      extra_count: 2,
+      extra_types: ["interaction", "note"],
+      extra_tables: ["interactions", "pages"],
+      extra_ids: ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"],
+    });
+    expect(JSON.stringify(splitIntents)).not.toContain(SENTINEL);
   });
 
   test("dream summaries flatten fixed counters and omit failure messages and detail arrays", async () => {
@@ -239,6 +260,18 @@ describe("audit payload boundary", () => {
         results: [{ path: `/private/${SENTINEL}.md` }],
       },
       "2d_goal_backlog_index": 4,
+      "2e_compile_goal_digests": {
+        candidates: 2,
+        compiled: 1,
+        skipped: 1,
+        results: [{ path: `/private/${SENTINEL}.md` }],
+      },
+      "2f_compile_topic_clusters": {
+        candidates: 2,
+        compiled: 1,
+        skipped: 1,
+        results: [{ path: `/private/${SENTINEL}.md` }],
+      },
       "3_contradictions": 1,
       "3b_phantom_persons": 0,
       "3d_high_edge_orgs": 2,
@@ -275,6 +308,12 @@ describe("audit payload boundary", () => {
       decision_digest_compiled_count: 1,
       decision_digest_skipped_count: 1,
       goal_backlog_indexed_count: 4,
+      goal_digest_candidate_count: 2,
+      goal_digest_compiled_count: 1,
+      goal_digest_skipped_count: 1,
+      topic_cluster_candidate_count: 2,
+      topic_cluster_compiled_count: 1,
+      topic_cluster_skipped_count: 1,
       contradiction_count: 1,
       phantom_person_count: 0,
       high_edge_org_count: 2,
@@ -308,6 +347,26 @@ describe("audit payload boundary", () => {
       model: "qwen/qwen3-embedding-8b",
       items: 1,
       route_tier: 1,
+    });
+    expect(JSON.stringify(payload)).not.toContain(SENTINEL);
+  });
+
+  test("LLM describe egress keeps routing metadata without image or caption content", async () => {
+    const { auditPayload } = (await import("../src/util/audit-payload")) as any;
+    const payload = auditPayload.llmEgress({
+      kind: "describe",
+      provider: "openai",
+      model: "gpt-4o-mini",
+      items: 1,
+      routeTier: 2,
+      caption: SENTINEL,
+      image: SENTINEL,
+    });
+    expect(payload).toEqual({
+      provider: "openai",
+      model: "gpt-4o-mini",
+      items: 1,
+      route_tier: 2,
     });
     expect(JSON.stringify(payload)).not.toContain(SENTINEL);
   });

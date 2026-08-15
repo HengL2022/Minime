@@ -103,13 +103,15 @@ to local Ollama but can route to cloud providers — set in `.env` and skip Olla
 **Switching the embedding provider/model invalidates existing vectors** (different models =
 different vector spaces). After changing `EMBED_PROVIDER`/`*_EMBED_MODEL`, run
 `bun run src/cli.ts reembed` (wipes and re-embeds every chunk; wrong-dimension responses are
-rejected loudly, never stored).
+rejected loudly, never stored). After a chunker or span-schema change, `bun run src/cli.ts rechunk`
+rebuilds children from each parent row (and re-embeds). Live rechunk stays owner-scheduled.
 
 Privacy contract: cloud providers receive content up to `CLOUD_MAX_TIER` (default 1; tier-0
 financial/health content **never** leaves the box on any path). Every cloud call first commits an
-audited intent row (`egress:embed` / `egress:classify`), then appends a fixed success/failure
-outcome; both contain counts and routing metadata, never contents, and the intent survives a later
-handler rollback. They are visible via `bun run src/cli.ts audit`. Mixed setups work (e.g.
+audited intent row (`egress:embed` / `egress:classify` / `egress:describe`), then appends a fixed
+success/failure outcome; both contain counts and routing metadata, never contents, and the intent
+survives a later handler rollback. Image describe is local-only (Ollama `VLM_MODEL`); a cloud
+`VLM_ROUTE_*` is rejected at startup. Default image routing is tier-2-like. They are visible via `bun run src/cli.ts audit`. Mixed setups work (e.g.
 classify via Anthropic, embed via local Ollama). Embeddings are pinned to 768 dims by the schema,
 hence the embed column above.
 
@@ -234,7 +236,8 @@ Three sanctioned write paths during engineering, nothing else:
    to run unless the script is committed to `HEAD` (`git cat-file -e`, not merely staged),
    takes a mandatory pre-image `pg_dump` before touching anything (no backup ⇒ no repair),
    and logs `repair:*` events carrying counts and ids only, never row contents. Repair
-   scripts live in `scripts/repairs/` (first one: `retype-org-to-person.ts`).
+   scripts live in `scripts/repairs/` (`retype-org-to-person`, `merge-person`,
+   `recategorize-transactions`, `sweep-extract-person-orgs`).
 
 ## After install
 
@@ -285,3 +288,43 @@ name is compatibility wording, not a WAL/PITR claim). Promotion stays a delibera
 - Stop: `make down` uses the persisted Docker/native backend and refuses to infer another service.
 - **Destructive**: `docker compose down -v` deletes the database volume. Your captured
   files stay in `data/` either way — that directory is the archive; treat it like one.
+
+## Cursor Cloud specific instructions
+
+The Cloud Agent VM snapshot already has Bun (pinned `1.3.13`, symlinked to `/usr/local/bin/bun`),
+a native PostgreSQL 16 + pgvector cluster, `node_modules`, a generated `.env`, and Ollama with both
+models (`nomic-embed-text` + `llama3.1:8b`) for full non-degraded mode. The startup update script
+only refreshes dependencies (`bun install --frozen-lockfile`); it does **not** start any service.
+Notes below are the non-obvious bits — standard commands are in `## After install` and `CLAUDE.md`.
+
+- **Start services first, every session.** Neither the update script nor `make up` starts services,
+  and this container has no running `systemd`, so nothing auto-starts on boot. Before `bun test`,
+  `make verify-offline`, or `serve`:
+  - Postgres: `make up` (creates scratch DBs via `scripts/with-test-database.ts`; a stopped cluster
+    fails most of the suite).
+  - Ollama (only for full-mode semantic search / inbox auto-classification): start it detached, e.g.
+    `OLLAMA_HOST=127.0.0.1:11434 ollama serve &` (or in a tmux session). Everything except those two
+    features works without it, and the whole test suite mocks Ollama regardless.
+- **Postgres runs on port `55432`, not the default 5432 — this is deliberate and must stay that
+  way.** `.env` pins this (mirrors the CI convention in `.github/workflows/install.yml`). The
+  installer-fixture tests in `test/h2.ollama-shell.test.ts` spawn `scripts/install.sh` on the
+  default port 5432 and **fail if any Postgres occupies 5432**. Keeping Minime's own cluster on
+  55432 leaves 5432 free so the full offline suite stays green. Do not re-point `.env` to 5432 or
+  start a second cluster there.
+- **git must be ≥ 2.47.** `scripts/check-tracked-privacy.ts` (and its tests) rely on
+  `git rev-list --objects -z` emitting NUL-delimited output, which Ubuntu 24.04's stock git 2.43
+  does not do. The snapshot ships an upgraded git (2.55 via the `git-core` PPA); the 3 privacy
+  scanner tests fail on older git.
+- **Full mode is available (Ollama installed), but only when `ollama serve` is running.** With it
+  up, semantic search uses real embeddings and inbox captures auto-classify+file via `llama3.1:8b`;
+  with it down the app degrades gracefully (search → full-text, captures → manual review queue).
+  Tests are unaffected either way (they mock Ollama via `MINIME_MOCK_OLLAMA=1`), as are non-LLM MCP
+  tools (tasks, agenda, state, people, decisions, expenses). Installing Ollama on Ubuntu 24.04 also
+  required `zstd` (`apt-get install zstd`) for the release tarball — already in the snapshot.
+- **Running the app / MCP door.** `serve` is a stdio MCP server: `bun run src/cli.ts serve`. Drive
+  it end-to-end with any `@modelcontextprotocol/sdk` `StdioClientTransport` client (it inherits
+  `.env`), e.g. create a task with `minime_upsert_task` and read it back with `minime_agenda` /
+  `minime_search` / `minime_state` — none of which need Ollama.
+- **Lint / typecheck / test / build** are the repo standards: `bun run lint`, `bun run typecheck`
+  (+ `bun run typecheck:ops`), `bun test`, and the aggregate gate `make verify-offline`. There is
+  no separate build step (Bun runs TypeScript directly).

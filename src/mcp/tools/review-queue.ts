@@ -24,6 +24,7 @@ const KINDS = [
   "ops_failure",
   "goal_review",
   "entity_promotion",
+  "receipt_candidate",
 ] as const;
 const HIDDEN = "[above current tier]";
 // Distinct from HIDDEN: the tier check passed but the archived bytes could not be proven
@@ -181,7 +182,8 @@ async function maskReviewPayload(item: any, actor: string): Promise<any> {
     if (
       raw.reason === "fuzzy_org_ambiguous" ||
       raw.reason === "low_confidence_edge" ||
-      raw.reason === "high_edge_extract_org"
+      raw.reason === "high_edge_extract_org" ||
+      raw.reason === "person_name_extract_org"
     ) {
       payload = { ...payload, reason: raw.reason };
     }
@@ -266,7 +268,7 @@ async function maskStaleLabel(item: any, actor: string): Promise<any> {
 export const reviewQueueTool: ToolDef = {
   name: "minime_review_queue",
   description:
-    "List open review-queue items (contradiction | stale | duplicate | decision_review | inbox_unfiled | phantom_person | extract_suspect | ops_failure | goal_review | entity_promotion), or resolve one as 'resolved' | 'dismissed'. inbox_unfiled/duplicate items carry the classifier's type/confidence guess (always visible) under payload.capture; its reason and a ~500-char capture text excerpt require an approved tier-2 unlock (minime_unlock) and read '[above current tier]' until then. ops_failure carries only fixed dream-step identifiers and a timestamp (payload.failed_steps, payload.since) — always visible, no unlock needed; run `bun run src/cli.ts doctor` locally for the full maintenance checklist. goal_review flags an active goal untouched (and with no linked task touched) for 90+ days; update it with minime_upsert_goal. entity_promotion flags a person/org whose identity is still tier 2 though it looks owner-known or independently tier-1-evidenced; its name reads '[above current tier]' until an approved tier-2 unlock, and only the owner's own terminal (`bun run src/cli.ts entity:restore-tier`) can actually restore it to tier 1 — this tool can surface the flag but never execute that change. The queue is flag-only: resolving never edits the flagged rows themselves.",
+    "List open review-queue items (contradiction | stale | duplicate | decision_review | inbox_unfiled | phantom_person | extract_suspect | ops_failure | goal_review | entity_promotion | receipt_candidate), or resolve one as 'resolved' | 'dismissed'. inbox_unfiled/duplicate items carry the classifier's type/confidence guess (always visible) under payload.capture; its reason and a ~500-char capture text excerpt require an approved tier-2 unlock (minime_unlock) and read '[above current tier]' until then. ops_failure carries only fixed dream-step identifiers and a timestamp (payload.failed_steps, payload.since) — always visible, no unlock needed; run `bun run src/cli.ts doctor` locally for the full maintenance checklist. goal_review flags an active goal untouched (and with no linked task touched) for 90+ days; update it with minime_upsert_goal. entity_promotion flags a person/org whose identity is still tier 2 though it looks owner-known or independently tier-1-evidenced; its name reads '[above current tier]' until an approved tier-2 unlock, and only the owner's own terminal (`bun run src/cli.ts entity:restore-tier`) can actually restore it to tier 1 — this tool can surface the flag but never execute that change. receipt_candidate flags a filed image that looks like a receipt (payload: inbox_item_id + image_kind only) — never auto-inserts a transaction; the owner may log it with minime_log_expense. The queue is flag-only: resolving never edits the flagged rows themselves.",
   schema: {
     action: z.enum(["list", "resolve"]).default("list"),
     kind: z.enum(KINDS).optional(),
