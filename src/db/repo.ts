@@ -822,13 +822,15 @@ async function writeChunkSpans(
   let ord = 0;
   for (let spanOrd = 0; spanOrd < spans.length; spanOrd++) {
     const span = spans[spanOrd]!;
-    const [row] = await tx`
-      insert into chunk_spans (parent_type, parent_id, ord, text, tier)
-      values (${parentType}, ${parentId}, ${spanOrd}, ${span.text}, ${tier})
-      returning id`;
+    // Client-generated id: INSERT … RETURNING is also checked against tier_read, so a
+    // locked app writing a tier-2 span would fail the same way it cannot SELECT it back.
+    const spanId = crypto.randomUUID();
+    await tx`
+      insert into chunk_spans (id, parent_type, parent_id, ord, text, tier)
+      values (${spanId}, ${parentType}, ${parentId}, ${spanOrd}, ${span.text}, ${tier})`;
     for (const child of span.children) {
       await tx`insert into chunks (parent_type, parent_id, ord, text, tier, span_id)
-               values (${parentType}, ${parentId}, ${ord}, ${child}, ${tier}, ${row!.id})`;
+               values (${parentType}, ${parentId}, ${ord}, ${child}, ${tier}, ${spanId})`;
       ord += 1;
     }
   }
