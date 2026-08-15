@@ -409,37 +409,34 @@ describe("inbox byte identity (classifier mocked by the test preload)", () => {
     expect(await readFile(join(config.dataDir, String(item!.archive_path)), "utf8")).toBe(bytes);
   });
 
-  test(
-    "a fresh crash lease wakes at expiry without another filesystem event",
-    async () => {
-      const path = join(inboxDir, "fresh-crash-lease.md");
-      const bytes = "todo: catalogue the fictional onyx tabs by 2027-04-14";
-      await Bun.write(path, bytes);
-      const [fresh] = await testSql`
+  test("a fresh crash lease wakes at expiry without another filesystem event", async () => {
+    const path = join(inboxDir, "fresh-crash-lease.md");
+    const bytes = "todo: catalogue the fictional onyx tabs by 2027-04-14";
+    await Bun.write(path, bytes);
+    const [fresh] = await testSql`
       insert into inbox_items
         (raw_path, mime, status, content_hash, claim_token, claimed_at, created_by, source, tier)
       values
         (${path}, 'text/markdown', 'processing', ${sha256(bytes)}, ${randomUUID()}::uuid,
-         clock_timestamp() - interval '4 minutes 58 seconds',
+         clock_timestamp() - interval '4 minutes 40 seconds',
          'agent:classifier', 'capture', 1)
       returning id`;
 
-      const watcher = await startWatcher();
-      try {
-        const [beforeExpiry] = await testSql`
+    const watcher = await startWatcher();
+    try {
+      const [beforeExpiry] = await testSql`
         select status from inbox_items where id = ${fresh!.id}`;
-        expect(beforeExpiry!.status).toBe("processing");
-        const filed = await waitForFiledIdentity(path, sha256(bytes));
-        expect(filed.id).toBe(fresh!.id);
-        expect(await testSql`select id from tasks where derived_from = ${fresh!.id}`).toHaveLength(
-          1,
-        );
-      } finally {
-        await watcher.close();
-      }
-    },
-    WATCHER_TEST_TIMEOUT_MS,
-  );
+      expect(beforeExpiry!.status).toBe("processing");
+      // 20s of lease remain after insert. startWatcher (chokidar ready + drain)
+      // can take >2s on a loaded install re-run, which used to expire a 4m58s
+      // lease during startup and fail the processing assertion.
+      const filed = await waitForFiledIdentity(path, sha256(bytes), 30_000);
+      expect(filed.id).toBe(fresh!.id);
+      expect(await testSql`select id from tasks where derived_from = ${fresh!.id}`).toHaveLength(1);
+    } finally {
+      await watcher.close();
+    }
+  }, 50_000);
 
   test(
     "recovery finds a deterministic archive published before archive_path committed",

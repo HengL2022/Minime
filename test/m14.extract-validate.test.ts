@@ -347,17 +347,24 @@ describe("validateEdges provider routing", () => {
 });
 
 describe("dream wiring + review tool", () => {
-  test("dream() runs 3c_validate_edges and reports counts", async () => {
-    await resetDb();
-    await plantGraphHygieneCorpus();
-    const { dream } = await import("../src/pipeline/dream");
-    const summary = await dream();
-    // dream() runs 2_entity_link first, which may extract ADDITIONAL edges over the planted
-    // pages — so assert the step ran and caught at least the planted bad ones; the exact
-    // 3-flags/0-false bar lives in the direct tests above.
-    const step = summary["3c_validate_edges"] as { flagged: number };
-    expect(step.flagged).toBeGreaterThanOrEqual(3);
-  });
+  // resetDb + migrate on a loaded CI runner (install re-run) exceeds bun's 5s default.
+  const RESET_TIMEOUT_MS = 20_000;
+
+  test(
+    "dream() runs 3c_validate_edges and reports counts",
+    async () => {
+      await resetDb();
+      await plantGraphHygieneCorpus();
+      const { dream } = await import("../src/pipeline/dream");
+      const summary = await dream();
+      // dream() runs 2_entity_link first, which may extract ADDITIONAL edges over the planted
+      // pages — so assert the step ran and caught at least the planted bad ones; the exact
+      // 3-flags/0-false bar lives in the direct tests above.
+      const step = summary["3c_validate_edges"] as { flagged: number };
+      expect(step.flagged).toBeGreaterThanOrEqual(3);
+    },
+    RESET_TIMEOUT_MS,
+  );
 
   test("minime_review_queue lists extract_suspect with names visible and reason masked at tier 1", async () => {
     const tool = toolByName("minime_review_queue");
@@ -381,35 +388,39 @@ describe("dream wiring + review tool", () => {
     expect(resolved.ok).toBe(true);
   });
 
-  test("tier-2-anchored suspect edge: rel + names masked at tier 1, ids stay for triage", async () => {
-    await resetDb();
-    // Bare-first-name org on a TIER-2 page → the edge inherits tier 2; the heuristic denies it.
-    const [org] =
-      await testSql`insert into orgs (canonical_name, tier) values ('Verity', 1) returning id`;
-    const [pg] = await testSql`insert into pages (path, title, body_md, content_hash, tier)
+  test(
+    "tier-2-anchored suspect edge: rel + names masked at tier 1, ids stay for triage",
+    async () => {
+      await resetDb();
+      // Bare-first-name org on a TIER-2 page → the edge inherits tier 2; the heuristic denies it.
+      const [org] =
+        await testSql`insert into orgs (canonical_name, tier) values ('Verity', 1) returning id`;
+      const [pg] = await testSql`insert into pages (path, title, body_md, content_hash, tier)
       values ('gh/mask.md', 'gh/mask', 'Talked with Verity about the school run.', 'hmask', 2) returning id`;
-    await testSql`insert into chunks (parent_type, parent_id, ord, text, tier)
+      await testSql`insert into chunks (parent_type, parent_id, ord, text, tier)
       values ('page', ${pg!.id}, 0, 'Talked with Verity about the school run.', 2)`;
-    const [edge] = await testSql`
+      const [edge] = await testSql`
       insert into edges (src_type, src_id, rel, dst_type, dst_id, source_table, source_id, extracted_by, confidence)
       values ('page', ${pg!.id}, 'mentions', 'org', ${org!.id}, 'pages', ${pg!.id}, 'system:extract', 0.8)
       returning id`;
-    const r = await validateEdges();
-    expect(r.flagged).toBe(1);
+      const r = await validateEdges();
+      expect(r.flagged).toBe(1);
 
-    const tool = toolByName("minime_review_queue");
-    const res = await invokeTool(
-      tool,
-      { action: "list", kind: "extract_suspect" },
-      { actor: "agent:test" },
-    );
-    expect(res.ok).toBe(true);
-    const [item] = (res as any).envelope.data.items;
-    expect(item.payload.edge_id).toBe(edge!.id); // ids stay for post-unlock triage
-    expect(item.payload.rule_key).toBe("mentions@0.8");
-    expect(item.payload.verdict).toBe("deny");
-    expect(item.payload.rel).toBe("[above current tier]"); // the triple is tier-2-anchored
-    expect(item.payload.dst.name).toBe("[above current tier]");
-    expect(JSON.stringify(item)).not.toContain("Verity"); // the name never rides a tier-1 read
-  });
+      const tool = toolByName("minime_review_queue");
+      const res = await invokeTool(
+        tool,
+        { action: "list", kind: "extract_suspect" },
+        { actor: "agent:test" },
+      );
+      expect(res.ok).toBe(true);
+      const [item] = (res as any).envelope.data.items;
+      expect(item.payload.edge_id).toBe(edge!.id); // ids stay for post-unlock triage
+      expect(item.payload.rule_key).toBe("mentions@0.8");
+      expect(item.payload.verdict).toBe("deny");
+      expect(item.payload.rel).toBe("[above current tier]"); // the triple is tier-2-anchored
+      expect(item.payload.dst.name).toBe("[above current tier]");
+      expect(JSON.stringify(item)).not.toContain("Verity"); // the name never rides a tier-1 read
+    },
+    RESET_TIMEOUT_MS,
+  );
 });
