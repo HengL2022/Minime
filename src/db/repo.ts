@@ -3141,6 +3141,7 @@ async function excludedDerivedPageIdsForCompiledNoteSources(): Promise<string[]>
     .filter(
       (page) =>
         page.source === "dream:decision-digest" ||
+        page.source === "dream:goal-digest" ||
         recognizeCompiledNote({ path: page.path, source: page.source, bodyMd: page.body_md })
           .recognized,
     )
@@ -5388,7 +5389,7 @@ export async function chunkPairsSharingPerson(limit: number): Promise<Contradict
     excluded_page_parents as (
       select ps.id
       from page_shape_parts ps
-      where ps.source in ('dream:notes', 'dream:decision-digest')
+      where ps.source in ('dream:notes', 'dream:decision-digest', 'dream:goal-digest')
          or ps.path ~ ${COMPILED_NOTE_UUID_PATH_SQL_RE}
          or (
            ${COMPILED_NOTE_MARKER} =
@@ -5746,6 +5747,57 @@ export async function decisionDigestCandidates(): Promise<DecisionDigestInput[]>
   const out: DecisionDigestInput[] = [];
   for (const r of rows) {
     const input = await decisionDigestInput(r.id);
+    if (input) out.push(input);
+  }
+  return out;
+}
+
+export interface GoalDigestInput {
+  id: string;
+  horizon: string;
+  statement: string;
+  why: string | null;
+  status: string;
+  tier: number;
+  open_task_count: number;
+  done_task_count: number;
+}
+
+export function goalDigestPath(id: string): string {
+  return `derived/goals/${id}.md`;
+}
+
+export async function goalDigestInput(id: string): Promise<GoalDigestInput | null> {
+  const [row] = (await db()`
+    select g.id, g.horizon, g.statement, g.why, g.status,
+           greatest(g.tier, coalesce(max(t.tier), g.tier))::int as tier,
+           count(t.id) filter (where t.status in ('inbox','active','waiting'))::int
+             as open_task_count,
+           count(t.id) filter (where t.status = 'done')::int as done_task_count
+    from goals g
+    left join tasks t on t.goal_id = g.id and t.tier in (1,2)
+    where g.id = ${id} and g.superseded_at is null and g.tier in (1,2)
+    group by g.id, g.horizon, g.statement, g.why, g.status, g.tier`) as any[];
+  return (row as GoalDigestInput | undefined) ?? null;
+}
+
+export async function goalDigestCandidates(): Promise<GoalDigestInput[]> {
+  const rows = (await db()`
+    select g.id
+    from goals g
+    left join pages pg on pg.path = ${"derived/goals/"} || g.id::text || '.md'
+    left join tasks t on t.goal_id = g.id
+    where g.superseded_at is null and g.tier in (1,2)
+    group by g.id, pg.id, pg.status, pg.body_md, pg.updated_at, g.updated_at
+    having pg.id is null
+       or pg.status <> 'active'
+       or pg.body_md not like '%compiler: dream%'
+       or pg.updated_at < g.updated_at
+       or pg.updated_at < coalesce(max(t.updated_at), g.updated_at)
+    order by g.updated_at desc`) as any[];
+  const out: GoalDigestInput[] = [];
+  for (const r of rows) {
+    const input = await goalDigestInput(r.id);
     if (input) out.push(input);
   }
   return out;

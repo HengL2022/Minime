@@ -4091,3 +4091,26 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   table. Retired orgs must not grow a living card.
 - **Approved by:** owner request to continue the current-state plan through the
   ordinary backlog (2026-08-15).
+
+## 2026-08-15 — Goal digest pages
+
+- **Context:** Decision digests already exist as retrieval read-models
+  (`dream:decision-digest`). Goals had review + backlog index but no compiled
+  page, so "what am I driving toward?" fell back to raw goal rows. This amends
+  the dream-step vocabulary (`2e_compile_goal_digests`), the `dream:summary`
+  audit allowlist, and `COMPILED_SOURCES` (the ×1.5 compiled boost). No new
+  MCP tool, review kind, or migration. Topic-page clustering and wikilinks
+  stay deferred.
+- **Decision:** Dream compiles `derived/goals/<id>.md` for each non-superseded
+  goal that is missing a digest or whose goal/linked-task `updated_at` is
+  newer. Body is statement, horizon, why, and open/done task **counts** —
+  never task titles or bodies. Digest tier is max(goal, linked tasks). Source
+  is `dream:goal-digest`; contradiction and compiled-note evidence exclude
+  those pages like decision digests. Audit payload is candidate/compiled/
+  skipped counts only.
+- **Why:** Q4 seeded topic work from decisions+goals; decisions already had
+  a digest. Counts-only progress keeps a tier-2 task from leaking onto a
+  readable card. Reusing the decision-digest pattern avoids a new compiled-note
+  kind and the H1 recovery machine.
+- **Approved by:** owner request to continue the current-state plan through the
+  ordinary backlog (2026-08-15).

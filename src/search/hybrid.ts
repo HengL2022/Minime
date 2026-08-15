@@ -74,7 +74,7 @@ const SUPERSEDED_PENALTY = 0.5;
 // content — boosted like GBrain's compiled-truth layer instead of penalized. ×1.5 starting
 // value. // eval-calibration pending
 const NOTES_BOOST = 1.5;
-const COMPILED_SOURCES = new Set(["dream:notes", "dream:decision-digest"]);
+const COMPILED_SOURCES = new Set(["dream:notes", "dream:decision-digest", "dream:goal-digest"]);
 
 // 1-based rank per candidate id, ordered by `key` descending. Each arm is already sorted in
 // repo (limit 50); we re-derive ranks here so the fusion math is self-contained and testable.

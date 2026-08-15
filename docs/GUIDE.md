@@ -45,8 +45,11 @@ Phrasing nudges the classifier (all optional):
 |---|---|
 | `todo: book dentist by 2026-07-01` | a task with a due date |
 | `met Alice for coffee, she's leaving Acme` | an interaction (updates Alice's last-contact) |
+| `org: Fjordsonics AS` / `person: Nadia Rossi` | a resolvable company or person card |
 | `decided: staying with Postgres because…` | a decision note |
+| `note: they want a written redline` | a reference note → a brain page |
 | `Today felt scattered. Energy low…` | a journal entry (tier 2, private) |
+| a dump with those prefixes on their own lines | one primary plus leftover companion rows |
 | anything else substantial | a reference note → a brain page |
 
 **Recurring tasks**: ask your agent to make a task repeat — "make watering the plants a weekly
