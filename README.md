@@ -76,7 +76,15 @@ git clone https://github.com/HengL2022/Minime minime && cd minime && bash script
 
 Non-interactive, safe to re-run, installs everything missing (bun, Postgres+pgvector via
 Docker/brew/apt, Ollama + models), migrates, verifies, and prints how to register the MCP
-server. Add `--with-demo` for a fictional dataset to explore. Full contract — flags,
+server. Add `--with-demo` to seed the **live** database with the fictional dataset. To
+try that dataset on an isolated stack that cannot touch the live volume or `.env`:
+
+```
+make demo        # Postgres on 127.0.0.1:5433 + migrate + seed
+make demo-down   # stop the demo stack (volume kept)
+```
+
+Register MCP against the demo URL printed by `make demo`. Full contract — flags,
 degraded modes, machine-parsable output for coding agents — in [AGENTS.md](AGENTS.md).
 
 **Agent orientation after install:** before using Minime MCP tools, an AI harness should read

@@ -3142,6 +3142,7 @@ async function excludedDerivedPageIdsForCompiledNoteSources(): Promise<string[]>
       (page) =>
         page.source === "dream:decision-digest" ||
         page.source === "dream:goal-digest" ||
+        page.source === "dream:topic-cluster" ||
         recognizeCompiledNote({ path: page.path, source: page.source, bodyMd: page.body_md })
           .recognized,
     )
@@ -5389,7 +5390,7 @@ export async function chunkPairsSharingPerson(limit: number): Promise<Contradict
     excluded_page_parents as (
       select ps.id
       from page_shape_parts ps
-      where ps.source in ('dream:notes', 'dream:decision-digest', 'dream:goal-digest')
+      where ps.source in ('dream:notes', 'dream:decision-digest', 'dream:goal-digest', 'dream:topic-cluster')
          or ps.path ~ ${COMPILED_NOTE_UUID_PATH_SQL_RE}
          or (
            ${COMPILED_NOTE_MARKER} =
@@ -5799,6 +5800,189 @@ export async function goalDigestCandidates(): Promise<GoalDigestInput[]> {
   for (const r of rows) {
     const input = await goalDigestInput(r.id);
     if (input) out.push(input);
+  }
+  return out;
+}
+
+export async function pagesByEntityUuidSuffix(
+  ids: string[],
+): Promise<{ id: string; path: string }[]> {
+  if (ids.length === 0) return [];
+  return db()`
+    select p.id, p.path from pages p
+    where p.status = 'active'
+      and exists (
+        select 1 from unnest(${ids}::uuid[]) as e(id)
+        where p.path like '%--' || e.id::text || '.md'
+      )` as any;
+}
+
+export type TopicSeedKind = "decision" | "goal";
+
+export interface TopicClusterMember {
+  path: string;
+  title: string;
+  source: string;
+  tier: number;
+  updated_at: Date;
+}
+
+export interface TopicClusterInput {
+  kind: TopicSeedKind;
+  id: string;
+  title: string;
+  blurb: string;
+  tier: number;
+  updated_at: Date;
+  members: TopicClusterMember[];
+}
+
+export function topicClusterPath(kind: TopicSeedKind, id: string): string {
+  if (kind !== "decision" && kind !== "goal") throw new Error("INVALID_TOPIC_SEED");
+  return `derived/topics/${kind}--${id}.md`;
+}
+
+function topicDigestPath(kind: TopicSeedKind, id: string): string {
+  return kind === "decision" ? decisionDigestPath(id) : goalDigestPath(id);
+}
+
+async function topicClusterSeed(
+  kind: TopicSeedKind,
+  id: string,
+): Promise<{ title: string; blurb: string; tier: number; updated_at: Date } | null> {
+  if (kind === "decision") {
+    const [row] = (await db()`
+      select question, stakes, tier, updated_at, superseded_at
+      from decisions where id = ${id} and tier in (1, 2)`) as any[];
+    if (!row || row.superseded_at) return null;
+    return {
+      title: String(row.question ?? ""),
+      blurb: [row.question, row.stakes].filter(Boolean).join(" "),
+      tier: Number(row.tier) === 2 ? 2 : 1,
+      updated_at: new Date(row.updated_at),
+    };
+  }
+  const [row] = (await db()`
+    select statement, why, tier, updated_at, superseded_at
+    from goals where id = ${id} and tier in (1, 2)`) as any[];
+  if (!row || row.superseded_at) return null;
+  return {
+    title: String(row.statement ?? ""),
+    blurb: [row.statement, row.why].filter(Boolean).join(" "),
+    tier: Number(row.tier) === 2 ? 2 : 1,
+    updated_at: new Date(row.updated_at),
+  };
+}
+
+async function topicClusterEntityIds(
+  kind: TopicSeedKind,
+  id: string,
+  seedText: string,
+): Promise<string[]> {
+  const mentioned = (await db()`
+    select distinct e.dst_id::text as id
+    from edges e
+    where e.rel = 'mentions' and e.dst_type in ('person', 'org')
+      and e.src_type = ${kind} and e.src_id = ${id}
+      and e.tier in (1, 2)`) as { id: string }[];
+  const named = (await db()`
+    select p.id::text as id
+    from people p
+    where p.superseded_at is null and p.tier in (1, 2)
+      and btrim(p.canonical_name) <> ''
+      and strpos(lower(${seedText}), lower(p.canonical_name)) > 0
+    union
+    select a.person_id::text
+    from person_aliases a
+    where a.tier in (1, 2) and btrim(a.alias) <> ''
+      and strpos(lower(${seedText}), lower(a.alias)) > 0
+    union
+    select o.id::text
+    from orgs o
+    where o.retired_at is null and o.superseded_at is null and o.tier in (1, 2)
+      and btrim(o.canonical_name) <> ''
+      and strpos(lower(${seedText}), lower(o.canonical_name)) > 0
+    union
+    select a.org_id::text
+    from org_aliases a
+    join orgs o on o.id = a.org_id
+    where o.retired_at is null and a.tier in (1, 2) and btrim(a.alias) <> ''
+      and strpos(lower(${seedText}), lower(a.alias)) > 0`) as { id: string }[];
+  return [...new Set([...mentioned, ...named].map((row) => row.id))];
+}
+
+async function topicClusterMemberRows(
+  digestPath: string,
+  entityIds: string[],
+): Promise<TopicClusterMember[]> {
+  const rows = (await db()`
+    select p.path, p.title, p.source, p.tier, p.updated_at
+    from pages p
+    where p.status = 'active'
+      and p.source in ('dream:notes', 'dream:decision-digest', 'dream:goal-digest')
+      and (
+        p.path = ${digestPath}
+        or (
+          ${entityIds.length} > 0
+          and p.source = 'dream:notes'
+          and exists (
+            select 1 from unnest(${entityIds}::uuid[]) as e(id)
+            where p.path like '%--' || e.id::text || '.md'
+          )
+        )
+      )
+    order by p.path`) as any[];
+  return rows.map((row) => ({
+    path: String(row.path),
+    title: String(row.title ?? ""),
+    source: String(row.source),
+    tier: Number(row.tier) === 2 ? 2 : 1,
+    updated_at: new Date(row.updated_at),
+  }));
+}
+
+export async function topicClusterInput(
+  kind: TopicSeedKind,
+  id: string,
+): Promise<TopicClusterInput | null> {
+  const seed = await topicClusterSeed(kind, id);
+  if (!seed) return null;
+  const entities = await topicClusterEntityIds(kind, id, `${seed.title} ${seed.blurb}`);
+  const members = await topicClusterMemberRows(topicDigestPath(kind, id), entities);
+  if (members.length < 2) return null;
+  const tier = Math.max(seed.tier, ...members.map((member) => member.tier)) === 2 ? 2 : 1;
+  return { kind, id, ...seed, tier, members };
+}
+
+async function topicClusterNeedsCompile(input: TopicClusterInput): Promise<boolean> {
+  const path = topicClusterPath(input.kind, input.id);
+  const [page] = (await db()`
+    select status, body_md, updated_at from pages where path = ${path}`) as any[];
+  if (
+    !page ||
+    page.status !== "active" ||
+    !String(page.body_md ?? "").includes("compiler: dream")
+  ) {
+    return true;
+  }
+  const newest = [input.updated_at, ...input.members.map((member) => member.updated_at)].reduce(
+    (max, at) => (at > max ? at : max),
+  );
+  return new Date(page.updated_at) < newest;
+}
+
+export async function topicClusterCandidates(): Promise<TopicClusterInput[]> {
+  const seeds = (await db()`
+    select 'decision'::text as kind, id from decisions
+    where superseded_at is null and tier in (1, 2)
+    union all
+    select 'goal', id from goals
+    where superseded_at is null and tier in (1, 2)
+    order by kind, id`) as { kind: TopicSeedKind; id: string }[];
+  const out: TopicClusterInput[] = [];
+  for (const seed of seeds) {
+    const input = await topicClusterInput(seed.kind, seed.id);
+    if (input && (await topicClusterNeedsCompile(input))) out.push(input);
   }
   return out;
 }

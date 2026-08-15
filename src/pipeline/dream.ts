@@ -350,6 +350,11 @@ export async function dream(): Promise<Record<string, unknown>> {
     const { candidates, compiled, skipped } = await compileGoalDigests();
     return { candidates, compiled, skipped };
   });
+  await step("2f_compile_topic_clusters", async () => {
+    const { compileTopicClusters } = await import("./topic-cluster");
+    const { candidates, compiled, skipped } = await compileTopicClusters();
+    return { candidates, compiled, skipped };
+  });
   await step("3_contradictions", () => contradictionScan());
   await step("3b_phantom_persons", () => phantomPersonScan());
   await step("3c_validate_edges", async () => {

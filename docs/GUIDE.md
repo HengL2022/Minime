@@ -301,8 +301,10 @@ direct, suppressed, uncertain, and incomplete rows do not count. These records d
 local audit boundary only; they do not promise crash recovery
 or a distributed rollback across Postgres, files, model providers, or indexes.
 
-- **Nightly dream job** (3am): embeds backlogs, links entities, compiles per-person
-  notes, flags contradictions and staleness, rolls up metrics, backs up. `minime_state`'s
+- **Nightly dream job** (3am): embeds backlogs, links entities, compiles
+  per-person and per-org notes, decision/goal digests, and topic hub pages
+  that `[[wikilink]]` those compiled cards, flags contradictions and
+  staleness, rolls up metrics, backs up. `minime_state`'s
   `ops_health` block always shows when it last ran and which steps (if any) failed on that run
   — content-free identifiers, same for every actor. Three consecutive nightly runs that each
   failed at least one step raise a single `ops_failure` review-queue item (it stays open until

@@ -4114,3 +4114,49 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   kind and the H1 recovery machine.
 - **Approved by:** owner request to continue the current-state plan through the
   ordinary backlog (2026-08-15).
+
+## 2026-08-15 — Topic cluster pages and path-only wikilinks
+
+- **Context:** Q4 seeded topic work from decisions+goals. Org notes and
+  goal/decision digests already exist; clustering those compiled pages into
+  hubs, and resolving `[[wikilinks]]`, were the remaining W7 product slice.
+  Adding `topic` to `CompiledNoteKind` would expand the H1 recovery machine.
+  This amends the dream-step vocabulary (`2f_compile_topic_clusters`), the
+  `dream:summary` audit allowlist, and `COMPILED_SOURCES`. No new MCP tool,
+  review kind, or migration. Pages still have no alias table.
+- **Decision:** Dream compiles `derived/topics/<kind>--<id>.md` for each
+  non-superseded decision or goal that has at least two related compiled
+  pages (its own digest plus person/org notes for entities named or
+  mentioned by the seed). Body is a capped seed blurb and `[[path]]`
+  wikilinks — never task titles or member bodies. Tier is max(seed,
+  members). Source is `dream:topic-cluster`; contradiction and compiled-note
+  evidence exclude those pages like other digests. Wikilink resolution is
+  exact path or compiled-note `slug--uuid` via `pagesByPaths` /
+  `pagesByEntityUuidSuffix`; title-shaped targets do not resolve. Compiled
+  note archives are not rewritten with wikilinks.
+- **Why:** A hub page makes "what belongs with this decision/goal?"
+  retrievable without copying private member prose. Reusing the digest
+  pattern keeps topic pages off H1. Path-only resolution matches the
+  documented slug convention and cannot silently retarget when a title
+  changes.
+- **Approved by:** owner request to continue the current-state plan through the
+  ordinary backlog (2026-08-15).
+
+## 2026-08-15 — Isolated fictional demo stack
+
+- **Context:** Install already has `--with-demo` against the live persisted
+  Postgres identity. A second compose file that reused that volume or wrote
+  `.env` would violate the install lifecycle contract. W9 asked for an
+  experience-first demo path; the owner-recorded screencast stays owner-only.
+- **Decision:** `docker-compose.demo.yml` + `make demo` / `make demo-down`
+  start a separate Compose project (`minime-demo`) on loopback port 5433 with
+  its own volume. The script migrates and seeds with an explicit
+  `DATABASE_URL` and `bun --no-env-file`. It never reads or writes `.env`,
+  `data/`, or the live compose volume. Ollama is not bundled; host Ollama or
+  `--no-ollama` remains the inference path. `--with-demo` still seeds the
+  live database.
+- **Why:** Trying the fictional dataset should be possible without adopting
+  another local database or touching owner settings. A second Ollama in
+  Compose would duplicate the installer without adding isolation value.
+- **Approved by:** owner request to continue the current-state plan through the
+  ordinary backlog (2026-08-15).

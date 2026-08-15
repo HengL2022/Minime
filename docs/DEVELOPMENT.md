@@ -203,8 +203,8 @@ known candidates are:
   heuristic companions cover prefixed `todo:`/`met`/`note:` dumps; inbox
   cardinality is still one primary — see
   `docs/known-issues/classifier-multi-entity-captures.md`);
-- W7 topic-page clustering and wikilinks (org compiled notes and goal
-  digests shipped 2026-08-15; decision digests already existed); and
+- W7 topic-page clustering and path-only wikilinks (shipped 2026-08-15;
+  org compiled notes and goal digests already existed); and
 - close remaining known-issue documents once their behavioral regressions pass
   (extractor-phantom-orgs Fix C / high-edge watchdog shipped 2026-08-14; the
   live pre-Fix-B sweep remains).
