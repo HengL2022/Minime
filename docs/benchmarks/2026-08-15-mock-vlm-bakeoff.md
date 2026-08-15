@@ -1,6 +1,6 @@
 # VLM bake-off — 2026-08-15
 
-Mode: **mock**. Images: 10 fictional 1×1 PNG fixtures (bytes only; never real photos).
+Mode: **mock**. Images: 10 fictional labeled PNG cards (bytes only; never real photos).
 Gold: committed captions in `fixtures/parse/images.ts`. Metric: token Jaccard vs gold (lowercase `\W+` tokens).
 Models: `mock-hash`.
 Cloud VLM routes stay rejected. CLIP/SigLIP stays deferred.
@@ -21,4 +21,3 @@ Mean Jaccard: **1.000** (10 images).
 | sildre-crate | SILDRE node crate | 1.000 | A fictional wooden crate stenciled SILDRE NODE 07 with a foam-packed hydrophone and a firmware USB stick. |
 | bakery-window | Cinnamon-bun bakery window | 1.000 | A fictional bakery window on Bakklandet showing cinnamon buns and a handwritten ranking card. |
 | passport-visa | Passport visa stamp | 1.000 | A fictional passport page with a Japan visa stamp dated April 2025 and a Takayama entry mark. |
-

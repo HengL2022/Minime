@@ -48,6 +48,7 @@ describe("VLM bake-off harness", () => {
       scores,
     });
     expect(markdown).toContain("# VLM bake-off — 2026-08-15");
+    expect(markdown).toContain("fictional labeled PNG cards");
     expect(markdown).toContain("Mean Jaccard: **1.000**");
     expect(markdown).toContain("harbor-pier");
     expect(markdown).toContain("Cloud VLM routes stay rejected");

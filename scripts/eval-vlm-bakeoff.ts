@@ -171,7 +171,7 @@ export async function main(argv: readonly string[] = Bun.argv.slice(2)): Promise
   console.log(markdown);
   if (args.publish) {
     mkdirSync(RESULTS_DIR, { recursive: true });
-    const path = join(RESULTS_DIR, `${date}-vlm-bakeoff.md`);
+    const path = join(RESULTS_DIR, `${date}-${args.mode}-vlm-bakeoff.md`);
     writeFileSync(path, markdown);
     console.error(`scorecard: ${path}`);
   }
