@@ -39,6 +39,8 @@ grant select, insert, delete on chunk_spans to minime_app;
 alter table chunk_spans enable row level security;
 create policy tier_read on chunk_spans for select to minime_app, minime_engineer_ro
   using (tier >= 1 and tier <= app_allowed_tier());
+-- with check (true) matches chunks: a locked actor may write a tier-2 span it
+-- cannot read back. Writers must not INSERT … RETURNING (tier_read applies).
 create policy tier_write on chunk_spans for insert to minime_app with check (true);
 create policy tier_delete on chunk_spans for delete to minime_app
   using (tier >= 1 and tier <= app_allowed_tier());
