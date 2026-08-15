@@ -45,9 +45,10 @@ function planFromLines(text: string): IntentItem[] | null {
     if (strong) {
       if (current) items.push(current);
       current = { classification: strong, text: line.trim() };
-    } else if (current && line.trim()) {
-      current = { ...current, text: `${current.text}\n${line.trim()}` };
-    } else if (!current && line.trim()) {
+    } else if (current) {
+      const extra = line.trim();
+      if (extra) current.text = `${current.text}\n${extra}`;
+    } else if (line.trim()) {
       return null;
     }
   }
