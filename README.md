@@ -21,7 +21,7 @@ session.
   same file is idempotent; changed bytes at the same path create a new version; concurrent watcher
   and agent captures converge without duplicate derivatives.
 - **Correction loop.** `minime_refile` files a pending capture as a typed row; `minime_correct`
-  amends, retracts, or retiers a journal/interaction/decision/note; `minime_upsert_person` adds
+  amends, retracts, or retiers a note (retier is notes only, 1→2); `minime_upsert_person` adds
   aliases, relations, and renames. Identity merges stay owner-run repair scripts.
 - **Period and goal reads.** `minime_timeline` walks a date range; `minime_search` can disclose a
   bare count of locked tier-2 matches; `minime_upsert_goal` / `minime_upsert_commitment` /
@@ -210,7 +210,7 @@ Owner-side companions include `unlock:approve`, `unlock:status`, `unlock:revoke`
 | `minime_log_interaction` | Records a person/org interaction and updates relationship recency. |
 | `minime_review_queue` | Lists review flags and marks them resolved or dismissed; it never edits the flagged source rows. |
 | `minime_refile` | Files a pending inbox capture as a typed row (task, journal, note, interaction, decision, org, or person) under the anti-laundering evidence floor; requires an approved tier-2 unlock. |
-| `minime_correct` | Amends, retracts, or retiers a journal, interaction, decision, or note; the original row is never deleted. |
+| `minime_correct` | Amends or retracts a journal, interaction, decision, or note; `retier` is notes only (1→2). The original row is never deleted. |
 | `minime_unlock` | Requests a time-boxed tier-2 read; the owner must approve it in a local terminal. |
 | `minime_upsert_person` | Adds an alias, sets relation/context, or renames a person or org; merges are owner-run repairs. |
 | `minime_set_person_date` | Sets a birthday, anniversary, or custom recurring person date (insert/update only). |

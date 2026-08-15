@@ -171,22 +171,31 @@ export function heuristicNarrativeIntents(text: string): IntentPlan {
   return mixed ? { kind: "items", items: mixed } : { kind: "none" };
 }
 
-function parseLlmIntentPlan(raw: string): IntentPlan {
+function excerptContained(source: string, excerpt: string): boolean {
+  const norm = (value: string) => value.replace(/\s+/g, " ").trim();
+  const haystack = norm(source);
+  const needle = norm(excerpt);
+  return needle.length > 0 && haystack.includes(needle);
+}
+
+export function parseLlmIntentPlan(raw: string, source: string): IntentPlan {
   try {
     const parsed = JSON.parse(raw) as { items?: unknown };
-    if (!Array.isArray(parsed.items)) return { kind: "none" };
+    if (!Array.isArray(parsed.items) || parsed.items.length > MAX_ITEMS) return { kind: "none" };
     const items: IntentItem[] = [];
-    for (const row of parsed.items.slice(0, MAX_ITEMS)) {
+    for (const row of parsed.items) {
       if (!row || typeof row !== "object") continue;
       const rec = row as { type?: unknown; text?: unknown; fields?: unknown };
       if (!(CLASSIFIER_TYPES as readonly string[]).includes(String(rec.type))) continue;
       if (typeof rec.text !== "string" || !rec.text.trim()) continue;
       const type = rec.type as ClassifierType;
       if (type === "unknown") continue;
+      const excerpt = rec.text.trim();
+      if (!excerptContained(source, excerpt)) continue;
       const fields = rec.fields && typeof rec.fields === "object" ? rec.fields : {};
       items.push({
         classification: { type, confidence: 0.8, fields: fields as Record<string, unknown> },
-        text: rec.text.trim(),
+        text: excerpt,
       });
     }
     const mixed = validMixed(items);
@@ -217,7 +226,7 @@ export async function resolveIntentPlan(text: string, fetchFn?: typeof fetch): P
   try {
     const { classifyProviderForTier } = await import("../llm");
     const raw = await classifyProviderForTier(2, fetchFn).completeJson(buildIntentPrompt(text));
-    return parseLlmIntentPlan(raw);
+    return parseLlmIntentPlan(raw, text);
   } catch {
     return { kind: "none" };
   }

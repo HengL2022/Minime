@@ -25,6 +25,7 @@ import {
   assertTier2UnlockMaxMinutes,
   config,
 } from "../util/config";
+import { sha256Hex } from "../util/hash";
 import { type MetricRollup, metricDateString } from "../util/metric-rollup";
 import { type RecurFreq, nextDue } from "../util/recurrence";
 import { type TxCategoryRule, applyCategoryRules } from "../util/tx-categories";
@@ -128,8 +129,11 @@ export async function schemaMigrationNames(executor: DbExecutor): Promise<string
 
 export async function ensureSchemaMigrationLedger(executor: DbExecutor): Promise<void> {
   await executor`create table if not exists schema_migrations (
-    name text primary key, applied_at timestamptz not null default now()
+    name text primary key,
+    applied_at timestamptz not null default now(),
+    checksum text
   )`;
+  await executor`alter table schema_migrations add column if not exists checksum text`;
 }
 
 /** Execute one checked-out migration and ledger insertion as one owner transaction. */
@@ -138,9 +142,10 @@ export async function applyCheckedOutMigration(
   name: string,
   body: string,
 ): Promise<void> {
+  const checksum = sha256Hex(body);
   await executor.begin(async (tx) => {
     await tx.unsafe(body);
-    await tx`insert into schema_migrations (name) values (${name})`;
+    await tx`insert into schema_migrations (name, checksum) values (${name}, ${checksum})`;
   });
 }
 

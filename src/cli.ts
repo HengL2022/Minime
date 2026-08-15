@@ -227,11 +227,13 @@ const TIER0_TTY_FIX =
  * session piping or capturing this command's output gets a refusal, never rows — the gate lives
  * here, first line, so no future call site can reach the print loop without passing it.
  * MINIME_ALLOW_NON_TTY_TIER0=1 is a test-only seam (bun test spawns children with piped stdout,
- * which is never a TTY) — never set it in the owner's real environment, and it must never be
- * documented as anything but test-only.
+ * which is never a TTY). It is honored only when NODE_ENV=test, so an ambient value in a real
+ * owner environment cannot bypass the TTY gate.
  */
 function renderTier0Lines(lines: string[]): void {
-  if (!process.stdout.isTTY && process.env.MINIME_ALLOW_NON_TTY_TIER0 !== "1") {
+  const testSeam =
+    process.env.NODE_ENV === "test" && process.env.MINIME_ALLOW_NON_TTY_TIER0 === "1";
+  if (!process.stdout.isTTY && !testSeam) {
     throw new Error("tier0_requires_tty");
   }
   for (const line of lines) console.log(line);

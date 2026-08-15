@@ -16,6 +16,7 @@ interface Captured {
   url: string;
   headers: Record<string, string>;
   body: any;
+  redirect?: RequestRedirect;
 }
 
 function fakeFetch(responder: (c: Captured) => unknown): { calls: Captured[]; fn: typeof fetch } {
@@ -27,6 +28,7 @@ function fakeFetch(responder: (c: Captured) => unknown): { calls: Captured[]; fn
         Object.entries(init?.headers ?? {}).map(([k, v]) => [k.toLowerCase(), String(v)]),
       ),
       body: init?.body ? JSON.parse(init.body) : undefined,
+      redirect: init?.redirect,
     };
     calls.push(captured);
     return new Response(JSON.stringify(responder(captured)), {
@@ -103,6 +105,7 @@ describe("factory validation", () => {
     expect(calls[0]!.url).toBe("https://openrouter.ai/api/v1/embeddings");
     expect(calls[0]!.body.model).toBe(config.openrouterEmbedModel);
     expect(calls[0]!.body.dimensions).toBe(768);
+    expect(calls[0]!.redirect).toBe("error");
 
     // a model that ignores `dimensions` must fail loudly, never store wrong-dim vectors
     const bad = fakeFetch((c) => ({
@@ -148,6 +151,7 @@ describe("request shapes", () => {
     expect(calls[0]!.headers.authorization).toBe("Bearer sk-test");
     expect(calls[0]!.body.dimensions).toBe(768);
     expect(calls[0]!.body.model).toBe(config.openaiEmbedModel);
+    expect(calls[0]!.redirect).toBe("error");
     (config as any).openaiApiKey = prev;
   });
 
@@ -164,6 +168,7 @@ describe("request shapes", () => {
     expect(calls[0]!.body.response_format.type).toBe("json_object");
     expect(calls[0]!.body.model).toBe(config.openrouterModel);
     expect(calls[0]!.body.temperature).toBe(0);
+    expect(calls[0]!.redirect).toBe("error");
     (config as any).openrouterApiKey = prev;
   });
 

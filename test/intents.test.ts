@@ -4,6 +4,7 @@ import {
   classifyStrongIntentLine,
   heuristicNarrativeIntents,
   llmIntentCue,
+  parseLlmIntentPlan,
   planMixedIntents,
 } from "../src/pipeline/intents";
 
@@ -148,5 +149,83 @@ called Tomasz about the hydrophone order`);
     expect(plan.kind).toBe("items");
     if (plan.kind !== "items") return;
     expect(plan.items.map((item) => item.classification.type)).toEqual(["task", "interaction"]);
+  });
+});
+
+describe("parseLlmIntentPlan", () => {
+  const source = `Need to send the SILDRE contract by Friday.
+
+Had coffee with Nadia Rossi about the Q3 quote.
+
+They want a written redline before the wet-lab booking.`;
+
+  test("accepts two verbatim mixed excerpts", () => {
+    const plan = parseLlmIntentPlan(
+      JSON.stringify({
+        items: [
+          { type: "task", text: "Need to send the SILDRE contract by Friday." },
+          { type: "interaction", text: "Had coffee with Nadia Rossi about the Q3 quote." },
+        ],
+      }),
+      source,
+    );
+    expect(plan.kind).toBe("items");
+    if (plan.kind !== "items") return;
+    expect(plan.items.map((item) => item.classification.type)).toEqual(["task", "interaction"]);
+  });
+
+  test("junk, oversize, wrong type, and one type fail open", () => {
+    expect(parseLlmIntentPlan("not-json", source).kind).toBe("none");
+    expect(parseLlmIntentPlan(JSON.stringify({ items: "nope" }), source).kind).toBe("none");
+    expect(
+      parseLlmIntentPlan(
+        JSON.stringify({
+          items: [
+            { type: "task", text: "Need to send the SILDRE contract by Friday." },
+            { type: "interaction", text: "Had coffee with Nadia Rossi about the Q3 quote." },
+            { type: "note", text: "They want a written redline before the wet-lab booking." },
+            { type: "journal", text: "Need to send the SILDRE contract by Friday." },
+            { type: "decision_note", text: "Had coffee with Nadia Rossi about the Q3 quote." },
+          ],
+        }),
+        source,
+      ).kind,
+    ).toBe("none");
+    expect(
+      parseLlmIntentPlan(
+        JSON.stringify({
+          items: [
+            { type: "spaceship", text: "Need to send the SILDRE contract by Friday." },
+            { type: "interaction", text: "Had coffee with Nadia Rossi about the Q3 quote." },
+          ],
+        }),
+        source,
+      ).kind,
+    ).toBe("none");
+    expect(
+      parseLlmIntentPlan(
+        JSON.stringify({
+          items: [
+            { type: "task", text: "Need to send the SILDRE contract by Friday." },
+            { type: "task", text: "They want a written redline before the wet-lab booking." },
+          ],
+        }),
+        source,
+      ).kind,
+    ).toBe("none");
+  });
+
+  test("invented excerpts are dropped so a hallucinated pair cannot file", () => {
+    expect(
+      parseLlmIntentPlan(
+        JSON.stringify({
+          items: [
+            { type: "task", text: "Need to send the SILDRE contract by Friday." },
+            { type: "note", text: "Invented wet-lab booking that was never captured." },
+          ],
+        }),
+        source,
+      ).kind,
+    ).toBe("none");
   });
 });

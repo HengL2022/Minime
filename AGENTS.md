@@ -185,7 +185,7 @@ metric (name, unit, description, rollup) with no SQL exposed — call it before
 Numbers come only from `minime_query_metric`. `minime_timeline` is the exhaustive date-range
 read; `minime_search`'s optional `from`/`to` only filters already-ranked candidates.
 `minime_refile` files a pending capture as a typed row (task, journal, note, interaction,
-decision, org, or person) and always needs an approved tier-2 unlock. `minime_correct` amends, retracts, or retiers a journal/interaction/decision/note.
+decision, org, or person) and always needs an approved tier-2 unlock. `minime_correct` amends or retracts a journal/interaction/decision/note; `retier` is notes only (1→2).
 `minime_upsert_person` / `minime_set_person_date` / `minime_upsert_goal` /
 `minime_upsert_commitment` write those objects; identity merges stay owner-run
 (`scripts/repair.ts merge-person`). `minime_log_expense` is insert-only into tier 0 and never
@@ -300,8 +300,8 @@ Notes below are the non-obvious bits — standard commands are in `## After inst
 - **Start services first, every session.** Neither the update script nor `make up` starts services,
   and this container has no running `systemd`, so nothing auto-starts on boot. Before `bun test`,
   `make verify-offline`, or `serve`:
-  - Postgres: `make up` (creates scratch DBs via `scripts/with-test-database.ts`; a stopped cluster
-    fails most of the suite).
+  - Postgres: `make up` (starts the persisted cluster via `scripts/up.sh`; a stopped cluster
+    fails most of the suite). Tests create scratch DBs via `scripts/with-test-database.ts`.
   - Ollama (only for full-mode semantic search / inbox auto-classification): start it detached, e.g.
     `OLLAMA_HOST=127.0.0.1:11434 ollama serve &` (or in a tmux session). Everything except those two
     features works without it, and the whole test suite mocks Ollama regardless.

@@ -59,7 +59,7 @@ install-service:
 uninstall-service:
 	@bash scripts/install-service.sh uninstall
 
-# Start Postgres (Docker if present, else native service) and check Ollama models.
+# Start Postgres using the persisted backend/port from .env (refuses to infer).
 up:
 	@./scripts/up.sh
 

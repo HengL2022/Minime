@@ -4269,3 +4269,52 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   Requiring mixed classes avoids splitting a long single-intent note.
 - **Approved by:** owner request to finish the remaining improve waves
   (2026-08-15).
+
+## 2026-08-15 — Demo stack skips repo dotenv and provisions minime_app
+
+- **Context:** The 2026-08-15 isolated-demo decision said `make demo` never
+  reads `.env`. The script used `bun --no-env-file` but `loadRepoDotenv()`
+  still filled missing keys from a live repo `.env`, so an installed
+  `MINIME_APP_DATABASE_URL` on another port failed pair validation. The
+  printed MCP line also could not start `serve`, which requires a distinct
+  `minime_app` DSN. This amends that public demo interface.
+- **Decision:** `scripts/demo.sh` sets `MINIME_SKIP_REPO_DOTENV=1`, derives a
+  published fictional `minime_app` URL, migrates/seeds/provisions that role,
+  and prints a serve command with both DSNs plus `MINIME_DATA_DIR=data/demo`.
+  It still never writes `.env` or the live compose volume.
+- **Why:** A demo that only starts Postgres is not the advertised MCP path.
+  Skipping dotenv is the existing serve-child seam; reusing it keeps demo
+  isolated from owner settings.
+- **Approved by:** owner request to fix the readiness-review concerns
+  (2026-08-15).
+
+## 2026-08-15 — Migration ledger checksums
+
+- **Context:** `schema_migrations` recorded filename only. An edited
+  already-applied migration was skipped silently. This is a schema/recovery
+  contract: restore and update must refuse a mutated applied body.
+- **Decision:** The ledger stores a SHA-256 of the exact file bytes.
+  `ensureSchemaMigrationLedger` adds a nullable `checksum` column. New
+  applies write it. A null checksum is backfilled from the current file on
+  the next migrate. A present mismatch fails closed with
+  `migration_checksum_mismatch` and does not apply further files. No
+  numbered migration; the ledger table is owned by the runner.
+- **Why:** Name-only skip is how a live database can drift from the
+  checked-out SQL without anyone noticing. Backfill keeps existing installs
+  moving; refuse-on-mismatch starts from this change forward.
+- **Approved by:** owner request to fix the readiness-review concerns
+  (2026-08-15).
+
+## 2026-08-15 — Tier-0 TTY override is test-process-only
+
+- **Context:** The 2026-08-10 owner-terminal exception allowed
+  `MINIME_ALLOW_NON_TTY_TIER0=1` to print tier-0 rows on a non-TTY. That
+  seam is required for piped `bun test` children, but an ambient value in a
+  real environment would weaken the exception.
+- **Decision:** The override is honored only when `NODE_ENV=test` and the
+  flag is exactly `1`. Any other process, including a production CLI with
+  the flag set, still requires an interactive TTY.
+- **Why:** Tests already set `NODE_ENV=test`. Tightening the seam does not
+  change the owner-terminal path.
+- **Approved by:** owner request to fix the readiness-review concerns
+  (2026-08-15).

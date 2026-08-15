@@ -26,6 +26,8 @@ describe("rerankEnabled (I1: localhost only)", () => {
     expect(rerankEnabled()).toBe(true);
     cfg.rerankUrl = "https://api.example.com";
     expect(rerankEnabled()).toBe(false);
+    cfg.rerankUrl = "http://localhost.:8114";
+    expect(rerankEnabled()).toBe(true);
     cfg.rerankUrl = "not a url";
     expect(rerankEnabled()).toBe(false);
   });
