@@ -607,4 +607,31 @@ describe("minime_refile", () => {
     expect(projected).toBe(page!.body_md);
     expect(projected).toContain("ZQX-REFILE-DURABLE");
   });
+
+  test("refile of a mixed dump files only the owner-chosen type", async () => {
+    const text = `unclear: ZQX-REFILE-MIXED leftover dump
+todo: send the SILDRE contract
+met Nadia Rossi about pricing
+note: they want the Q3 quote`;
+    const inboxId = await pendingUnfiled("zqx-refile-mixed.md", text);
+    const ctx = sessionToolCtx("agent:refile-mixed");
+    await requestAndApproveTier2(ctx);
+    const data = expectOk(
+      await refile(ctx, {
+        inbox_item_id: inboxId,
+        type: "task",
+        title: "ZQX-REFILE-MIXED send the SILDRE contract",
+      }),
+    );
+    expect(data.filed_table).toBe("tasks");
+    const tasks = await testSql`select id from tasks where derived_from = ${inboxId}::uuid`;
+    expect(tasks).toHaveLength(1);
+    const interactions = await testSql`
+      select id from interactions where derived_from = ${inboxId}::uuid`;
+    expect(interactions).toHaveLength(0);
+    const [split] = await testSql`
+      select id from events
+      where verb = 'inbox:split-intents' and entity_id = ${inboxId}::uuid`;
+    expect(split).toBeUndefined();
+  });
 });

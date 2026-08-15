@@ -199,10 +199,10 @@ known candidates are:
   slot is now complete; CLIP/SigLIP stays deferred);
 - optional `source_file` frontmatter on capture-filed notes pointing at the
   originals-store path (deferred from this W5 slice — recovery-sensitive);
-- a 1..N classify-and-file split of mixed-intent captures (the 2026-08-14
-  deterministic companion split plus the LLM entity-plan fallback cover
-  leftover orgs/people; first-class org/person capture types shipped
-  2026-08-14 — see `docs/known-issues/classifier-multi-entity-captures.md`); and
+- a model-driven 1..N split of narrative mixed-intent dumps (the 2026-08-15
+  heuristic companions cover prefixed `todo:`/`met`/`note:` dumps; inbox
+  cardinality is still one primary — see
+  `docs/known-issues/classifier-multi-entity-captures.md`); and
 - close remaining known-issue documents once their behavioral regressions pass
   (extractor-phantom-orgs Fix C / high-edge watchdog shipped 2026-08-14; the
   live pre-Fix-B sweep remains).

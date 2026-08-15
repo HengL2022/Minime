@@ -24,6 +24,7 @@ type AuditPayloadKind =
   | "inboxSplitDecision"
   | "inboxSplitDoneTask"
   | "inboxSplitEntities"
+  | "inboxSplitIntents"
   | "inboxUnfiled"
   | "llmClassifyEgress"
   | "llmClassifyOutcome"
@@ -796,6 +797,34 @@ function inboxSplitEntities(input: { orgIds: string[]; personIds: string[] }): A
   });
 }
 
+const FILED_TABLES = [
+  "tasks",
+  "journal_entries",
+  "interactions",
+  "pages",
+  "decisions",
+  "orgs",
+  "people",
+] as const;
+
+function inboxSplitIntents(input: {
+  extraTypes: ClassifierKind[];
+  extraTables: FiledTable[];
+  extraIds: string[];
+}): AuditPayload {
+  if (
+    input.extraTypes.length !== input.extraTables.length ||
+    input.extraTypes.length !== input.extraIds.length
+  )
+    invalidPayload();
+  return construct("inboxSplitIntents", {
+    extra_count: positiveInteger(input.extraIds.length),
+    extra_types: input.extraTypes.map((type) => classifierKind(type)),
+    extra_tables: input.extraTables.map((table) => fixed(table, FILED_TABLES)),
+    extra_ids: uuids(input.extraIds),
+  });
+}
+
 function inboxFiled(input: {
   kind: ClassifierKind;
   confidence: number;
@@ -805,15 +834,7 @@ function inboxFiled(input: {
   return construct("inboxFiled", {
     type: classifierKind(input.kind),
     confidence: ratio(input.confidence),
-    filed_table: fixed(input.filedTable, [
-      "tasks",
-      "journal_entries",
-      "interactions",
-      "pages",
-      "decisions",
-      "orgs",
-      "people",
-    ]),
+    filed_table: fixed(input.filedTable, FILED_TABLES),
     filed_id: uuid(input.filedId),
   });
 }
@@ -828,15 +849,7 @@ function inboxRefiled(input: {
 }): AuditPayload {
   return construct("inboxRefiled", {
     type: classifierKind(input.type),
-    filed_table: fixed(input.filedTable, [
-      "tasks",
-      "journal_entries",
-      "interactions",
-      "pages",
-      "decisions",
-      "orgs",
-      "people",
-    ]),
+    filed_table: fixed(input.filedTable, FILED_TABLES),
     filed_id: uuid(input.filedId),
   });
 }
@@ -876,6 +889,7 @@ export const auditPayload = Object.freeze({
   inboxSplitDecision,
   inboxSplitDoneTask,
   inboxSplitEntities,
+  inboxSplitIntents,
   inboxUnfiled,
   llmEgress,
   llmEgressOutcome,
@@ -952,6 +966,7 @@ function expectedPayloadKind(verb: string, payload: AuditPayload): AuditPayloadK
     "inbox:split-decision": "inboxSplitDecision",
     "inbox:split-done-task": "inboxSplitDoneTask",
     "inbox:split-entities": "inboxSplitEntities",
+    "inbox:split-intents": "inboxSplitIntents",
     "inbox:unfiled": "inboxUnfiled",
     "onboard:complete": "onboardComplete",
     "person:upsert": "personUpsert",

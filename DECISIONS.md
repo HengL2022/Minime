@@ -4044,3 +4044,30 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   that exists only for the strong deterministic cue.
 - **Approved by:** owner request to continue the current-state plan through the
   ordinary backlog (2026-08-14).
+
+## 2026-08-15 — Mixed-intent inbox companions
+
+- **Context:** The 2026-08-14 entity-plan decisions left mixed-intent dumps
+  (a task *and* an interaction *and* a note) filing one primary type. Guessing
+  extra typed primary rows, or changing `inbox_items` to N `filed_id`s, was
+  called out as a larger contract. This amends the filing contract and the
+  closed audit allowlist with `inbox:split-intents`. No new MCP tool, review
+  kind, or migration. Inbox cardinality stays one primary.
+- **Decision:** A heuristic pre-pass (`planMixedIntents`) splits only 2–4
+  strong mixed line-prefix or blank-line-block items (`todo:`/`task:`,
+  `met`/`called`/`talked to`/`coffee with`/`lunch with`, `note:`/`journal:`,
+  `decision:`/`decided`, `org:`/`company:`/`person:`). The first item is the
+  inbox primary (its text and classification, not the full dump). Leftovers
+  file through `filePrimaryRow` as companions with `derived_from` the inbox
+  id. Same-type lines, more than four mixed lines, leading prose, and
+  `minime_refile` do not split and do not unfile. No LLM on this path. Entity
+  planning still runs on the full text; a confident intent split does not
+  unfile for an uncertain entity plan. The audit payload is types/tables/ids
+  and a count — never text.
+- **Why:** Prefixed dumps are owner- or agent-structured enough to file
+  without a model. Keeping one inbox row matches the existing
+  decision/done-task/entity companion pattern. Skipping refile preserves the
+  owner's chosen type. Failing open (no split) on weak dumps avoids minting
+  junk rows from narrative prose.
+- **Approved by:** owner request to continue the current-state plan through the
+  ordinary backlog (2026-08-15).

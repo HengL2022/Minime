@@ -57,6 +57,7 @@ import {
   splitActionDecision,
 } from "./classify";
 import { findDuplicate } from "./dedup";
+import { type IntentPlan, planMixedIntents } from "./intents";
 import { storeInboxOriginal } from "./originals";
 import { InboxParseError, type InboxParseResult, parseInboxSource } from "./parse";
 import { type EntityPlan, planCaptureEntities, resolveEntityPlan } from "./segment";
@@ -81,6 +82,7 @@ export interface NoteProjection {
 export interface FiledResult {
   primary: [FiledTable, string];
   projection?: NoteProjection;
+  extraProjections?: NoteProjection[];
 }
 
 const INDEX_OPTIONS = {
@@ -262,21 +264,29 @@ export function storedClassification(value: unknown): Classification | null {
 // minime_refile (W2-3) passes its ctx.actor so an owner-initiated filing is attributed to the
 // real MCP caller instead of the classifier (I5 provenance; invariant-review 2026-08-08). The
 // bookkeeping events below (inbox:duplicate, inbox:split-decision, inbox:split-done-task,
-// inbox:split-entities, inbox:closed-existing-task) still log actor=ACTOR either way — the
-// wrapping tool:minime_refile and inbox:refiled audit events already record the true actor
-// for a refile-triggered call.
+// inbox:split-entities, inbox:split-intents, inbox:closed-existing-task) still log
+// actor=ACTOR either way — the wrapping tool:minime_refile and inbox:refiled audit
+// events already record the true actor for a refile-triggered call.
 export async function fileRow(
   c: Classification,
   text: string,
   inboxId: string,
   actor: string = ACTOR,
   plan?: EntityPlan,
+  intent?: { intentPlan?: IntentPlan; companionText?: string },
 ): Promise<FiledResult | "duplicate" | null> {
   const result = await filePrimaryRow(c, text, inboxId, actor);
-  if (result && result !== "duplicate") {
-    await fileCompanionEntities(c, text, inboxId, actor, plan ?? planCaptureEntities(text));
-  }
-  return result;
+  if (!result || result === "duplicate") return result;
+  const companionText = intent?.companionText ?? text;
+  const extraProjections = await fileCompanionIntents(inboxId, actor, intent?.intentPlan);
+  await fileCompanionEntities(
+    c,
+    companionText,
+    inboxId,
+    actor,
+    plan ?? planCaptureEntities(companionText),
+  );
+  return extraProjections.length > 0 ? { ...result, extraProjections } : result;
 }
 
 function sameEntityName(a: string, b: string): boolean {
@@ -332,6 +342,42 @@ async function fileCompanionEntities(
     entityId: inboxId,
     payload: auditPayload.inboxSplitEntities({ orgIds, personIds }),
   });
+}
+
+// Leftover strong-typed lines from a mixed dump. Each extra uses filePrimaryRow
+// only — no nested intent/entity recursion. A duplicate or unfileable extra is
+// skipped so it cannot fail the primary capture.
+async function fileCompanionIntents(
+  inboxId: string,
+  actor: string,
+  plan: IntentPlan | undefined,
+): Promise<NoteProjection[]> {
+  if (!plan || plan.kind !== "items") return [];
+  const extras: { type: Classification["type"]; table: FiledTable; id: string }[] = [];
+  const projections: NoteProjection[] = [];
+  for (const item of plan.items.slice(1)) {
+    const filed = await filePrimaryRow(item.classification, item.text, inboxId, actor);
+    if (!filed || filed === "duplicate") continue;
+    extras.push({
+      type: item.classification.type,
+      table: filed.primary[0],
+      id: filed.primary[1],
+    });
+    if (filed.projection) projections.push(filed.projection);
+  }
+  if (extras.length === 0) return projections;
+  await logEvent({
+    actor: ACTOR,
+    verb: "inbox:split-intents",
+    entityType: "inbox_item",
+    entityId: inboxId,
+    payload: auditPayload.inboxSplitIntents({
+      extraTypes: extras.map((extra) => extra.type),
+      extraTables: extras.map((extra) => extra.table),
+      extraIds: extras.map((extra) => extra.id),
+    }),
+  });
+  return projections;
 }
 
 // Dedicated org/person captures become resolvable identities, not pages. Name-only
@@ -691,25 +737,39 @@ async function queueUnfiledInbox(
   return { inboxId: itemId, filed: false };
 }
 
+async function classificationForInbox(
+  item: InboxItem,
+  text: string,
+  intentPlan: IntentPlan,
+  entityPlan: EntityPlan,
+): Promise<Classification> {
+  if (intentPlan.kind === "items") return intentPlan.items[0]!.classification;
+  const stored = storedClassification(item.classifier_output);
+  const c = stored ?? (await classify(text));
+  return applyUncertainEntityPlan(c, entityPlan);
+}
+
 async function classifyAndFileInbox(
   item: InboxItem,
   token: string,
   text: string,
 ): Promise<{ inboxId: string; filed: boolean }> {
-  let c = storedClassification(item.classifier_output);
-  if (!c) c = await classify(text);
-  // Entity plan: deterministic legal-suffix / enumeration first; a weaker LLM
-  // fallback only when that plan is silent. An unparseable strong cue must land
-  // in inbox_unfiled (never guess names); persist the lowered plan so a stale-claim
-  // replay does not re-ask the model and then auto-file.
+  // Intent plan is heuristic-only. Entity plan may call the classify provider
+  // before the claim transaction. A confident mixed-intent split files the
+  // first item as primary and does not unfile for an uncertain entity plan.
+  const intentPlan = planMixedIntents(text);
   const plan = await resolveEntityPlan(text);
-  c = applyUncertainEntityPlan(c, plan);
+  const c = await classificationForInbox(item, text, intentPlan, plan);
   await setInboxClassification(item.id, token, c);
+  const primaryText = intentPlan.kind === "items" ? intentPlan.items[0]!.text : text;
 
   const outcome = await withDbTransaction(async () => {
     await assertInboxClaim(item.id, token);
     if (c.confidence >= CONFIDENCE_FLOOR && c.type !== "unknown") {
-      const result = await fileRow(c, text, item.id, ACTOR, plan);
+      const result = await fileRow(c, primaryText, item.id, ACTOR, plan, {
+        intentPlan,
+        companionText: text,
+      });
       if (result === "duplicate") {
         await setInboxPendingClaimed(item.id, token, c);
         return { filed: false } as const;
@@ -729,7 +789,11 @@ async function classifyAndFileInbox(
             filedId,
           }),
         });
-        return { filed: true, projection: result.projection } as const;
+        return {
+          filed: true,
+          projection: result.projection,
+          extraProjections: result.extraProjections,
+        } as const;
       }
     }
     await setInboxPendingClaimed(item.id, token, c);
@@ -746,8 +810,11 @@ async function classifyAndFileInbox(
 
   // Publish the note mirror only after commit so a rolled-back finalization leaves no
   // visible derivative; replay heals a post-commit publication failure.
-  if (outcome.projection) await publishNoteProjection(outcome.projection);
-  if (outcome.filed) await drainEmbedBacklog(64).catch(() => {});
+  if (outcome.filed) {
+    if (outcome.projection) await publishNoteProjection(outcome.projection);
+    for (const extra of outcome.extraProjections ?? []) await publishNoteProjection(extra);
+    await drainEmbedBacklog(64).catch(() => {});
+  }
   return { inboxId: item.id, filed: outcome.filed };
 }
 

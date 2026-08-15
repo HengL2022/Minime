@@ -159,6 +159,7 @@ describe("audit payload boundary", () => {
       "inboxSplitDecision",
       "inboxSplitDoneTask",
       "inboxSplitEntities",
+      "inboxSplitIntents",
       "inboxUnfiled",
       "llmEgress",
       "llmEgressOutcome",
@@ -216,6 +217,26 @@ describe("audit payload boundary", () => {
         recordNumber: 1,
       } as any),
     ).toThrow("invalid_audit_payload");
+    expect(() =>
+      auditPayload.inboxSplitIntents({
+        extraTypes: ["interaction"],
+        extraTables: ["interactions", "pages"],
+        extraIds: ["11111111-1111-4111-8111-111111111111"],
+      }),
+    ).toThrow("invalid_audit_payload");
+    const splitIntents = auditPayload.inboxSplitIntents({
+      extraTypes: ["interaction", "note"],
+      extraTables: ["interactions", "pages"],
+      extraIds: ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"],
+      prose: SENTINEL,
+    } as any);
+    expect(splitIntents).toEqual({
+      extra_count: 2,
+      extra_types: ["interaction", "note"],
+      extra_tables: ["interactions", "pages"],
+      extra_ids: ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"],
+    });
+    expect(JSON.stringify(splitIntents)).not.toContain(SENTINEL);
   });
 
   test("dream summaries flatten fixed counters and omit failure messages and detail arrays", async () => {
