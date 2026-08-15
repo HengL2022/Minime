@@ -279,9 +279,10 @@ only — it punishes returning extras for the model to sort out; the reranker + 
 move it from 6.5% to 52.3%, and we publish the bad default because optimizing for it alone
 would hurt the common case (recall). `make eval-longmemeval`, `make eval-pmb`.
 
-**MinimeBench** — eight in-house areas with committed bars, run live before search releases
+**MinimeBench** — nine in-house areas with committed bars, run live before search releases
 ([latest](docs/benchmarks/2026-06-12-live-qwen3-minimebench.md)): retrieval-en 97% hit@3,
-retrieval-zh 100% (bilingual zh/en/mixed), graph/identity/time 100% hit@3, provenance 100%,
+retrieval-zh 100% (bilingual zh/en/mixed), retrieval-img 100% hit@3 (caption-based, 10
+fictional images), graph/identity/time 100% hit@3, provenance 100%,
 robustness 100% (22 adversarial inputs, no crash, no tier leak). `make eval-search-live`.
 
 **Skills layer** — the `agents/skills/*.md` playbooks are eval'd too, not just the engine:

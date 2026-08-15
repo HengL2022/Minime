@@ -34,6 +34,7 @@ const EVAL_WORKER = join(ROOT, "scripts/eval-search-worker.ts");
 export const AREAS: readonly { area: string; file: string; corpus: string }[] = [
   { area: "retrieval-en", file: "retrieval-en.json", corpus: "persona-en" },
   { area: "retrieval-zh", file: "retrieval-zh.json", corpus: "bilingual-zh" },
+  { area: "retrieval-img", file: "retrieval-img.json", corpus: "images-en" },
   { area: "graph", file: "graph.json", corpus: "persona-en" },
   { area: "identity", file: "identity.json", corpus: "persona-en" },
   { area: "time", file: "time.json", corpus: "persona-en" },
@@ -306,7 +307,7 @@ function scorecardConfiguration(): {
   };
 }
 
-function workerEnvironment(mode: EvalArgs["mode"]): Record<string, string> {
+export function workerEnvironment(mode: EvalArgs["mode"]): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (
@@ -314,7 +315,8 @@ function workerEnvironment(mode: EvalArgs["mode"]): Record<string, string> {
       key !== "EVAL_DATABASE_URL" &&
       key !== "EVAL_PMB_DATABASE_URL" &&
       key !== "EVAL_SKILLS_DATABASE_URL" &&
-      key !== "MINIME_TEST_DATABASE_URL"
+      key !== "MINIME_TEST_DATABASE_URL" &&
+      !(mode === "live" && key === "MINIME_MOCK_OLLAMA")
     ) {
       env[key] = value;
     }

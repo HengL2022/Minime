@@ -11,7 +11,7 @@ import { type AreaReport, loadQrels, runQrels } from "../src/search/eval";
 const ROOT = join(import.meta.dir, "..");
 const QRELS_DIR = join(ROOT, "fixtures/qrels");
 const CORPORA_DIR = join(ROOT, "fixtures/eval-corpora");
-const CORPORA = new Set(["persona-en", "bilingual-zh", "decisions-en"]);
+const CORPORA = new Set(["persona-en", "bilingual-zh", "decisions-en", "images-en"]);
 const QRELS_FILE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.json$/u;
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 const GUARDED_DATABASE = /^minime_test_[a-z0-9_]+$/;

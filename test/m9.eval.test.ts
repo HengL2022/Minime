@@ -14,6 +14,7 @@ import {
   assertCleanWorkingTree,
   parseEvalArgs,
   parseWorkerResult,
+  workerEnvironment,
 } from "../scripts/eval-search";
 import { upsertPage } from "../src/db/repo";
 import {
@@ -108,6 +109,18 @@ describe("read-only evaluator coordinator contracts", () => {
     accuracy: hit3,
     perQuery: [],
     violations: [],
+  });
+
+  test("live worker env drops an inherited mock flag", () => {
+    const prev = process.env.MINIME_MOCK_OLLAMA;
+    process.env.MINIME_MOCK_OLLAMA = "1";
+    try {
+      expect(workerEnvironment("mock").MINIME_MOCK_OLLAMA).toBe("1");
+      expect(workerEnvironment("live").MINIME_MOCK_OLLAMA).toBeUndefined();
+    } finally {
+      if (prev === undefined) process.env.MINIME_MOCK_OLLAMA = undefined;
+      else process.env.MINIME_MOCK_OLLAMA = prev;
+    }
   });
 
   test("mode and repeat validation fails closed", () => {

@@ -17,7 +17,7 @@ override TIME := $(TIME_LITERAL)
 export TIME
 endif
 
-.PHONY: install setup install-hooks install-service uninstall-service onboard update up down demo demo-down psql-ro migrate provision-runtime-role seed embed test lint format typecheck typecheck-ops verify-m0 verify-m0-offline verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 verify-m13 verify-m14 verify-m15 check-subsystems check-tracked-privacy verify-offline verify verify-restore-e2e restore-drill restore-pitr promote-restore eval-search eval-search-live eval-snapshot eval-pmb eval-pmb-official eval-graph-hygiene eval-skills optimize-skill
+.PHONY: install setup install-hooks install-service uninstall-service onboard update up down demo demo-down psql-ro migrate provision-runtime-role seed embed test lint format typecheck typecheck-ops verify-m0 verify-m0-offline verify-m1 verify-m2 verify-m3 verify-m4 verify-m5 verify-m6 verify-m7 verify-m8 verify-m9 verify-m10 verify-m11 verify-m12 verify-m13 verify-m14 verify-m15 check-subsystems check-tracked-privacy verify-offline verify verify-restore-e2e restore-drill restore-pitr promote-restore eval-search eval-search-live eval-snapshot eval-pmb eval-pmb-official eval-graph-hygiene eval-skills optimize-skill eval-vlm-bakeoff
 
 # Every automated child is provisioned by this parent-owned runner. The child receives only
 # the generated loopback URL and (where applicable) one approved compatibility alias.
@@ -222,6 +222,15 @@ promote-restore:
 # MinimeBench (offline, CI-safe): deterministic mock embeddings, single run, full area table.
 eval-search:
 	@MINIME_MOCK_OLLAMA=1 $(BUN) run scripts/eval-search.ts --mode mock --round mock
+
+# W6 VLM bake-off: 10 fictional images vs sealed gold captions. Mock scores 1.0
+# by construction. Live: MODE=live VLM_MODEL=moondream make eval-vlm-bakeoff
+eval-vlm-bakeoff:
+	@if [ "$(or $(MODE),mock)" = "live" ]; then \
+		$(BUN) run scripts/eval-vlm-bakeoff.ts --mode live --publish $(if $(VLM_MODEL),--models $(VLM_MODEL),); \
+	else \
+		MINIME_MOCK_OLLAMA=1 $(BUN) run scripts/eval-vlm-bakeoff.ts --mode mock --publish; \
+	fi
 
 # LongMemEval-s (public, 500 questions): one-off ~49M-token ingest, then judge-free
 # session-level recall. Same scratch-DB safety contract as MinimeBench.

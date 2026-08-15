@@ -196,9 +196,9 @@ After the release gate, resume product work as outcome-sized tasks under this wo
 known candidates are:
 
 - W6 image capture path shipped 2026-08-15 (optional local `describe`, hash-keyed
-  mock, default tier-2 routing, receipt_candidate flag-only). Owner VLM bake-off
-  of 10 fictional images still precedes committed `retrieval-img` floors;
-  CLIP/SigLIP stays deferred;
+  mock, default tier-2 routing, receipt_candidate flag-only). The 10-image VLM
+  bake-off harness and committed `retrieval-img` mock floors shipped 2026-08-15
+  (`make eval-vlm-bakeoff`; CLIP/SigLIP stays deferred);
 - W8 parent-child spans shipped 2026-08-15 (`chunk_spans` + `rechunk`; child
   size unchanged, eval-calibration pending). Live MinimeBench/PMB battery and
   any 120–200 child-size change stay owner-scheduled;

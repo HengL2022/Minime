@@ -4318,3 +4318,24 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   change the owner-terminal path.
 - **Approved by:** owner request to fix the readiness-review concerns
   (2026-08-15).
+
+## 2026-08-15 — W6 retrieval-img floors and VLM bake-off
+
+- **Context:** The 2026-08-15 W6 describe seam left committed `retrieval-img`
+  floors gated on an owner bake-off of 10 fictional images. That bake-off is
+  now a committed harness, and caption-based retrieval has a sealed mock
+  floor. This amends the MinimeBench area list (`AREAS` + `images-en` corpus)
+  and the public eval interface (`make eval-vlm-bakeoff`). CLIP/SigLIP stays
+  deferred. Cloud VLM routes stay rejected. No new MCP tool.
+- **Decision:** Ten fictional 1×1 PNG fixtures carry sealed gold captions
+  keyed by file hash. `retrieval-img` queries those captions as filed image
+  notes (hit@3 bar 1.0 under mock embeddings). The bake-off scores token
+  Jaccard vs gold: mock is 1.0 by construction; live uses local `VLM_MODEL`
+  and never invents scores. Inbox routing for the passport fixture would
+  still suggest tier 2; the retrieval page stays searchable so the area
+  measures caption retrieval, not the unlock door.
+- **Why:** Caption-based image retrieval is now measurable. Visual-similarity
+  embeddings stay deferred until this area fails for a reason captions
+  cannot fix.
+- **Approved by:** owner request to finish the W6 VLM bake-off, W8 live
+  battery, and W9 screencast (2026-08-15).

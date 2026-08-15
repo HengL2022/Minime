@@ -1,6 +1,12 @@
-// W6 image parse + optional VLM describe. No retrieval-img floors — owner bake-off first.
+// W6 image parse + optional VLM describe. retrieval-img floors use the 10-image bake-off set.
 import { describe, expect, test } from "bun:test";
-import { PHOTO_CAPTION, PHOTO_PNG, RECEIPT_CAPTION, RECEIPT_PNG } from "../fixtures/parse/images";
+import {
+  BAKEOFF_IMAGES,
+  PHOTO_CAPTION,
+  PHOTO_PNG,
+  RECEIPT_CAPTION,
+  RECEIPT_PNG,
+} from "../fixtures/parse/images";
 import { describeRouteForTier } from "../src/llm";
 import { describeImage } from "../src/llm/describe";
 import { mockDescribe } from "../src/llm/mock-describe";
@@ -95,6 +101,14 @@ describe("VLM routing", () => {
       expect(body.images).toEqual([PHOTO_PNG.toString("base64")]);
     } finally {
       config.vlmModel = prev;
+    }
+  });
+
+  test("all ten bake-off hashes map to sealed gold captions", () => {
+    const hashes = BAKEOFF_IMAGES.map((image) => sha256Hex(image.png));
+    expect(new Set(hashes).size).toBe(10);
+    for (const image of BAKEOFF_IMAGES) {
+      expect(mockDescribe(sha256Hex(image.png))).toBe(image.caption);
     }
   });
 

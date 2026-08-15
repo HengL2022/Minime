@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "corpus": "images-en",
+  "area": "retrieval-img",
+  "note": "Caption-based image retrieval over 10 fictional filed image notes. Queries use visual/scene language from the sealed gold captions. Mock path = hash-keyed fixture captions. CLIP/SigLIP stays deferred.",
+  "entries": [
+    {
+      "id": "img-1",
+      "query": "harbor pier at dusk with coiled rope on the dock",
+      "relevant": ["Harbor pier at dusk"],
+      "bucket": "photo"
+    },
+    {
+      "id": "img-2",
+      "query": "cafe receipt for tea and a bun totaling 12.40",
+      "relevant": ["Cafe receipt"],
+      "bucket": "receipt"
+    },
+    {
+      "id": "img-3",
+      "query": "whiteboard sketch of a 36-node hydrophone array",
+      "relevant": ["Whiteboard hydrophone array"],
+      "bucket": "whiteboard"
+    },
+    {
+      "id": "img-4",
+      "query": "wet-lab tray labels for herring otoliths",
+      "relevant": ["Wet-lab tray labels"],
+      "bucket": "document"
+    },
+    {
+      "id": "img-5",
+      "query": "nyckelharpa on a birch table beside a resin bow",
+      "relevant": ["Nyckelharpa on a table"],
+      "bucket": "photo"
+    },
+    {
+      "id": "img-6",
+      "query": "fawn whippet wearing a mustard wool jumper",
+      "relevant": ["Biscuit the whippet"],
+      "bucket": "photo"
+    },
+    {
+      "id": "img-7",
+      "query": "winter morning run along the Nidelva with frost",
+      "relevant": ["Nidelva river run"],
+      "bucket": "photo"
+    },
+    {
+      "id": "img-8",
+      "query": "wooden crate stenciled SILDRE NODE 07",
+      "relevant": ["SILDRE node crate"],
+      "bucket": "photo"
+    },
+    {
+      "id": "img-9",
+      "query": "bakery window on Bakklandet showing cinnamon buns",
+      "relevant": ["Cinnamon-bun bakery window"],
+      "bucket": "photo"
+    },
+    {
+      "id": "img-10",
+      "query": "passport page with a Japan visa stamp dated April 2025",
+      "relevant": ["Passport visa stamp"],
+      "bucket": "document"
+    },
+    {
+      "id": "img-11",
+      "query": "Trondheim fjord bathymetry outline on a whiteboard",
+      "relevant": ["Whiteboard hydrophone array"],
+      "bucket": "whiteboard"
+    },
+    {
+      "id": "img-12",
+      "query": "Takayama entry mark on a visa stamp",
+      "relevant": ["Passport visa stamp"],
+      "bucket": "document"
+    }
+  ]
+}
