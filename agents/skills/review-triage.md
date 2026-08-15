@@ -90,14 +90,20 @@ auto-resolve).
      `fuzzy_org_ambiguous` (candidate matched two or more existing orgs — do not mint a third),
      `low_confidence_edge` (a `works_at` below the 0.7 write floor), `high_edge_extract_org`
      (an extractor-minted org with 20+ edges and no human confirmation — the nightly watchdog;
-     payload: org id, `edge_count`, `works_at_people`, no source text), or an edge-validation
-     item (`edge_id` / `rule_key` / `verdict`). Endpoint names are masked like any other title
-     if locked. Ask the owner which applies. A real organisation on a high-edge flag → dismiss
-     (quiet for 90 days). A phantom person minted as an org → they run
+     payload: org id, `edge_count`, `works_at_people`, no source text),
+     `person_name_extract_org` (an extractor-minted org whose name matches a known person —
+     exact, first token, or possessive; payload: org, `match_kind`, matching people; the
+     owner-run `sweep-extract-person-orgs` repair is how leftover pre-Fix-B rows get this
+     flag), or an edge-validation item (`edge_id` / `rule_key` / `verdict`). Endpoint names
+     are masked like any other title if locked. Ask the owner which applies. A real
+     organisation on a high-edge or person-name flag → dismiss. A phantom person minted as
+     an org → they run
      `bun run scripts/repair.ts retype-org-to-person --org-id=<this-org-id>` (owner-run only,
      surface the command, never execute it yourself; this also auto-resolves the high-edge
-     item). Ambiguous / low-confidence / denied-edge items stay flag-only: dismiss if the
-     graph is fine, or leave open until the owner chooses a repair. Never invent a merge.
+     and person-name flags). Ambiguous / low-confidence / denied-edge items stay flag-only:
+     dismiss if the graph is fine, or leave open until the owner chooses a repair. Never
+     invent a merge. Never run `sweep-extract-person-orgs` yourself — that is owner-terminal
+     only, same as every other repair.
    - **entity_promotion** — a person/org whose own identity card is still stuck at tier 2 even
      though it looks owner-known or is already independently tier-1-evidenced (payload:
      `entity_type`, `entity_id` only — no name, ever, in the payload itself; masked like any

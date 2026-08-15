@@ -6,8 +6,10 @@ Given a decision question from the owner, assemble what past-them knows before t
 
 1. `minime_search` — the question's key terms, with `types: ["page","decision"]`,
    `include_derived: true`, and `limit: 8`. Decision digest pages
-   (`source='dream:decision-digest'`) are retrieval pointers, not reasoning material: extract
-   the cited `decision:<id>` from the digest, then fetch the raw decision with
+   (`source='dream:decision-digest'`) and topic hub pages
+   (`source='dream:topic-cluster'`, `[[path]]` wikilinks to related compiled cards)
+   are retrieval pointers, not reasoning material: extract the cited
+   `decision:<id>` / `goal:<id>` from the page, then fetch the raw row with
    `minime_get_context`.
 2. `minime_search` with `types: ["principle"]` — principles the owner has already paid for.
 3. `minime_get_context` with `person_name` for each person involved.

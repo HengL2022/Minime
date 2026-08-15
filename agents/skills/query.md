@@ -33,7 +33,9 @@ list of search hits. This is the default skill for any lookup.
      date-range read across calendar, closed tasks, decisions, and — once unlocked —
      journal/interactions; a locked range still discloses a bare count of what's hidden)
 2. **Read before writing.** Open the top 3–5 hits with `minime_get_context` when the snippet
-   is not obviously sufficient. Prefer primary rows over `derived: true` rows.
+   is not obviously sufficient. Prefer primary rows over `derived: true` rows. Compiled
+   notes, decision/goal digests, and topic hubs (`include_derived: true`) are pointers:
+   follow the cited source id, then read the raw row.
 3. **Synthesize.** Short prose, claims cited inline, structured only if the question is
    structured. Lead with the answer, not the methodology.
 4. **Disclose.** End with what the database does *not* know, one line: combine the envelope

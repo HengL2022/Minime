@@ -206,8 +206,9 @@ known candidates are:
 - W7 topic-page clustering and path-only wikilinks (shipped 2026-08-15;
   org compiled notes and goal digests already existed); and
 - close remaining known-issue documents once their behavioral regressions pass
-  (extractor-phantom-orgs Fix C / high-edge watchdog shipped 2026-08-14; the
-  live pre-Fix-B sweep remains).
+  (extractor-phantom-orgs Fix C / high-edge watchdog shipped 2026-08-14; Fix D
+  owner-run `sweep-extract-person-orgs` flags leftover person-named extract
+  orgs — the live pre-Fix-B review remains owner-only).
 
 Agent skill wording for owner-approved tier-2 unlocks and timezone-aware output should stay aligned
 as ordinary documentation maintenance. These improvements matter, but bundling them into the

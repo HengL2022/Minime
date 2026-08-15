@@ -4160,3 +4160,26 @@ thread → approved retype + screen build, then "a" to apply both live fixes).
   Compose would duplicate the installer without adding isolation value.
 - **Approved by:** owner request to continue the current-state plan through the
   ordinary backlog (2026-08-15).
+
+## 2026-08-15 — Flag leftover person-named extract orgs
+
+- **Context:** Extractor Fix A/B/C stop new person-named / fuzzy / high-edge
+  phantom orgs. Pre-Fix-B rows already in a live database were still
+  unswept. Auto-retype or delete on those rows is identity-level and
+  owner-live-data. This amends the closed repair-script allowlist
+  (`sweep-extract-person-orgs`), the `repair:*` audit verb/count
+  (`orgs_flagged`), and the `extract_suspect` reason vocabulary
+  (`person_name_extract_org`). No new MCP tool, review kind, or migration.
+- **Decision:** The owner-run repair flags non-retired `system:extract` orgs
+  whose name (possessive `'s` stripped) case-folds to a live person's
+  canonical name, alias, or first token (length ≥ 3). Human-confirmed orgs
+  are skipped. Payload is `flag_key`, `match_kind`, and `{type,id,name}`
+  endpoints — no source text. An open flag is not duplicated.
+  `retype-org-to-person` resolves the flag. The repair never retypes,
+  merges, or deletes. Running it against live data remains an explicit
+  owner action (committed script + mandatory pre-image).
+- **Why:** The leftover phantoms needed a sanctioned find-and-flag door
+  that matches Fix C's flag-only posture. Auto-retype would guess identity.
+  Keeping it off the nightly dream job avoids surprising the live graph.
+- **Approved by:** owner request to continue the current-state plan through the
+  ordinary backlog (2026-08-15).

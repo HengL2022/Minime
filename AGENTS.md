@@ -234,7 +234,8 @@ Three sanctioned write paths during engineering, nothing else:
    to run unless the script is committed to `HEAD` (`git cat-file -e`, not merely staged),
    takes a mandatory pre-image `pg_dump` before touching anything (no backup ⇒ no repair),
    and logs `repair:*` events carrying counts and ids only, never row contents. Repair
-   scripts live in `scripts/repairs/` (first one: `retype-org-to-person.ts`).
+   scripts live in `scripts/repairs/` (`retype-org-to-person`, `merge-person`,
+   `recategorize-transactions`, `sweep-extract-person-orgs`).
 
 ## After install
 

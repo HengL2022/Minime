@@ -81,6 +81,7 @@ type RepairScript =
   | "retype-org-to-person"
   | "merge-person"
   | "recategorize-transactions"
+  | "sweep-extract-person-orgs"
   | "unknown";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -515,11 +516,16 @@ type RepairCompleteCounts = {
   aliases_moved?: number;
   interactions_repointed?: number;
   transactions_recategorized?: number;
+  orgs_flagged?: number;
 };
 
 type RepairInput =
   | {
-      script: "retype-org-to-person" | "merge-person" | "recategorize-transactions";
+      script:
+        | "retype-org-to-person"
+        | "merge-person"
+        | "recategorize-transactions"
+        | "sweep-extract-person-orgs";
       phase: "complete";
       code: "repair_complete";
       counts?: RepairCompleteCounts;
@@ -539,6 +545,7 @@ function repair(input: RepairInput): AuditPayload {
     "retype-org-to-person",
     "merge-person",
     "recategorize-transactions",
+    "sweep-extract-person-orgs",
     "unknown",
   ]);
   const code =
@@ -556,7 +563,8 @@ function repair(input: RepairInput): AuditPayload {
     phase === "complete" &&
     script !== "retype-org-to-person" &&
     script !== "merge-person" &&
-    script !== "recategorize-transactions"
+    script !== "recategorize-transactions" &&
+    script !== "sweep-extract-person-orgs"
   ) {
     invalidPayload();
   }
@@ -578,6 +586,9 @@ function repair(input: RepairInput): AuditPayload {
       counts.transactions_recategorized = nonNegativeInteger(
         input.counts.transactions_recategorized,
       );
+    }
+    if (input.counts?.orgs_flagged !== undefined) {
+      counts.orgs_flagged = nonNegativeInteger(input.counts.orgs_flagged);
     }
   }
   return construct("repair", {
@@ -1002,6 +1013,7 @@ function expectedPayloadKind(verb: string, payload: AuditPayload): AuditPayloadK
     "repair:retype-org-to-person": "retype-org-to-person",
     "repair:merge-person": "merge-person",
     "repair:recategorize-transactions": "recategorize-transactions",
+    "repair:sweep-extract-person-orgs": "sweep-extract-person-orgs",
     "repair:unknown": "unknown",
   };
   const script = repairScriptByVerb[verb];

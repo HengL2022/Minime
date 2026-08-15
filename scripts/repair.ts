@@ -335,12 +335,14 @@ type RepairSummaryCountKey =
   | "edges_repointed"
   | "aliases_moved"
   | "interactions_repointed"
-  | "transactions_recategorized";
+  | "transactions_recategorized"
+  | "orgs_flagged";
 const REPAIR_SUMMARY_COUNT_KEYS: readonly RepairSummaryCountKey[] = [
   "edges_repointed",
   "aliases_moved",
   "interactions_repointed",
   "transactions_recategorized",
+  "orgs_flagged",
 ];
 function isRepairSummaryCountKey(key: string): key is RepairSummaryCountKey {
   return (REPAIR_SUMMARY_COUNT_KEYS as readonly string[]).includes(key);
@@ -405,6 +407,7 @@ const REPAIR_SCRIPTS = {
   "retype-org-to-person": "repair:retype-org-to-person",
   "merge-person": "repair:merge-person",
   "recategorize-transactions": "repair:recategorize-transactions",
+  "sweep-extract-person-orgs": "repair:sweep-extract-person-orgs",
 } as const;
 type KnownRepairScript = keyof typeof REPAIR_SCRIPTS;
 

@@ -303,7 +303,8 @@ or a distributed rollback across Postgres, files, model providers, or indexes.
 
 - **Nightly dream job** (3am): embeds backlogs, links entities, compiles
   per-person and per-org notes, decision/goal digests, and topic hub pages
-  that `[[wikilink]]` those compiled cards, flags contradictions and
+  that `[[wikilink]]` those compiled cards (path or `slug--uuid` only — a
+  title like `[[Ingrid Solberg]]` does not resolve), flags contradictions and
   staleness, rolls up metrics, backs up. `minime_state`'s
   `ops_health` block always shows when it last ran and which steps (if any) failed on that run
   — content-free identifiers, same for every actor. Three consecutive nightly runs that each

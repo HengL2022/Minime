@@ -181,7 +181,8 @@ async function maskReviewPayload(item: any, actor: string): Promise<any> {
     if (
       raw.reason === "fuzzy_org_ambiguous" ||
       raw.reason === "low_confidence_edge" ||
-      raw.reason === "high_edge_extract_org"
+      raw.reason === "high_edge_extract_org" ||
+      raw.reason === "person_name_extract_org"
     ) {
       payload = { ...payload, reason: raw.reason };
     }

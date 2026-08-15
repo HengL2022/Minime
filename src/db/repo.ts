@@ -1483,6 +1483,10 @@ export function highEdgeExtractOrgFlagKey(orgId: string): string {
   return `high_edge_extract_org:${orgId}`;
 }
 
+export function extractPersonNamedOrgFlagKey(orgId: string): string {
+  return `person_name_extract_org:${orgId}`;
+}
+
 export async function retypeOrgToPerson(
   orgId: string,
   opts: { relation?: string | null; reason?: string } = {},
@@ -1635,7 +1639,10 @@ export async function retypeOrgToPerson(
       update review_queue
       set status = 'resolved', resolved_at = ${now()}
       where status = 'open' and kind = 'extract_suspect'
-        and payload ->> 'flag_key' = ${highEdgeExtractOrgFlagKey(orgId)}`;
+        and payload ->> 'flag_key' in (
+          ${highEdgeExtractOrgFlagKey(orgId)},
+          ${extractPersonNamedOrgFlagKey(orgId)}
+        )`;
 
     return { personId, orgId, created, edgesRepointed: edgesRepointed as number };
   });
@@ -5173,6 +5180,112 @@ export async function highEdgeExtractOrgRecentlyFlagged(orgId: string): Promise<
              - make_interval(days => ${HIGH_EDGE_EXTRACT_ORG_SUPPRESSION_DAYS}))
     limit 1`;
   return rows.length > 0;
+}
+
+export type PersonNameOrgMatchKind = "exact" | "first_token" | "possessive";
+
+export interface ExtractPersonNamedOrgCandidate {
+  org_id: string;
+  org_name: string;
+  match_kind: PersonNameOrgMatchKind;
+  people: { id: string; name: string }[];
+}
+
+function personNameOrgMatchKind(
+  rawKey: string,
+  strippedKey: string,
+  keyKind: string,
+): PersonNameOrgMatchKind {
+  if (rawKey !== strippedKey) return "possessive";
+  if (keyKind === "first_token") return "first_token";
+  return "exact";
+}
+
+export async function extractPersonNamedOrgCandidates(): Promise<ExtractPersonNamedOrgCandidate[]> {
+  const rows = (await db()`
+    with person_keys as (
+      select p.id as person_id, p.canonical_name as person_name,
+             lower(btrim(p.canonical_name)) as key, 'full'::text as key_kind
+      from people p
+      where p.superseded_at is null and p.tier in (1, 2) and btrim(p.canonical_name) <> ''
+      union
+      select p.id, p.canonical_name,
+             lower(split_part(btrim(p.canonical_name), ' ', 1)), 'first_token'
+      from people p
+      where p.superseded_at is null and p.tier in (1, 2)
+        and btrim(p.canonical_name) like '% %'
+        and length(split_part(btrim(p.canonical_name), ' ', 1)) >= 3
+      union
+      select p.id, p.canonical_name, lower(btrim(a.alias)), 'alias'
+      from person_aliases a
+      join people p on p.id = a.person_id
+      where p.superseded_at is null and a.tier in (1, 2) and p.tier in (1, 2)
+        and btrim(a.alias) <> ''
+    ),
+    orgs_norm as (
+      select o.id, o.canonical_name,
+             lower(btrim(o.canonical_name)) as raw_key,
+             lower(btrim(regexp_replace(o.canonical_name, '[''’]s$', '', 'i'))) as stripped_key
+      from orgs o
+      where o.created_by = 'system:extract'
+        and o.retired_at is null and o.superseded_at is null
+        and o.tier in (1, 2) and btrim(o.canonical_name) <> ''
+    )
+    select o.id as org_id, o.canonical_name as org_name, o.raw_key, o.stripped_key,
+           pk.person_id, pk.person_name, pk.key_kind
+    from orgs_norm o
+    join person_keys pk on pk.key = o.stripped_key and length(pk.key) >= 3
+    order by o.id, pk.person_id`) as any[];
+  return groupPersonNamedOrgRows(rows);
+}
+
+function groupPersonNamedOrgRows(rows: any[]): ExtractPersonNamedOrgCandidate[] {
+  const byOrg = new Map<string, ExtractPersonNamedOrgCandidate>();
+  for (const row of rows) {
+    const existing = byOrg.get(row.org_id);
+    const person = { id: String(row.person_id), name: String(row.person_name) };
+    const matchKind = personNameOrgMatchKind(
+      String(row.raw_key),
+      String(row.stripped_key),
+      String(row.key_kind),
+    );
+    if (!existing) {
+      byOrg.set(row.org_id, {
+        org_id: String(row.org_id),
+        org_name: String(row.org_name),
+        match_kind: matchKind,
+        people: [person],
+      });
+      continue;
+    }
+    if (!existing.people.some((p) => p.id === person.id)) existing.people.push(person);
+    if (matchKind === "possessive") existing.match_kind = "possessive";
+    else if (matchKind === "exact" && existing.match_kind === "first_token") {
+      existing.match_kind = "exact";
+    }
+  }
+  return [...byOrg.values()];
+}
+
+export async function flagExtractPersonNamedOrgs(): Promise<{ flagged: number; ids: string[] }> {
+  const ids: string[] = [];
+  for (const candidate of await extractPersonNamedOrgCandidates()) {
+    const flagKey = extractPersonNamedOrgFlagKey(candidate.org_id);
+    if (await reviewItemExists("extract_suspect", "flag_key", flagKey)) continue;
+    await insertReviewItem("extract_suspect", {
+      reason: "person_name_extract_org",
+      flag_key: flagKey,
+      match_kind: candidate.match_kind,
+      org: { type: "org", id: candidate.org_id, name: candidate.org_name },
+      matches: candidate.people.map((person) => ({
+        type: "person",
+        id: person.id,
+        name: person.name,
+      })),
+    });
+    ids.push(candidate.org_id);
+  }
+  return { flagged: ids.length, ids };
 }
 
 // -- W1 extractor re-validation (system-internal; NOT tier-gated — see personById precedent:
