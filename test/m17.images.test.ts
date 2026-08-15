@@ -10,6 +10,7 @@ import {
 import { describeRouteForTier } from "../src/llm";
 import { describeImage } from "../src/llm/describe";
 import { mockDescribe } from "../src/llm/mock-describe";
+import { DESCRIBE_TIMEOUT_MS } from "../src/llm/ollama";
 import { ollamaProvider } from "../src/llm/ollama";
 import { parseInboxSource, parseInboxSourceAsync } from "../src/pipeline/parse";
 import { inferImageKind, looksLikeImage, suggestedImageTier } from "../src/pipeline/parse/image";
@@ -75,6 +76,10 @@ describe("VLM routing", () => {
     } finally {
       config.vlmRouteTier2 = prev;
     }
+  });
+
+  test("describe keeps a longer wall-clock deadline than embed/classify", () => {
+    expect(DESCRIBE_TIMEOUT_MS).toBeGreaterThanOrEqual(300_000);
   });
 
   test("ollama describe posts images:[base64] when VLM_MODEL is set", async () => {
