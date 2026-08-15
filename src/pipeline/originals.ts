@@ -67,6 +67,24 @@ function originalRelativePath(hash: string, ext: string, year: number): string {
   return `files/${year}/${hash}${ext}`;
 }
 
+const SOURCE_FILE_RE = /^files\/\d{4}\/[a-f0-9]{64}\.[A-Za-z0-9.]{1,16}$/;
+
+export function isOriginalsRelativePath(value: string): boolean {
+  return SOURCE_FILE_RE.test(value);
+}
+
+/** Relative data/ path for a hashed inbox original. Null when identity is incomplete. */
+export function inboxOriginalRelativePath(item: OriginalsSource): string | null {
+  const hash = item.content_hash;
+  if (!hash || !/^[a-f0-9]{64}$/.test(hash)) return null;
+  const path = originalRelativePath(
+    hash,
+    originalExtension(item.raw_path),
+    originalYear(item.received_at),
+  );
+  return isOriginalsRelativePath(path) ? path : null;
+}
+
 function expectedHash(item: OriginalsSource, bytes: Uint8Array): string {
   const hash = item.content_hash;
   if (!hash || !/^[a-f0-9]{64}$/.test(hash) || sha256(bytes) !== hash)

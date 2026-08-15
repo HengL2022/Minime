@@ -44,6 +44,7 @@ import {
 } from "../util/atomic-file";
 import { auditPayload } from "../util/audit-payload";
 import { todayStr } from "../util/clock";
+import { withSourceFileFrontmatter } from "../util/compiled-note-archive";
 import { config } from "../util/config";
 import {
   CLASSIFIER_TYPES,
@@ -57,8 +58,8 @@ import {
   splitActionDecision,
 } from "./classify";
 import { findDuplicate } from "./dedup";
-import { type IntentPlan, planMixedIntents } from "./intents";
-import { storeInboxOriginal } from "./originals";
+import { type IntentPlan, resolveIntentPlan } from "./intents";
+import { inboxOriginalRelativePath, storeInboxOriginal } from "./originals";
 import { InboxParseError, type InboxParseResult, parseInboxSourceAsync } from "./parse";
 import { IMAGE_HINT_RE } from "./parse/image";
 import { type EntityPlan, planCaptureEntities, resolveEntityPlan } from "./segment";
@@ -227,7 +228,12 @@ function firstLineOf(text: string): string {
   return captureBodyFirstLine(text).slice(0, 200);
 }
 
-function noteProjection(c: Classification, text: string, inboxId: string): NoteProjection {
+function noteProjection(
+  c: Classification,
+  text: string,
+  inboxId: string,
+  sourceFile?: string,
+): NoteProjection {
   const firstLine = firstLineOf(text);
   const title = c.fields.title || firstLine;
   const slug =
@@ -237,9 +243,10 @@ function noteProjection(c: Classification, text: string, inboxId: string): NoteP
       .replace(/^-|-$/g, "")
       .slice(0, 60) || "note";
   const relPath = `inbox/${slug}--${inboxId}.md`;
+  const body = `# ${title}\n\n${text}`;
   return {
     absolutePath: join(config.dataDir, "brain", relPath),
-    body: `# ${title}\n\n${text}`,
+    body: sourceFile ? withSourceFileFrontmatter(body, sourceFile) : body,
   };
 }
 
@@ -281,12 +288,17 @@ export async function fileRow(
   inboxId: string,
   actor: string = ACTOR,
   plan?: EntityPlan,
-  intent?: { intentPlan?: IntentPlan; companionText?: string },
+  intent?: { intentPlan?: IntentPlan; companionText?: string; sourceFile?: string },
 ): Promise<FiledResult | "duplicate" | null> {
-  const result = await filePrimaryRow(c, text, inboxId, actor);
+  const result = await filePrimaryRow(c, text, inboxId, actor, intent?.sourceFile);
   if (!result || result === "duplicate") return result;
   const companionText = intent?.companionText ?? text;
-  const extraProjections = await fileCompanionIntents(inboxId, actor, intent?.intentPlan);
+  const extraProjections = await fileCompanionIntents(
+    inboxId,
+    actor,
+    intent?.intentPlan,
+    intent?.sourceFile,
+  );
   await fileCompanionEntities(
     c,
     companionText,
@@ -359,12 +371,13 @@ async function fileCompanionIntents(
   inboxId: string,
   actor: string,
   plan: IntentPlan | undefined,
+  sourceFile?: string,
 ): Promise<NoteProjection[]> {
   if (!plan || plan.kind !== "items") return [];
   const extras: { type: Classification["type"]; table: FiledTable; id: string }[] = [];
   const projections: NoteProjection[] = [];
   for (const item of plan.items.slice(1)) {
-    const filed = await filePrimaryRow(item.classification, item.text, inboxId, actor);
+    const filed = await filePrimaryRow(item.classification, item.text, inboxId, actor, sourceFile);
     if (!filed || filed === "duplicate") continue;
     extras.push({
       type: item.classification.type,
@@ -425,6 +438,7 @@ async function filePrimaryRow(
   text: string,
   inboxId: string,
   actor: string,
+  sourceFile?: string,
 ): Promise<FiledResult | "duplicate" | null> {
   const firstLine = firstLineOf(text);
   switch (c.type) {
@@ -667,7 +681,7 @@ async function filePrimaryRow(
       // agent-session capture down to tier 1.
       const pinned = c.fields.tier === 1 || c.fields.tier === 2 ? c.fields.tier : 1;
       const tier = Math.max(pinned, noteHintTier(text)) as 1 | 2;
-      const projection = noteProjection(c, text, inboxId);
+      const projection = noteProjection(c, text, inboxId, sourceFile);
       const relPath = relative(join(config.dataDir, "brain"), projection.absolutePath);
       const hash = sha256(projection.body);
       const { id } = await upsertPage({
@@ -701,7 +715,14 @@ async function reconcileFiledProjection(item: InboxItem, bytes: Uint8Array): Pro
   if (!c || c.type !== "note") return;
   const parsed = await tryParseInbox(item.raw_path, bytes);
   if (!parsed.ok) return;
-  await publishNoteProjection(noteProjection(c, parsed.result.markdown, item.id));
+  await publishNoteProjection(
+    noteProjection(
+      c,
+      parsed.result.markdown,
+      item.id,
+      inboxOriginalRelativePath(item) ?? undefined,
+    ),
+  );
 }
 
 type ParsedInbox = { ok: true; result: InboxParseResult } | { ok: false; error: InboxParseError };
@@ -762,10 +783,9 @@ async function classifyAndFileInbox(
   token: string,
   text: string,
 ): Promise<{ inboxId: string; filed: boolean }> {
-  // Intent plan is heuristic-only. Entity plan may call the classify provider
-  // before the claim transaction. A confident mixed-intent split files the
-  // first item as primary and does not unfile for an uncertain entity plan.
-  const intentPlan = planMixedIntents(text);
+  // Intent plan may call the classify provider (assumed tier 2) for narrative
+  // dumps. Prefixed dumps stay heuristic. Entity plan is unchanged.
+  const intentPlan = await resolveIntentPlan(text);
   const plan = await resolveEntityPlan(text);
   const c = await classificationForInbox(item, text, intentPlan, plan);
   await setInboxClassification(item.id, token, c);
@@ -777,6 +797,7 @@ async function classifyAndFileInbox(
       const result = await fileRow(c, primaryText, item.id, ACTOR, plan, {
         intentPlan,
         companionText: text,
+        sourceFile: inboxOriginalRelativePath(item) ?? undefined,
       });
       if (result === "duplicate") {
         await setInboxPendingClaimed(item.id, token, c);

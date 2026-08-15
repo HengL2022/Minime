@@ -29,6 +29,7 @@ export interface ParsedFrontmatter {
   title?: string;
   tier?: number;
   status?: string;
+  source_file?: string;
   body: string;
 }
 
@@ -152,21 +153,36 @@ export function classifyFrontmatterTier(md: string): FrontmatterTierClassificati
   return { kind: "invalid" };
 }
 
+const SOURCE_FILE_RE = /^files\/\d{4}\/[a-f0-9]{64}\.[A-Za-z0-9.]{1,16}$/;
+
 export function parseFrontmatterDocument(md: string): ParsedFrontmatter {
   const normalized = md.replace(/\r\n?/g, "\n");
   const parts = frontmatterParts(normalized);
   if (!parts) return { body: normalized };
   const out: ParsedFrontmatter = { body: parts.body };
   for (const line of parts.header.split("\n")) {
-    const match = line.match(/^(title|tier|status):\s*(.*)$/);
+    const match = line.match(/^(title|tier|status|source_file):\s*(.*)$/);
     if (!match) continue;
     const key = match[1]!;
     const value = parseScalar(match[2]!);
     if (key === "title") out.title = value;
     else if (key === "status") out.status = value;
-    else if (/^\d+$/.test(value)) out.tier = Number(value);
+    else if (key === "source_file") {
+      if (SOURCE_FILE_RE.test(value)) out.source_file = value;
+    } else if (/^\d+$/.test(value)) out.tier = Number(value);
   }
   return out;
+}
+
+/** Capture-filed notes only. Compiled archives stay title+tier. Invalid paths are ignored. */
+export function withSourceFileFrontmatter(body: string, sourceFile: string): string {
+  if (!SOURCE_FILE_RE.test(sourceFile)) return body;
+  const normalized = body.replace(/\r\n?/g, "\n");
+  const parts = frontmatterParts(normalized);
+  if (!parts) return `---\nsource_file: ${sourceFile}\n---\n${normalized}`;
+  const kept = parts.header.split("\n").filter((line) => !/^source_file:\s*/.test(line) && line);
+  kept.push(`source_file: ${sourceFile}`);
+  return `---\n${kept.join("\n")}\n---\n${parts.body}`;
 }
 
 export function renderCompiledNoteArchive(input: {

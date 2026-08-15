@@ -5,8 +5,8 @@
 **Status:** mitigated 2026-08-14 — deterministic companion split for confident
 legal-suffix / enumerated-company captures; first-class org/person capture types;
 LLM entity-plan fallback for suffix-less multi-name captures. Mixed-intent
-companions for strong line-prefix dumps shipped 2026-08-15. A model-driven
-1..N split of narrative dumps without prefixes remains out of scope.
+companions for strong line-prefix dumps shipped 2026-08-15. A fail-open
+narrative split (2–4 mixed intent classes, no prefixes) shipped 2026-08-15.
 
 ## Symptom
 
@@ -85,10 +85,8 @@ Tests: `test/segment.test.ts`, `test/multi-entity-capture.test.ts`.
 
 ## Still open
 
-1. **Model-driven mixed-intent split.** A narrative dump without line prefixes
-   (`todo:` / `met` / `note:` / …) still files one primary type. The 2026-08-15
-   heuristic only splits 2–4 strong mixed lines (or blank-line blocks). Changing
-   `inbox_items` to N `filed_id`s stays deferred.
+1. **Inbox cardinality.** `inbox_items` still has one `filed_id`. Companions
+   share `derived_from`. Changing that to N filed ids stays deferred.
 
 ## Shipped after the companion split
 
@@ -114,10 +112,17 @@ Tests: `test/segment.test.ts`, `test/multi-entity-capture.test.ts`.
    `journal:`, `decision:`/`decided`, `org:`/`person:`) files the first item as
    the inbox primary and leftover typed rows as companions (`derived_from` the
    inbox id, `inbox:split-intents`). Same-type lines, more than four mixed
-   lines, leading prose, and `minime_refile` do not auto-split. No LLM.
+   lines, leading prose, and `minime_refile` do not auto-split.
+5. **Narrative mixed-intent split (2026-08-15).** When the prefix heuristic is
+   silent and the dump has 2–4 blocks/sentences with at least two intent
+   classes (task / meeting / note / decision / journal), the classify provider
+   (assumed tier 2; mock uses a narrative heuristic) may split the same way.
+   Failure, junk, one type, or the supplier-style entity dump stays on the
+   single-classify path and does not unfile.
 
 ## Workaround (still useful)
 
 Capture **one entity per call** with an unambiguous first line when neither the
-legal-suffix cue nor the weaker multi-name cue will fire. Narrative mixed-intent
-dumps without line prefixes still need a split at the door.
+legal-suffix cue nor the weaker multi-name cue will fire. Prefixed or clearly
+mixed narrative dumps now split leftover typed rows; a single-intent paragraph
+still files one primary.
