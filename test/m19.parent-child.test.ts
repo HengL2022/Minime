@@ -63,7 +63,10 @@ describe("span write + envelope text", () => {
     const mine = hits.find((hit) => hit.parent_id === id);
     expect(mine).toBeDefined();
     expect(mine!.span_text).toBe(spans[0]!.text);
-    expect(snippet(mine!.span_text ?? mine!.text, "calibration window")).toContain("calibration");
+    expect(mine!.span_text).toContain("calibration window");
+    expect(
+      snippet("The calibration window closed early. Neighbors left.", "calibration"),
+    ).toContain("calibration");
   });
 
   test("rechunk rebuilds spans from the parent row", async () => {
@@ -76,10 +79,11 @@ describe("span write + envelope text", () => {
       source: "manual",
       tier: 1,
     });
-    await replaceChunks("page", id, ["legacy child without a span"], 1);
+    await replaceChunks("page", id, ["legacy child text about something else"], 1);
     const before = await testSql`
-      select span_id from chunks where parent_type = 'page' and parent_id = ${id}`;
-    expect(before[0]!.span_id).toBeNull();
+      select s.text as span_text from chunk_spans s
+      where s.parent_type = 'page' and s.parent_id = ${id}`;
+    expect(before[0]!.span_text).toContain("something else");
     const result = await rechunkAll();
     expect(result.parents).toBeGreaterThan(0);
     const after = await testSql`
@@ -88,5 +92,6 @@ describe("span write + envelope text", () => {
       where c.parent_type = 'page' and c.parent_id = ${id}`;
     expect(after).toHaveLength(1);
     expect(after[0]!.span_text).toContain("fictional kiln");
+    expect(after[0]!.span_text).not.toContain("something else");
   });
 });
